@@ -1,0 +1,372 @@
+<script setup lang="ts">
+/**
+ * 大盘概览：指数卡片 + 涨跌家数 + 成交额 + 市场温度计。
+ * 30 秒自动轮询（可暂停）。
+ */
+import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
+import { Pause, Play, RefreshCw, Thermometer, TrendingDown, TrendingUp } from 'lucide-vue-next'
+import VChart from 'vue-echarts'
+import { use } from 'echarts/core'
+import { CanvasRenderer } from 'echarts/renderers'
+import { BarChart, LineChart } from 'echarts/charts'
+import { GridComponent, TooltipComponent } from 'echarts/components'
+
+import { getAlerts, getIndexKline, getOverview, type MarketAlert, type MarketOverview } from '../api'
+import { useMarketStore } from '../stores/market'
+
+use([CanvasRenderer, BarChart, LineChart, GridComponent, TooltipComponent])
+
+const market = useMarketStore()
+
+const UP = '#F5222D'
+const DOWN = '#00B96B'
+
+const overview = ref<MarketOverview | null>(null)
+const alerts = ref<MarketAlert[]>([])
+const loading = ref(false)
+const autoRefresh = ref(true)
+let timer: number | undefined
+
+// 指数迷你走势（收盘价序列）
+const sparklines = reactive<Record<string, (number | null)[]>>({})
+
+async function load() {
+  loading.value = true
+  try {
+    overview.value = await getOverview()
+    market.trading = overview.value.trading
+    // 拉取各指数迷你走势（前 4 个主要指数）
+    for (const idx of overview.value.indices.slice(0, 4)) {
+      try {
+        const data = await getIndexKline(idx.symbol, 60)
+        sparklines[idx.symbol] = data.closes
+      } catch {
+        sparklines[idx.symbol] = []
+      }
+    }
+    // 拉取最近异动（调度器检测结果）
+    try {
+      const alertData = await getAlerts(20)
+      alerts.value = alertData.alerts
+    } catch {
+      alerts.value = []
+    }
+  } finally {
+    loading.value = false
+  }
+}
+
+function alertTone(type: string): string {
+  if (type === '涨停' || type === '急涨') return 'text-up'
+  if (type === '跌停' || type === '急跌') return 'text-down'
+  return 'text-warn'
+}
+
+function alertBadgeClass(type: string): string {
+  if (type === '涨停' || type === '急涨') return 'border-up/40 bg-up/10 text-up'
+  if (type === '跌停' || type === '急跌') return 'border-down/40 bg-down/10 text-down'
+  return 'border-warn/40 bg-warn/10 text-warn'
+}
+
+function toggleAuto() {
+  autoRefresh.value = !autoRefresh.value
+  if (autoRefresh.value) {
+    timer = window.setInterval(() => load(), 30000)
+  } else if (timer) {
+    window.clearInterval(timer)
+  }
+}
+
+onMounted(() => {
+  load()
+  if (autoRefresh.value) {
+    timer = window.setInterval(() => load(), 30000)
+  }
+})
+onUnmounted(() => {
+  if (timer) window.clearInterval(timer)
+})
+
+// ---------------- 格式化 ----------------
+function fmtAmount(yuan: number): string {
+  if (yuan >= 1e12) return `${(yuan / 1e12).toFixed(2)} 万亿`
+  if (yuan >= 1e8) return `${(yuan / 1e8).toFixed(0)} 亿`
+  return `${(yuan / 1e4).toFixed(0)} 万`
+}
+
+function fmtPct(pct: number | null): string {
+  return pct === null ? '--' : `${pct > 0 ? '+' : ''}${pct.toFixed(2)}%`
+}
+
+function tone(pct: number | null): 'up' | 'down' | 'neutral' {
+  if (pct === null || pct === 0) return 'neutral'
+  return pct > 0 ? 'up' : 'down'
+}
+
+function tempLabel(temp: number): string {
+  if (temp >= 70) return '偏热'
+  if (temp >= 55) return '偏强'
+  if (temp >= 45) return '中性'
+  if (temp >= 30) return '偏弱'
+  return '偏冷'
+}
+
+// 迷你走势 option
+function sparkOption(data: (number | null)[]) {
+  return {
+    animation: false,
+    grid: { left: 0, right: 0, top: 4, bottom: 0 },
+    xAxis: { type: 'category', show: false },
+    yAxis: { type: 'value', show: false, min: (v: { min: number }) => v.min * 0.998 },
+    series: [
+      {
+        type: 'line',
+        data,
+        smooth: true,
+        symbol: 'none',
+        lineStyle: { width: 1.5, color: '#38BDF8' },
+        areaStyle: {
+          color: {
+            type: 'linear',
+            x: 0,
+            y: 0,
+            x2: 0,
+            y2: 1,
+            colorStops: [
+              { offset: 0, color: 'rgba(56,189,248,0.25)' },
+              { offset: 1, color: 'rgba(56,189,248,0)' },
+            ],
+          },
+        },
+      },
+    ],
+  }
+}
+
+// 涨跌家数条形图 option
+const breadthOption = computed(() => {
+  const b = overview.value?.breadth
+  if (!b) return {}
+  return {
+    animation: false,
+    grid: { left: 60, right: 30, top: 10, bottom: 20 },
+    tooltip: {
+      trigger: 'axis',
+      backgroundColor: '#111A2E',
+      borderColor: '#243354',
+      textStyle: { color: '#E6EDF7', fontSize: 12 },
+    },
+    xAxis: {
+      type: 'value',
+      axisLabel: { color: '#5C6B85', fontSize: 10 },
+      splitLine: { lineStyle: { color: 'rgba(36,51,84,0.6)' } },
+    },
+    yAxis: {
+      type: 'category',
+      data: ['跌停', '下跌', '平盘', '上涨', '涨停'],
+      axisLabel: { color: '#8B9BB4', fontSize: 11 },
+    },
+    series: [
+      {
+        type: 'bar',
+        data: [
+          { value: b.limit_down, itemStyle: { color: DOWN } },
+          { value: b.down, itemStyle: { color: 'rgba(0,185,107,0.55)' } },
+          { value: b.flat, itemStyle: { color: '#5C6B85' } },
+          { value: b.up, itemStyle: { color: 'rgba(245,34,45,0.55)' } },
+          { value: b.limit_up, itemStyle: { color: UP } },
+        ],
+        barWidth: 14,
+        label: { show: true, position: 'right', color: '#E6EDF7', fontSize: 11 },
+      },
+    ],
+  }
+})
+</script>
+
+<template>
+  <div class="space-y-5">
+    <!-- 操作栏 -->
+    <div class="flex items-center justify-between">
+      <div class="flex items-center gap-2 text-[12px] text-content-faint">
+        <span v-if="overview">数据更新于 {{ overview.updated_at }}</span>
+      </div>
+      <div class="flex items-center gap-2">
+        <button
+          class="flex items-center gap-1.5 rounded-lg border border-base-600 px-3 py-1.5 text-[12px] text-content-muted transition-colors hover:border-primary/50 hover:text-primary-light"
+          @click="toggleAuto"
+        >
+          <Pause v-if="autoRefresh" class="h-3.5 w-3.5" />
+          <Play v-else class="h-3.5 w-3.5" />
+          {{ autoRefresh ? '暂停轮询' : '开启轮询' }}
+        </button>
+        <button
+          class="flex items-center gap-1.5 rounded-lg border border-base-600 px-3 py-1.5 text-[12px] text-content-muted transition-colors hover:border-primary/50 hover:text-primary-light"
+          :class="loading ? 'animate-spin' : ''"
+          @click="load()"
+        >
+          <RefreshCw class="h-3.5 w-3.5" />
+          刷新
+        </button>
+      </div>
+    </div>
+
+    <!-- 指数卡片 -->
+    <div class="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
+      <div
+        v-for="idx in overview?.indices ?? []"
+        :key="idx.symbol"
+        class="glass-card p-4"
+      >
+        <div class="flex items-start justify-between">
+          <div>
+            <div class="text-[12px] text-content-muted">{{ idx.name }}</div>
+            <div
+              class="font-num mt-1 text-[26px] font-semibold leading-none"
+              :class="{
+                'text-up': tone(idx.pct_change) === 'up',
+                'text-down': tone(idx.pct_change) === 'down',
+                'text-content': tone(idx.pct_change) === 'neutral',
+              }"
+            >
+              {{ idx.price?.toFixed(2) ?? '--' }}
+            </div>
+            <div
+              class="font-num mt-1.5 flex items-center gap-2 text-[13px]"
+              :class="{
+                'text-up': tone(idx.pct_change) === 'up',
+                'text-down': tone(idx.pct_change) === 'down',
+                'text-content-muted': tone(idx.pct_change) === 'neutral',
+              }"
+            >
+              <component :is="tone(idx.pct_change) === 'down' ? TrendingDown : TrendingUp" class="h-3.5 w-3.5" />
+              {{ fmtPct(idx.pct_change) }}
+              <span class="text-content-faint">
+                {{ idx.change !== null ? (idx.change > 0 ? '+' : '') + idx.change.toFixed(2) : '' }}
+              </span>
+            </div>
+          </div>
+          <div class="h-12 w-28">
+            <v-chart :option="sparkOption(sparklines[idx.symbol] ?? [])" style="height: 48px" autoresize />
+          </div>
+        </div>
+        <div class="mt-3 border-t border-base-600/50 pt-2 text-[11px] text-content-faint">
+          成交额 {{ fmtAmount(idx.amount ?? 0) }}
+        </div>
+      </div>
+    </div>
+
+    <!-- 市场宽度 + 温度 -->
+    <div class="grid grid-cols-1 gap-4 xl:grid-cols-3">
+      <!-- 涨跌家数 -->
+      <div class="glass-card p-5 xl:col-span-2">
+        <div class="mb-3 flex items-center justify-between">
+          <h3 class="text-subheading">涨跌家数</h3>
+          <span class="text-[11px] text-content-faint">共 {{ overview?.breadth.total ?? 0 }} 只</span>
+        </div>
+        <v-chart v-if="overview" :option="breadthOption" style="height: 200px" autoresize />
+      </div>
+
+      <!-- 市场温度计 -->
+      <div class="glass-card flex flex-col items-center justify-center p-5">
+        <div class="mb-2 flex items-center gap-2 text-content-muted">
+          <Thermometer class="h-4 w-4" />
+          <h3 class="text-subheading">市场温度</h3>
+        </div>
+        <div class="relative flex h-32 w-32 items-center justify-center">
+          <svg viewBox="0 0 120 120" class="h-full w-full -rotate-90">
+            <circle cx="60" cy="60" r="52" fill="none" stroke="#1A2540" stroke-width="10" />
+            <circle
+              cx="60"
+              cy="60"
+              r="52"
+              fill="none"
+              :stroke="(overview?.temperature ?? 50) >= 55 ? UP : DOWN"
+              stroke-width="10"
+              stroke-linecap="round"
+              :stroke-dasharray="`${((overview?.temperature ?? 50) / 100) * 327} 327`"
+              class="transition-all duration-700"
+            />
+          </svg>
+          <div class="absolute flex flex-col items-center">
+            <span class="font-num text-[28px] font-semibold text-content">
+              {{ overview?.temperature?.toFixed(1) ?? '--' }}
+            </span>
+            <span class="text-[11px] text-content-muted">{{ tempLabel(overview?.temperature ?? 50) }}</span>
+          </div>
+        </div>
+        <div class="mt-4 grid w-full grid-cols-2 gap-2 text-center text-[11px]">
+          <div class="rounded-lg bg-base-700/60 p-2">
+            <div class="font-num text-[15px] font-semibold text-up">{{ overview?.breadth.limit_up ?? 0 }}</div>
+            <div class="text-content-faint">涨停</div>
+          </div>
+          <div class="rounded-lg bg-base-700/60 p-2">
+            <div class="font-num text-[15px] font-semibold text-down">{{ overview?.breadth.limit_down ?? 0 }}</div>
+            <div class="text-content-faint">跌停</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 成交额汇总 -->
+    <div class="glass-card flex flex-wrap items-center justify-between gap-4 p-5">
+      <div>
+        <div class="text-[12px] text-content-muted">全市场成交额</div>
+        <div class="font-num mt-1 text-[24px] font-semibold text-content">
+          {{ fmtAmount(overview?.total_amount ?? 0) }}
+        </div>
+      </div>
+      <div class="text-right text-[11px] leading-relaxed text-content-faint">
+        <div>
+          上涨 {{ overview?.breadth.up ?? 0 }} · 下跌 {{ overview?.breadth.down ?? 0 }} · 平盘
+          {{ overview?.breadth.flat ?? 0 }}
+        </div>
+        <div>温度 = 上涨占比 × 60 + 涨停占比(封顶5%) × 40</div>
+      </div>
+    </div>
+
+    <!-- 异动提醒（调度器实时检测，新→旧） -->
+    <div class="glass-card p-5">
+      <div class="mb-3 flex items-center justify-between">
+        <div class="flex items-center gap-2">
+          <h3 class="text-subheading">异动提醒</h3>
+          <span class="rounded-md border border-base-600 px-2 py-0.5 text-[10px] text-content-faint">
+            涨跌停 / 放量突破 / 急涨急跌
+          </span>
+        </div>
+        <span class="text-[11px] text-content-faint">最近 {{ alerts.length }} 条</span>
+      </div>
+
+      <div v-if="alerts.length > 0" class="grid grid-cols-1 gap-2 md:grid-cols-2 xl:grid-cols-3">
+        <div
+          v-for="(alert, i) in alerts"
+          :key="i"
+          class="flex items-center justify-between rounded-lg border border-base-600/50 bg-base-700/30 p-3 transition-colors hover:border-primary/40"
+        >
+          <div class="flex items-center gap-3">
+            <span class="rounded-md border px-2 py-0.5 text-[11px] font-medium" :class="alertBadgeClass(alert.type)">
+              {{ alert.type }}
+            </span>
+            <div>
+              <div class="text-[13px] font-medium text-content">{{ alert.name }}</div>
+              <div class="font-num text-[11px] text-content-faint">{{ alert.code }}</div>
+            </div>
+          </div>
+          <div class="text-right">
+            <div class="font-num text-[14px] font-semibold" :class="alertTone(alert.type)">
+              {{ alert.pct_change > 0 ? '+' : '' }}{{ alert.pct_change.toFixed(2) }}%
+            </div>
+            <div class="font-num text-[10px] text-content-faint">
+              {{ alert.time }}<span v-if="alert.volume_ratio"> · 量比 {{ alert.volume_ratio.toFixed(1) }}</span>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div v-else class="flex flex-col items-center gap-2 py-8 text-content-faint">
+        <p class="text-[13px]">暂无异动记录</p>
+        <p class="text-[11px]">调度器每 5 分钟检测一次（需后端运行且处于数据可达网络）</p>
+      </div>
+    </div>
+  </div>
+</template>

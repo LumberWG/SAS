@@ -1,0 +1,99 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ============ 设计令牌（深色金融仪表盘） ============ */
+@layer base {
+  :root {
+    --background: #0b1220;
+    --card: #111a2e;
+    --elevated: #1a2540;
+    --border: #243354;
+    --content: #e6edf7;
+    --content-muted: #8b9bb4;
+    --content-faint: #5c6b85;
+    --primary: #2563eb;
+    --primary-light: #38bdf8;
+    --up: #f5222d;   /* A股红涨 */
+    --down: #00b96b; /* A股绿跌 */
+    --warn: #faad14;
+    --accent: #722ed1;
+  }
+
+  html,
+  body,
+  #app {
+    height: 100%;
+  }
+
+  body {
+    @apply bg-base-900 text-content font-sans text-body antialiased;
+    background-image:
+      radial-gradient(ellipse 80% 50% at 50% -20%, rgba(37, 99, 235, 0.12), transparent),
+      radial-gradient(ellipse 60% 40% at 90% 100%, rgba(56, 189, 248, 0.06), transparent);
+    background-attachment: fixed;
+  }
+
+  /* 数字统一等宽，避免表格跳动 */
+  .font-num {
+    @apply font-mono tabular-nums tracking-tight;
+  }
+
+  /* 滚动条 */
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  ::-webkit-scrollbar-thumb {
+    @apply rounded-full bg-base-600;
+  }
+  ::-webkit-scrollbar-track {
+    background: transparent;
+  }
+}
+
+@layer components {
+  /* 玻璃拟态卡片 */
+  .glass-card {
+    @apply rounded-xl border border-base-600/60 bg-base-800/70 backdrop-blur-md;
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.04),
+      0 4px 24px rgba(0, 0, 0, 0.35);
+    transition:
+      transform 0.25s ease,
+      border-color 0.25s ease,
+      box-shadow 0.25s ease;
+  }
+
+  .glass-card:hover {
+    @apply border-primary/40;
+    transform: translateY(-2px);
+    box-shadow:
+      inset 0 1px 0 rgba(255, 255, 255, 0.06),
+      0 8px 32px rgba(37, 99, 235, 0.18);
+  }
+
+  /* 涨跌闪烁高亮 */
+  .flash-up {
+    animation: flashUp 0.8s ease-out;
+  }
+  .flash-down {
+    animation: flashDown 0.8s ease-out;
+  }
+  @keyframes flashUp {
+    0% {
+      background-color: rgba(245, 34, 45, 0.25);
+    }
+    100% {
+      background-color: transparent;
+    }
+  }
+  @keyframes flashDown {
+    0% {
+      background-color: rgba(0, 185, 107, 0.25);
+    }
+    100% {
+      background-color: transparent;
+    }
+  }
+}
