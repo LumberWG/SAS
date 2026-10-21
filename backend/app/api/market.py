@@ -73,8 +73,13 @@ def _with_disclaimer(data: dict) -> dict:
 def market_overview() -> dict:
     """大盘概览：主要指数 + 涨跌家数 + 成交额 + 市场温度。"""
     try:
-        indices_df = snapshot_store.get_indices()
-        snapshot = snapshot_store.get_snapshot()
+        # 快照刷新去重后最长等待 20 秒；超时返回 503，前端轮询恢复
+        indices_df = snapshot_store.get_indices(wait_timeout=20.0)
+        snapshot = snapshot_store.get_snapshot(wait_timeout=20.0)
+    except TimeoutError as exc:
+        raise HTTPException(
+            status_code=503, detail="行情数据刷新中，请稍后重试"
+        ) from exc
     except Exception as exc:  # noqa: BLE001
         logger.exception("获取大盘概览失败")
         raise HTTPException(status_code=502, detail=f"数据源异常: {exc}") from exc

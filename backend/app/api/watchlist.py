@@ -17,13 +17,19 @@ router = APIRouter(prefix="/watchlist", tags=["自选股"])
 
 @router.get("")
 async def list_watchlist() -> dict:
-    """自选股列表（合并实时行情）。"""
+    """自选股列表（合并实时行情）。
+
+    行情合并有 15 秒超时保护：快照正在全量刷新（约 90 秒）时
+    降级为静态列表（价格显示 --），避免列表接口被拖死。
+    """
     items = await asyncio.to_thread(db.list_watchlist)
 
-    # 合并实时快照（失败时仅返回静态列表）
+    # 合并实时快照（超时/失败时仅返回静态列表）
     snapshot_map: dict[str, dict] = {}
     try:
-        snapshot = await asyncio.to_thread(snapshot_store.get_snapshot)
+        snapshot = await asyncio.wait_for(
+            asyncio.to_thread(snapshot_store.get_snapshot), timeout=15.0
+        )
         for row in snapshot.itertuples():
             snapshot_map[row.code] = {
                 "price": None if pd_isna(row.price) else float(row.price),
@@ -31,7 +37,7 @@ async def list_watchlist() -> dict:
                 "amount": None if pd_isna(row.amount) else float(row.amount),
             }
     except Exception as exc:  # noqa: BLE001
-        logger.warning("自选股行情合并失败: %s", exc)
+        logger.warning("自选股行情合并跳过（%s），返回静态列表", exc)
 
     for item in items:
         quote = snapshot_map.get(item["code"], {})

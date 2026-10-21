@@ -2,14 +2,17 @@
 /**
  * 个股详情：K线图 + 指标面板 + LLM 决策仪表盘。
  */
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
-import { CheckCircle2, AlertTriangle, XCircle, Sparkles } from 'lucide-vue-next'
+import { CheckCircle2, AlertTriangle, XCircle, Sparkles, Star } from 'lucide-vue-next'
 
 import {
+  addWatch,
   analyzeStock,
   getStockKline,
   getStockQuote,
+  getWatchlist,
+  removeWatch,
   type DecisionDashboard,
   type StockQuote,
 } from '../api'
@@ -23,6 +26,9 @@ const quote = ref<StockQuote | null>(null)
 const kline = ref<{ dates: string[]; kline: number[][]; volumes: number[] } | null>(null)
 const dashboard = ref<DecisionDashboard | null>(null)
 const analyzing = ref(false)
+const inWatchlist = ref(false)     // 是否已在自选股
+const watchToggling = ref(false)  // 按钮防重复点击
+const watchMsg = ref('')          // 操作反馈
 
 async function loadKline() {
   const data = await getStockKline(code.value, 120)
@@ -48,8 +54,51 @@ async function loadAnalysis() {
   }
 }
 
+/** 查询当前股票是否已在自选股（按钮状态）。 */
+async function loadWatchStatus() {
+  try {
+    const { items } = await getWatchlist()
+    inWatchlist.value = items.some((w) => w.code === code.value)
+  } catch {
+    inWatchlist.value = false
+  }
+}
+
+/** 加入/移除自选股。 */
+async function toggleWatch() {
+  watchToggling.value = true
+  watchMsg.value = ''
+  try {
+    if (inWatchlist.value) {
+      await removeWatch(code.value)
+      inWatchlist.value = false
+      watchMsg.value = '已移除自选'
+    } else {
+      await addWatch(code.value)
+      inWatchlist.value = true
+      watchMsg.value = '已加入自选'
+    }
+  } catch (e: unknown) {
+    const detail = (e as { response?: { data?: { detail?: string } } })?.response
+      ?.data?.detail
+    // 409 = 已在自选股中，同步按钮状态
+    if ((e as { response?: { status?: number } })?.response?.status === 409) {
+      inWatchlist.value = true
+    }
+    watchMsg.value = detail ?? '操作失败'
+  } finally {
+    watchToggling.value = false
+  }
+}
+
 onMounted(async () => {
-  await Promise.all([loadKline(), loadQuote(), loadAnalysis()])
+  await Promise.all([loadKline(), loadQuote(), loadAnalysis(), loadWatchStatus()])
+})
+
+// 同组件内切换股票（路由参数变化）时重新加载全部数据
+watch(code, async () => {
+  watchMsg.value = ''
+  await Promise.all([loadKline(), loadQuote(), loadAnalysis(), loadWatchStatus()])
 })
 
 const pctTone = computed(() => {
@@ -75,21 +124,38 @@ function statusColor(status: string) {
   <div class="space-y-5">
     <!-- 股票头部信息 -->
     <div class="glass-card flex flex-wrap items-center justify-between gap-4 p-5">
-      <div class="flex items-center gap-5">
-        <div>
-          <div class="flex items-center gap-2.5">
-            <h2 class="text-[22px] font-semibold text-content">{{ quote?.name ?? code }}</h2>
-            <span class="font-num rounded-md bg-base-700 px-2 py-0.5 text-[12px] text-content-muted">{{ code }}</span>
-          </div>
-          <div class="mt-2 flex items-baseline gap-3">
-            <span class="font-num text-[32px] font-bold leading-none" :class="pctTone">
-              {{ quote?.price?.toFixed(2) ?? '--' }}
-            </span>
-            <span class="font-num text-[15px]" :class="pctTone">
-              {{ quote?.pct_change != null ? (quote.pct_change > 0 ? '+' : '') + quote.pct_change.toFixed(2) + '%' : '--' }}
-            </span>
+      <div class="flex flex-wrap items-center justify-between gap-4">
+        <div class="flex items-center gap-5">
+          <div>
+            <div class="flex items-center gap-2.5">
+              <h2 class="text-[22px] font-semibold text-content">{{ quote?.name ?? code }}</h2>
+              <span class="font-num rounded-md bg-base-700 px-2 py-0.5 text-[12px] text-content-muted">{{ code }}</span>
+            </div>
+            <div class="mt-2 flex items-baseline gap-3">
+              <span class="font-num text-[32px] font-bold leading-none" :class="pctTone">
+                {{ quote?.price?.toFixed(2) ?? '--' }}
+              </span>
+              <span class="font-num text-[15px]" :class="pctTone">
+                {{ quote?.pct_change != null ? (quote.pct_change > 0 ? '+' : '') + quote.pct_change.toFixed(2) + '%' : '--' }}
+              </span>
+              <span v-if="watchMsg" class="text-[11px] text-content-faint">{{ watchMsg }}</span>
+            </div>
           </div>
         </div>
+        <!-- 加入/移除自选股 -->
+        <button
+          class="flex items-center gap-2 rounded-lg border px-4 py-2 text-[13px] font-medium transition-all disabled:cursor-not-allowed disabled:opacity-50"
+          :class="
+            inWatchlist
+              ? 'border-warn/50 bg-warn/10 text-warn hover:bg-warn/20'
+              : 'border-base-600 text-content-muted hover:border-warn/50 hover:text-warn'
+          "
+          :disabled="watchToggling"
+          @click="toggleWatch"
+        >
+          <Star class="h-4 w-4" :class="inWatchlist ? 'fill-warn' : ''" />
+          {{ inWatchlist ? '已自选' : '加入自选' }}
+        </button>
       </div>
       <div class="grid grid-cols-2 gap-x-8 gap-y-2 text-[12px] sm:grid-cols-4">
         <div><div class="text-content-faint">今开</div><div class="font-num text-content">{{ quote?.open?.toFixed(2) ?? '--' }}</div></div>

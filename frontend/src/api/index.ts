@@ -338,4 +338,16 @@ export interface WatchItem {
   pct_change?: number | null
 }
 
+export function getWatchlist(): Promise<{ items: WatchItem[] }> {
+  return http.get('/watchlist').then((r) => r.data)
+}
+
+export function addWatch(code: string): Promise<{ added: boolean }> {
+  return http.post(`/watchlist/${code}`).then((r) => r.data)
+}
+
+export function removeWatch(code: string): Promise<{ removed: boolean }> {
+  return http.delete(`/watchlist/${code}`).then((r) => r.data)
+}
+
 export default http

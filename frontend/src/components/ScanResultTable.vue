@@ -3,7 +3,7 @@
  * 扫描结果表：增强列（涨跌幅/量比/成交额）+ 表头排序 + 策略筛选 + CSV 导出。
  */
 import { computed, ref } from 'vue'
-import { ArrowDown, ArrowUp, Download } from 'lucide-vue-next'
+import { ArrowDown, ArrowUp, Download, Star } from 'lucide-vue-next'
 
 import type { ScanHit } from '../api'
 
@@ -11,7 +11,10 @@ const props = defineProps<{
   hits: ScanHit[]
 }>()
 
-const emit = defineEmits<{ goDetail: [ScanHit] }>()
+const emit = defineEmits<{
+  goDetail: [ScanHit]
+  addWatch: [ScanHit]
+}>()
 
 type SortKey = 'price' | 'pct' | 'vol_ratio' | 'amount'
 const sortKey = ref<SortKey>('pct')
@@ -122,6 +125,7 @@ function exportCsv() {
           <tr class="border-b border-base-600/60">
             <th class="px-4 py-2.5 font-medium">代码</th>
             <th class="px-4 py-2.5 font-medium">名称</th>
+            <th class="px-1 py-2.5 font-medium" title="加入自选股">自选</th>
             <th class="cursor-pointer px-4 py-2.5 text-right font-medium hover:text-content" @click="toggleSort('price')">
               最新价
               <component :is="sortIcon('price')" v-if="sortIcon('price')" class="inline h-3 w-3" />
@@ -153,6 +157,15 @@ function exportCsv() {
           >
             <td class="font-num px-4 py-2.5 text-content-muted">{{ hit.code }}</td>
             <td class="px-4 py-2.5 font-medium text-content">{{ hit.name }}</td>
+            <td class="px-1 py-2.5">
+              <button
+                class="rounded p-1 text-content-faint transition-colors hover:text-warn"
+                title="加入自选股"
+                @click.stop="emit('addWatch', hit)"
+              >
+                <Star class="h-3.5 w-3.5" />
+              </button>
+            </td>
             <td class="font-num px-4 py-2.5 text-right text-content">{{ hit.price?.toFixed(2) }}</td>
             <td class="font-num px-4 py-2.5 text-right font-medium" :class="pctClass(hit.extra?.pct_change)">
               {{ fmtPct(hit.extra?.pct_change) }}

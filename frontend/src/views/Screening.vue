@@ -8,6 +8,7 @@ import { useRouter } from 'vue-router'
 import { Clock, Play, Search, Square, TrendingUp } from 'lucide-vue-next'
 
 import {
+  addWatch,
   getLatestScan,
   getScanTask,
   getStrategies,
@@ -107,6 +108,32 @@ onUnmounted(stopPolling)
 
 function goDetail(hit: ScanHit) {
   router.push(`/stock/${hit.code}`)
+}
+
+/** 从扫描结果直接加自选（409=已在自选股中，均给出反馈）。 */
+async function addToWatch(hit: ScanHit) {
+  try {
+    await addWatch(hit.code)
+    toast(`已将 ${hit.name} 加入自选`)
+  } catch (e: unknown) {
+    const status = (e as { response?: { status?: number } })?.response?.status
+    const detail = (e as { response?: { data?: { detail?: string } } })?.response
+      ?.data?.detail
+    if (status === 409) {
+      toast(`${hit.name} 已在自选股中`)
+    } else {
+      toast(detail ?? '添加自选失败')
+    }
+  }
+}
+
+// 轻量操作反馈（避免引入完整 toast 组件）
+const toastMsg = ref('')
+let toastTimer: number | undefined
+function toast(msg: string) {
+  toastMsg.value = msg
+  if (toastTimer) window.clearTimeout(toastTimer)
+  toastTimer = window.setTimeout(() => (toastMsg.value = ''), 2500)
 }
 
 function fmtDuration(seconds: number | null): string {
@@ -220,7 +247,16 @@ onMounted(async () => {
         v-if="task && task.hits.length > 0"
         :hits="task.hits"
         @go-detail="goDetail"
+        @add-watch="addToWatch"
       />
+
+      <!-- 轻量 toast 反馈 -->
+      <div
+        v-if="toastMsg"
+        class="fixed bottom-6 left-1/2 z-50 -translate-x-1/2 rounded-lg border border-primary/40 bg-base-800/95 px-4 py-2 text-[13px] text-content shadow-card backdrop-blur"
+      >
+        {{ toastMsg }}
+      </div>
 
       <!-- 空状态 -->
       <div v-else class="glass-card flex min-h-0 flex-1 flex-col items-center justify-center gap-3 text-content-faint">

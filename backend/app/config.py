@@ -39,6 +39,9 @@ class Settings(BaseSettings):
     fetch_retries: int = 2
     # HTTP 请求超时（秒）
     request_timeout: float = 15.0
+    # 实时快照内存缓存 TTL（秒）。全量刷新一次约 90 秒，
+    # TTL 内所有接口共享缓存；过期后由单线程刷新，其余并发请求等待。
+    snapshot_ttl: float = 30.0
     # 国内数据源直连：系统代理（如 Clash）不可用或拒绝国内站点时，
     # 将数据源域名加入 NO_PROXY 绕过代理（LLM 等海外服务不受影响）
     data_direct_only: bool = True
