@@ -21,6 +21,13 @@ export interface IndexQuote {
   amount: number | null
 }
 
+export interface Sentiment {
+  level: string
+  weight: number
+  advice: string
+  temperature: number
+}
+
 export interface MarketOverview {
   updated_at: string
   trading: boolean
@@ -35,6 +42,7 @@ export interface MarketOverview {
   }
   total_amount: number
   temperature: number
+  sentiment: Sentiment
 }
 
 export interface KlineData {
@@ -91,11 +99,34 @@ export function getStockQuote(code: string): Promise<StockQuote> {
 
 // ==================== 选股 ====================
 
+export interface ParamSpec {
+  type: 'int' | 'float' | 'bool' | 'select'
+  default: number | boolean | string
+  label: string
+  min?: number | null
+  max?: number | null
+  step?: number | null
+  unit?: string
+  options?: [string, string][] | null
+}
+
 export interface StrategyInfo {
   name: string
   description: string
   category: string
   min_bars: number
+  custom: boolean
+  parameters: Record<string, ParamSpec>
+}
+
+export interface StrategyDetail {
+  name: string
+  description: string
+  category: string
+  min_bars: number
+  custom: boolean
+  custom_meta: { base: string; params: Record<string, unknown> } | null
+  parameters: Record<string, ParamSpec>
 }
 
 export interface ScanHit {
@@ -114,6 +145,7 @@ export interface ScanTask {
   task_id: string
   status: 'pending' | 'running' | 'done' | 'error'
   strategies: string[]
+  scope: string
   total: number
   scanned: number
   progress: number
@@ -122,14 +154,33 @@ export interface ScanTask {
   hits: ScanHit[]
   started_at: string
   finished_at: string
+  duration: number | null
+  sentiment: Sentiment | null
 }
 
-export function getStrategies(): Promise<StrategyInfo[]> {
-  return http.get('/screening/strategies').then((r) => r.data.strategies)
+export interface ScanScope {
+  key: string
+  label: string
 }
 
-export function startScan(strategies: string[], codes?: string[]): Promise<{ task_id: string }> {
-  return http.post('/screening/scan', { strategies, codes }).then((r) => r.data)
+export function getStrategies(): Promise<{
+  strategies: StrategyInfo[]
+  today_hits: Record<string, number>
+  scopes: ScanScope[]
+}> {
+  return http.get('/screening/strategies').then((r) => r.data)
+}
+
+export function startScan(
+  strategies: string[],
+  codes?: string[],
+  scope = 'all'
+): Promise<{ task_id: string }> {
+  return http.post('/screening/scan', { strategies, codes, scope }).then((r) => r.data)
+}
+
+export function getLatestScan(): Promise<{ task: ScanTask | null }> {
+  return http.get('/screening/scan/latest').then((r) => r.data)
 }
 
 export function getScanTask(taskId: string): Promise<ScanTask> {
@@ -230,6 +281,21 @@ export function getAlerts(
   return http.get('/monitor/alerts', { params: { limit } }).then((r) => r.data)
 }
 
+// ==================== 策略管理（参数编辑 / 自定义策略） ====================
+
+export function createCustomStrategy(payload: {
+  name: string
+  base_strategy: string
+  params: Record<string, unknown>
+  description?: string
+}): Promise<{ created: boolean; name: string }> {
+  return http.post('/strategies/custom', payload).then((r) => r.data)
+}
+
+export function deleteCustomStrategy(name: string): Promise<{ deleted: boolean }> {
+  return http.delete(`/strategies/custom/${encodeURIComponent(name)}`).then((r) => r.data)
+}
+
 // ==================== LLM 分析 ====================
 export interface ChecklistItem {
   label: string
@@ -249,6 +315,7 @@ export interface DecisionDashboard {
   model: string
   degraded: boolean
   generated_at: string
+  sentiment: Sentiment | null
 }
 
 export function getAnalysisStatus(): Promise<{ llm_available: boolean; model: string }> {

@@ -4,13 +4,21 @@
 输入含行情+指标的 DataFrame，输出 Signal 或 None。
 选股扫描器与回测引擎都基于此契约复用策略，新增策略只需
 继承 Strategy 并实现 evaluate。
+
+参数化机制（策略可编辑的基础）:
+  子类通过类属性 parameters 声明可调参数（ParamSpec），
+  实例化时由 __init__ 注入并校验；缺省值即旧版硬编码行为，
+  未传参数的调用方式与改造前完全兼容。
 """
 from __future__ import annotations
 
+import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 
 import pandas as pd
+
+logger = logging.getLogger("sas.strategies")
 
 
 @dataclass
@@ -36,6 +44,37 @@ class Signal:
         }
 
 
+@dataclass
+class ParamSpec:
+    """可调参数声明（前端据此渲染编辑表单）。
+
+    Attributes:
+        type: 参数类型 int / float / bool / select
+        default: 默认值（未传参时使用，等价于旧版硬编码常量）
+        label: 中文说明（表单标签）
+        min/max: 数值范围（int/float 生效）
+        step: 滑块步长
+        unit: 单位后缀（如 %、日、亿）
+        options: select 类型的候选项 [(值, 显示名), ...]
+    """
+
+    type: str
+    default: float | int | bool | str
+    label: str
+    min: float | None = None
+    max: float | None = None
+    step: float | None = None
+    unit: str = ""
+    options: list[tuple[str, str]] | None = None
+
+    def to_dict(self) -> dict:
+        return {
+            "type": self.type, "default": self.default, "label": self.label,
+            "min": self.min, "max": self.max, "step": self.step,
+            "unit": self.unit, "options": self.options,
+        }
+
+
 class Strategy(ABC):
     """策略基类。
 
@@ -51,7 +90,52 @@ class Strategy(ABC):
     category: str = "技术形态"
     #: 计算所需最少K线根数（不足则跳过）
     min_bars: int = 60
+    #: 可调参数声明（子类覆盖；空 dict 表示无可调参数）
+    parameters: dict[str, ParamSpec] = {}
 
+    def __init__(self, **params) -> None:
+        """注入策略参数。
+
+        未提供的参数用默认值；非法值（类型错误/越界）回退默认值，
+        保证任何参数组合下策略都能安全运行。
+        """
+        merged: dict[str, float | int | bool | str] = {}
+        for key, spec in self.parameters.items():
+            merged[key] = self._coerce(key, spec, params.get(key, spec.default))
+        self.params = merged
+
+    # ------------------------------------------------------------------
+    # 参数工具
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _coerce(key: str, spec: ParamSpec, value) -> float | int | bool | str:
+        """校验并归一化单个参数值。"""
+        try:
+            if spec.type == "bool":
+                return bool(value)
+            if spec.type == "select":
+                allowed = [v for v, _ in spec.options] if spec.options else []
+                return str(value) if str(value) in allowed else str(spec.default)
+            if spec.type == "int":
+                result: float | int = int(round(float(value)))
+            else:
+                result = float(value)
+            if spec.min is not None:
+                result = max(result, spec.min)
+            if spec.max is not None:
+                result = min(result, spec.max)
+            return result
+        except (TypeError, ValueError):
+            logger.warning("参数 %s 值非法(%r)，使用默认值 %r", key, value, spec.default)
+            return spec.default
+
+    def param(self, key: str):
+        """读取当前参数值（未声明时返回 None）。"""
+        return self.params.get(key)
+
+    # ------------------------------------------------------------------
+    # 子类契约
+    # ------------------------------------------------------------------
     @abstractmethod
     def evaluate(self, df: pd.DataFrame) -> Signal | None:
         """评估单只股票，返回命中信号或 None。

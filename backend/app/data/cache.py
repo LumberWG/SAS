@@ -93,6 +93,15 @@ CREATE TABLE IF NOT EXISTS signals (
 );
 CREATE INDEX IF NOT EXISTS idx_signals_code      ON signals(code);
 CREATE INDEX IF NOT EXISTS idx_signals_scan_date ON signals(scan_date);
+-- 自定义策略（用户在前端改参数另存，启动时自动注册进注册表）
+CREATE TABLE IF NOT EXISTS custom_strategies (
+    name          TEXT PRIMARY KEY,
+    base_strategy TEXT NOT NULL,   -- 基础内置策略名（提供 evaluate 逻辑）
+    description   TEXT,
+    category      TEXT,
+    params        TEXT NOT NULL,   -- JSON：用户参数 {key: value}
+    created_at    TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS backtest_runs (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     strategy     TEXT NOT NULL,
@@ -187,6 +196,60 @@ class Database:
                     "SELECT * FROM signals ORDER BY id DESC LIMIT ?", (limit,)
                 ).fetchall()
         return [dict(r) for r in rows]
+
+    def signal_stats_by_date(self, scan_date: str) -> dict[str, int]:
+        """统计某日各策略的命中数量（选股中心策略徽标用）。
+
+        Returns:
+            {策略名: 命中数}
+        """
+        with self._lock, self._connect() as conn:
+            rows = conn.execute(
+                "SELECT strategy, COUNT(*) AS cnt FROM signals"
+                " WHERE scan_date=? GROUP BY strategy",
+                (scan_date,),
+            ).fetchall()
+        return {r["strategy"]: r["cnt"] for r in rows}
+
+    # ---------------- 自定义策略 ----------------
+
+    def save_custom_strategy(
+        self, name: str, base_strategy: str, params: dict,
+        description: str = "", category: str = "自定义",
+    ) -> None:
+        """保存自定义策略（按 name 主键幂等，更新即覆盖）。"""
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                "INSERT INTO custom_strategies(name, base_strategy, description,"
+                " category, params, created_at) VALUES(?,?,?,?,?,?) "
+                "ON CONFLICT(name) DO UPDATE SET base_strategy=excluded.base_strategy,"
+                " description=excluded.description, category=excluded.category,"
+                " params=excluded.params",
+                (name, base_strategy, description, category,
+                 json.dumps(params, ensure_ascii=False), _now()),
+            )
+
+    def list_custom_strategies(self) -> list[dict[str, Any]]:
+        """全部自定义策略（params 已解析为 dict）。"""
+        with self._lock, self._connect() as conn:
+            rows = conn.execute(
+                "SELECT name, base_strategy, description, category, params, created_at"
+                " FROM custom_strategies ORDER BY created_at"
+            ).fetchall()
+        result = []
+        for r in rows:
+            item = dict(r)
+            item["params"] = json.loads(item["params"] or "{}")
+            result.append(item)
+        return result
+
+    def delete_custom_strategy(self, name: str) -> bool:
+        """删除自定义策略，返回是否删除成功。"""
+        with self._lock, self._connect() as conn:
+            cur = conn.execute(
+                "DELETE FROM custom_strategies WHERE name=?", (name,)
+            )
+        return cur.rowcount > 0
 
     # ---------------- 回测记录 ----------------
 

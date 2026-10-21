@@ -7,7 +7,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import analysis, backtest, market, monitor, screening, watchlist
+from app.api import analysis, backtest, market, monitor, screening, strategies, watchlist
 from app.config import get_settings
 
 logging.basicConfig(
@@ -29,6 +29,14 @@ async def lifespan(_: FastAPI):
     except Exception as exc:  # noqa: BLE001
         # 预热失败不阻塞启动（可能是网络问题），首次请求时会重试
         logger.warning("股票池预热失败（将在首次请求时重试）: %s", exc)
+
+    # 加载自定义策略（用户此前保存的参数化策略）
+    try:
+        from app.strategies.custom import load_custom_strategies
+
+        load_custom_strategies()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("自定义策略加载失败: %s", exc)
 
     # 启动定时任务（快照刷新 / 异动检测 / 收盘自动选股）
     from app.monitor.scheduler import scheduler
@@ -65,6 +73,7 @@ def create_app() -> FastAPI:
     app.include_router(analysis.router, prefix="/api")
     app.include_router(watchlist.router, prefix="/api")
     app.include_router(monitor.router, prefix="/api")
+    app.include_router(strategies.router, prefix="/api")
 
     @app.get("/api/health")
     def health() -> dict:

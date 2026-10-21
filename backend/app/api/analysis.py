@@ -12,6 +12,7 @@ from app.data.service import get_kline_cached, get_stock_pool
 from app.data.snapshot_store import snapshot_store
 from app.llm.analyzer import analyzer
 from app.llm.client import llm_client
+from app.market.sentiment import sentiment_from_snapshot
 
 logger = logging.getLogger("sas.api.analysis")
 router = APIRouter(prefix="/analysis", tags=["智能分析"])
@@ -68,8 +69,17 @@ async def analyze_stock(
 
     name, snapshot = await _lookup_name_snapshot(code)
 
+    # 市场情绪上下文（失败不影响主流程）
+    sentiment = None
     try:
-        dashboard = await analyzer.analyze(code, name, df, snapshot)
+        sentiment = await asyncio.to_thread(
+            sentiment_from_snapshot, snapshot_store.get_snapshot()
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("情绪获取失败 code=%s: %s", code, exc)
+
+    try:
+        dashboard = await analyzer.analyze(code, name, df, snapshot, sentiment)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:  # noqa: BLE001

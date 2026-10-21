@@ -33,7 +33,8 @@ const loading = ref(false)
 const error = ref('')
 
 onMounted(async () => {
-  strategies.value = await getStrategies()
+  const data = await getStrategies()
+  strategies.value = data.strategies
   if (strategies.value.length > 0) {
     form.value.strategy = strategies.value[0].name
   }

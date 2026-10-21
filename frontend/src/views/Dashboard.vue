@@ -23,28 +23,35 @@ const DOWN = '#00B96B'
 
 const overview = ref<MarketOverview | null>(null)
 const alerts = ref<MarketAlert[]>([])
-const loading = ref(false)
+const loading = ref(false)       // 任意加载进行中（禁用按钮防重复点击）
+const spinning = ref(false)      // 按钮图标旋转（仅用户手动刷新时）
 const autoRefresh = ref(true)
 let timer: number | undefined
 
 // 指数迷你走势（收盘价序列）
 const sparklines = reactive<Record<string, (number | null)[]>>({})
+const sparkReady = ref(false)   // 迷你走势是否已加载（60天走势无需随轮询重复拉取）
 
-async function load() {
+async function load(force = false) {
   loading.value = true
+  if (force) spinning.value = true
   try {
     overview.value = await getOverview()
     market.trading = overview.value.trading
-    // 拉取各指数迷你走势（前 4 个主要指数）
-    for (const idx of overview.value.indices.slice(0, 4)) {
-      try {
-        const data = await getIndexKline(idx.symbol, 60)
-        sparklines[idx.symbol] = data.closes
-      } catch {
-        sparklines[idx.symbol] = []
+    // 迷你走势：仅首次或用户手动刷新时拉取（后端已加 Parquet 缓存，
+    // 但指数K线首次要走完整降级链较慢，不应随 30s 轮询重复请求）
+    if (force || !sparkReady.value) {
+      for (const idx of overview.value.indices.slice(0, 4)) {
+        try {
+          const data = await getIndexKline(idx.symbol, 60)
+          sparklines[idx.symbol] = data.closes
+        } catch {
+          sparklines[idx.symbol] = []
+        }
       }
+      sparkReady.value = true
     }
-    // 拉取最近异动（调度器检测结果）
+    // 拉取最近异动（调度器检测结果，轻量）
     try {
       const alertData = await getAlerts(20)
       alerts.value = alertData.alerts
@@ -53,6 +60,7 @@ async function load() {
     }
   } finally {
     loading.value = false
+    spinning.value = false
   }
 }
 
@@ -110,6 +118,27 @@ function tempLabel(temp: number): string {
   if (temp >= 30) return '偏弱'
   return '偏冷'
 }
+
+// 情绪权重配色: 正权重=多头环境(红), 负=空头环境(绿), 0=中性
+function weightTone(weight: number): string {
+  if (weight > 0) return 'text-up'
+  if (weight < 0) return 'text-down'
+  return 'text-content'
+}
+
+function weightBorder(weight: number): string {
+  if (weight > 0) return 'border-up/40 bg-up/10'
+  if (weight < 0) return 'border-down/40 bg-down/10'
+  return 'border-base-600 bg-base-700/60'
+}
+
+// 温度环颜色跟随情绪权重
+const sentimentStroke = computed(() => {
+  const w = overview.value?.sentiment?.weight ?? 0
+  if (w > 0) return UP
+  if (w < 0) return DOWN
+  return '#5C6B85'
+})
 
 // 迷你走势 option
 function sparkOption(data: (number | null)[]) {
@@ -201,11 +230,11 @@ const breadthOption = computed(() => {
           {{ autoRefresh ? '暂停轮询' : '开启轮询' }}
         </button>
         <button
-          class="flex items-center gap-1.5 rounded-lg border border-base-600 px-3 py-1.5 text-[12px] text-content-muted transition-colors hover:border-primary/50 hover:text-primary-light"
-          :class="loading ? 'animate-spin' : ''"
-          @click="load()"
+          class="flex items-center gap-1.5 rounded-lg border border-base-600 px-3 py-1.5 text-[12px] text-content-muted transition-colors hover:border-primary/50 hover:text-primary-light disabled:cursor-not-allowed disabled:opacity-50"
+          :disabled="loading"
+          @click="load(true)"
         >
-          <RefreshCw class="h-3.5 w-3.5" />
+          <RefreshCw class="h-3.5 w-3.5" :class="spinning ? 'animate-spin' : ''" />
           刷新
         </button>
       </div>
@@ -267,11 +296,11 @@ const breadthOption = computed(() => {
         <v-chart v-if="overview" :option="breadthOption" style="height: 200px" autoresize />
       </div>
 
-      <!-- 市场温度计 -->
+      <!-- 市场温度 + 情绪等级 -->
       <div class="glass-card flex flex-col items-center justify-center p-5">
         <div class="mb-2 flex items-center gap-2 text-content-muted">
           <Thermometer class="h-4 w-4" />
-          <h3 class="text-subheading">市场温度</h3>
+          <h3 class="text-subheading">市场情绪</h3>
         </div>
         <div class="relative flex h-32 w-32 items-center justify-center">
           <svg viewBox="0 0 120 120" class="h-full w-full -rotate-90">
@@ -281,7 +310,7 @@ const breadthOption = computed(() => {
               cy="60"
               r="52"
               fill="none"
-              :stroke="(overview?.temperature ?? 50) >= 55 ? UP : DOWN"
+              :stroke="sentimentStroke"
               stroke-width="10"
               stroke-linecap="round"
               :stroke-dasharray="`${((overview?.temperature ?? 50) / 100) * 327} 327`"
@@ -294,6 +323,21 @@ const breadthOption = computed(() => {
             </span>
             <span class="text-[11px] text-content-muted">{{ tempLabel(overview?.temperature ?? 50) }}</span>
           </div>
+        </div>
+        <!-- 情绪等级徽标（5 档 + 权重 + 操作建议） -->
+        <div v-if="overview?.sentiment" class="mt-3 flex flex-col items-center gap-1.5">
+          <span
+            class="rounded-full border px-3 py-1 text-[13px] font-semibold"
+            :class="weightBorder(overview.sentiment.weight)"
+          >
+            {{ overview.sentiment.level }}
+            <span class="font-num ml-1" :class="weightTone(overview.sentiment.weight)">
+              {{ overview.sentiment.weight > 0 ? '+' : '' }}{{ overview.sentiment.weight }}
+            </span>
+          </span>
+          <p class="max-w-[220px] text-center text-[11px] leading-relaxed text-content-faint">
+            {{ overview.sentiment.advice }}
+          </p>
         </div>
         <div class="mt-4 grid w-full grid-cols-2 gap-2 text-center text-[11px]">
           <div class="rounded-lg bg-base-700/60 p-2">

@@ -16,6 +16,8 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 
+import pandas as pd
+
 from app.config import get_settings
 from app.data.cache import db
 from app.data.service import get_kline_cached, get_stock_pool
@@ -38,6 +40,8 @@ class ScanTask:
     skipped: int = 0                 # 数据不足/失败跳过的股票数
     started_at: str = ""
     finished_at: str = ""
+    scope: str = "all"               # 扫描范围
+    sentiment: dict = field(default_factory=dict)    # 扫描开始时市场情绪快照
 
     def progress(self) -> float:
         return round(self.scanned / self.total * 100, 1) if self.total else 0.0
@@ -64,31 +68,46 @@ class Scanner:
         return max(self._tasks.values(), key=lambda t: t.started_at or "")
 
     async def start_scan(
-        self, strategy_names: list[str], codes: list[str] | None = None
+        self,
+        strategy_names: list[str],
+        codes: list[str] | None = None,
+        scope: str = "all",
     ) -> str:
         """启动一轮后台扫描，返回 task_id。
 
         Args:
             strategy_names: 策略名列表（已注册）
             codes: 限定扫描的股票代码；None 表示全市场
+            scope: 扫描范围（见 SCAN_SCOPES；codes 优先于 scope）
         """
         task_id = uuid.uuid4().hex[:12]
-        task = ScanTask(task_id=task_id, strategies=strategy_names)
+        task = ScanTask(task_id=task_id, strategies=strategy_names, scope=scope)
         self._tasks[task_id] = task
-        asyncio.create_task(self._run(task, codes))
+        asyncio.create_task(self._run(task, codes, scope))
         return task_id
 
     # ------------------------------------------------------------------
     # 扫描主流程
     # ------------------------------------------------------------------
-    async def _run(self, task: ScanTask, codes: list[str] | None) -> None:
+    async def _run(
+        self, task: ScanTask, codes: list[str] | None, scope: str = "all"
+    ) -> None:
         task.status = "running"
         task.started_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         try:
+            # 记录扫描开始时的市场情绪（供结果展示与 LLM 分析上下文）
+            task.sentiment = self._current_sentiment()
+
             pool = get_stock_pool()
             if codes:
                 wanted = set(codes)
                 pool = pool[pool["code"].isin(wanted)]
+            elif scope.startswith("top_amount:"):
+                # 成交额前 N（流动性优先，冷缓存下最快出结果的范围）
+                n = int(scope.split(":", 1)[1] or 500)
+                pool = await asyncio.to_thread(self._top_amount_pool, pool, n)
+            else:
+                pool = filter_pool_by_scope(pool, scope)
             task.total = len(pool)
 
             strategies = self._resolve_strategies(task.strategies)
@@ -136,6 +155,32 @@ class Scanner:
 
         return [registry.create(n) for n in names]
 
+    @staticmethod
+    def _current_sentiment() -> dict:
+        """当前市场情绪快照（失败时返回空 dict，不影响扫描）。"""
+        try:
+            from app.data.snapshot_store import snapshot_store
+            from app.market.sentiment import sentiment_from_snapshot
+
+            return sentiment_from_snapshot(snapshot_store.get_snapshot())
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("情绪快照获取失败: %s", exc)
+            return {}
+
+    @staticmethod
+    def _top_amount_pool(pool: pd.DataFrame, n: int) -> pd.DataFrame:
+        """按实时成交额取前 N 只股票（快照失败时退化为全量前 N 行）。"""
+        from app.data.snapshot_store import snapshot_store
+
+        try:
+            snapshot = snapshot_store.get_snapshot()
+            top = snapshot.nlargest(n, "amount")
+            codes = set(top["code"])
+            return pool[pool["code"].isin(codes)]
+        except Exception as exc:  # noqa: BLE001 - 快照不可用时降级
+            logger.warning("成交额股票池获取失败，退化为股票池前 %d 只: %s", n, exc)
+            return pool.head(n)
+
     async def _scan_stock(
         self, code: str, name: str, strategies: list[Strategy]
     ) -> list[Signal]:
@@ -155,8 +200,37 @@ class Scanner:
                 signal.code = code
                 signal.name = name
                 signals.append(signal)
+
+        # 补充当日涨跌幅到 extra（命中表格展示用；K线缓存无该列时由收盘价推导）
+        if signals and len(df) > 1:
+            pct = (df["close"].iloc[-1] / df["close"].iloc[-2] - 1) * 100
+            for s in signals:
+                s.extra.setdefault("pct_change", round(float(pct), 2))
         return signals
 
 
 # 全局单例
 scanner = Scanner()
+
+# ----------------------------------------------------------------------
+# 扫描范围定义（选股中心「扫描范围」下拉）
+# ----------------------------------------------------------------------
+SCAN_SCOPES: dict[str, dict] = {
+    "all": {"label": "全市场（沪深京）", "filter": None},
+    "sh": {"label": "沪市主板", "filter": lambda p: p["code"].str.startswith("60")},
+    "sz": {"label": "深市主板", "filter": lambda p: p["code"].str.startswith(("00", "001"))},
+    "cyber": {"label": "创业板", "filter": lambda p: p["code"].str.startswith(("30", "301"))},
+    "star": {"label": "科创板", "filter": lambda p: p["code"].str.startswith("68")},
+    "bjs": {"label": "北交所", "filter": lambda p: p["code"].str.startswith(("43", "83", "87", "88", "92"))},
+}
+
+
+def filter_pool_by_scope(pool: pd.DataFrame, scope: str) -> pd.DataFrame:
+    """按扫描范围过滤股票池。
+
+    top_amount 系列需要实时快照（按成交额排序取前 N），
+    由 scanner 在 _run 中特殊处理；此处只处理静态板块范围。
+    """
+    if scope == "all" or scope not in SCAN_SCOPES:
+        return pool
+    return pool[SCAN_SCOPES[scope]["filter"](pool)]

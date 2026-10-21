@@ -47,7 +47,12 @@ SYSTEM_PROMPT = """你是一位资深A股量化分析师，擅长技术面分析
 5. 乖离率：价格偏离均线程度，偏离过大有回归风险
 6. 布林带：价格处于轨道的上/中/下部
 
-纪律要求：只依据给定数据判断，不得编造数据；价格必须给具体数字；结论谨慎，宁可持有。"""
+纪律要求：只依据给定数据判断，不得编造数据；价格必须给具体数字；结论谨慎，宁可持有。
+
+市场情绪说明（权重 -1 ~ +1）：
+  极度亢奋 +1 / 多头占优 +0.5 / 中性 0 / 空头占优 -0.5 / 极度悲观 -1。
+权重 > 0 时趋势策略有效性更高；权重 < 0 时需更严格（弱势中的突破信号失败率高）；
+权重为负而个股仍出现买入信号时，应在 summary 中提示逆环境风险。"""
 
 
 @dataclass
@@ -74,6 +79,7 @@ class DecisionDashboard:
     model: str = ""                       # 生成所用的模型（降级时为 "rule-based"）
     degraded: bool = False                # 是否为规则降级结果
     generated_at: str = ""
+    sentiment: dict | None = None         # 市场情绪上下文（可选）
 
     def to_dict(self) -> dict:
         return {
@@ -84,6 +90,7 @@ class DecisionDashboard:
             "checklist": [c.__dict__ for c in self.checklist],
             "model": self.model, "degraded": self.degraded,
             "generated_at": self.generated_at,
+            "sentiment": self.sentiment,
         }
 
 
@@ -104,6 +111,7 @@ class StockAnalyzer:
         name: str,
         kline: pd.DataFrame,
         snapshot: dict | None = None,
+        sentiment: dict | None = None,
     ) -> DecisionDashboard:
         """生成个股决策仪表盘。
 
@@ -112,12 +120,14 @@ class StockAnalyzer:
             name: 股票名称
             kline: 日K线 DataFrame（至少60根，无需含指标列，内部计算）
             snapshot: 实时快照字段（可选，补充量比/换手等）
+            sentiment: 市场情绪（可选，{level, weight, advice, temperature}），
+                       注入 prompt 作为决策上下文；规则降级时一并返回
         """
         if kline is None or kline.empty or len(kline) < 30:
             raise ValueError("K线数据不足，无法分析")
 
         df = add_all_indicators(kline)
-        snapshot_text = self._build_snapshot_text(code, name, df, snapshot)
+        snapshot_text = self._build_snapshot_text(code, name, df, snapshot, sentiment)
 
         if llm_client.available:
             try:
@@ -125,7 +135,7 @@ class StockAnalyzer:
                     {"role": "system", "content": SYSTEM_PROMPT},
                     {"role": "user", "content": snapshot_text},
                 ])
-                dashboard = self._parse_dashboard(content, code, name, df)
+                dashboard = self._parse_dashboard(content, code, name, df, sentiment)
                 dashboard.model = llm_client.settings.llm_model
                 logger.info("LLM 分析完成 %s %s -> %s",
                             code, name, dashboard.conclusion)
@@ -133,13 +143,18 @@ class StockAnalyzer:
             except Exception as exc:  # noqa: BLE001 - 任何失败都降级
                 logger.warning("LLM 分析失败，降级为规则评分: %s", exc)
 
-        return self._rule_based_dashboard(code, name, df)
+        return self._rule_based_dashboard(code, name, df, sentiment)
 
     # ------------------------------------------------------------------
     # 快照文本组装
     # ------------------------------------------------------------------
     def _build_snapshot_text(
-        self, code: str, name: str, df: pd.DataFrame, snapshot: dict | None
+        self,
+        code: str,
+        name: str,
+        df: pd.DataFrame,
+        snapshot: dict | None,
+        sentiment: dict | None = None,
     ) -> str:
         """把行情与指标组装为 LLM 可读的技术面快照。"""
         last = df.iloc[-1]
@@ -160,7 +175,17 @@ class StockAnalyzer:
             for r in recent.itertuples()
         )
 
-        return f"""股票：{name}（{code}）
+        # 市场情绪上下文（有则附加）
+        sentiment_text = ""
+        if sentiment and sentiment.get("level"):
+            sentiment_text = (
+                f"【市场环境】当前市场情绪：{sentiment['level']}"
+                f"（权重 {sentiment.get('weight', 0):+}，"
+                f"温度 {sentiment.get('temperature', '--')}）"
+                f"\n  {sentiment.get('advice', '')}\n\n"
+            )
+
+        return f"""{sentiment_text}股票：{name}（{code}）
 最新价：{f(last['close'])}  日期：{df['date'].iloc[-1]}
 
 【技术指标快照】
@@ -183,7 +208,12 @@ ATR(14)={f(last['atr'], '{:.3f}')}
     _JSON_RE = re.compile(r"\{.*\}", re.DOTALL)
 
     def _parse_dashboard(
-        self, content: str, code: str, name: str, df: pd.DataFrame
+        self,
+        content: str,
+        code: str,
+        name: str,
+        df: pd.DataFrame,
+        sentiment: dict | None = None,
     ) -> DecisionDashboard:
         """解析 LLM 输出的 JSON（容忍 ```json 包裹与杂散文本）。"""
         match = self._JSON_RE.search(content)
@@ -215,13 +245,18 @@ ATR(14)={f(last['atr'], '{:.3f}')}
             target_price=_num_or_none(data.get("target_price")),
             checklist=checklist,
             generated_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            sentiment=sentiment,
         )
 
     # ------------------------------------------------------------------
     # 规则降级（纯技术面评分）
     # ------------------------------------------------------------------
     def _rule_based_dashboard(
-        self, code: str, name: str, df: pd.DataFrame
+        self,
+        code: str,
+        name: str,
+        df: pd.DataFrame,
+        sentiment: dict | None = None,
     ) -> DecisionDashboard:
         """无 LLM 时的规则评分仪表盘。
 
@@ -232,6 +267,11 @@ ATR(14)={f(last['atr'], '{:.3f}')}
           量比>1.5 放量 +1 / <0.7 缩量 -1
           乖离 BIAS6<-6% 超跌 +1 / >6% 超涨 -1
         结论: >=3 买入, <=-3 卖出, 否则持有。
+
+        市场情绪修正（权重 -1 ~ +1）:
+          情绪权重 <= -0.5（空头占优/极度悲观）时，
+          即使技术面达标也将「买入」降级为「持有」——逆环境信号失败率高，
+          宁可不赚，不可大亏；情绪权重 >= 0.5 时结论不变。
         """
         last = df.iloc[-1]
         prev = df.iloc[-2] if len(df) > 1 else last
@@ -304,14 +344,28 @@ ATR(14)={f(last['atr'], '{:.3f}')}
         else:
             conclusion = "持有"
 
+        # 市场情绪修正：逆环境时空头信号降级
+        sentiment_weight = 0.0
+        sentiment_note = ""
+        if sentiment and sentiment.get("level"):
+            sentiment_weight = float(sentiment.get("weight", 0.0))
+            if sentiment_weight <= -0.5 and conclusion == "买入":
+                conclusion = "持有"
+                sentiment_note = (
+                    f"；市场情绪{sentiment['level']}（权重{sentiment_weight:+}），"
+                    f"逆环境买入信号降级为持有"
+                )
+
         stop = round(float(df["low"].tail(10).min()), 2)
         target = round(price * 1.15, 2)
         return DecisionDashboard(
             code=code, name=name, conclusion=conclusion,
-            summary=f"技术面评分 {score:+.1f}，倾向{conclusion}（规则降级结论）",
+            summary=f"技术面评分 {score:+.1f}，倾向{conclusion}"
+                    f"{sentiment_note}（规则降级结论）",
             entry_price=round(price, 2), stop_loss=stop, target_price=target,
             checklist=checklist, model="rule-based", degraded=True,
             generated_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            sentiment=sentiment,
         )
 
 

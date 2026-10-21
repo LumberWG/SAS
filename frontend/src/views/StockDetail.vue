@@ -137,10 +137,26 @@ function statusColor(status: string) {
         </div>
 
         <template v-else-if="dashboard">
-          <div class="mb-4 flex items-center gap-3">
+          <div class="mb-4 flex flex-wrap items-center gap-3">
             <ConclusionBadge :conclusion="dashboard.conclusion" size="lg" />
             <span class="text-[11px] text-content-faint">
               {{ dashboard.degraded ? '规则降级' : dashboard.model }}
+            </span>
+            <!-- 市场情绪上下文 -->
+            <span
+              v-if="dashboard.sentiment?.level"
+              class="rounded-full border px-2.5 py-0.5 text-[11px] font-medium"
+              :class="
+                dashboard.sentiment.weight > 0
+                  ? 'border-up/40 bg-up/10 text-up'
+                  : dashboard.sentiment.weight < 0
+                    ? 'border-down/40 bg-down/10 text-down'
+                    : 'border-base-600 bg-base-700/60 text-content-muted'
+              "
+              :title="dashboard.sentiment.advice"
+            >
+              {{ dashboard.sentiment.level }}
+              {{ dashboard.sentiment.weight > 0 ? '+' : '' }}{{ dashboard.sentiment.weight }}
             </span>
           </div>
           <p class="mb-4 text-[13px] leading-relaxed text-content-muted">{{ dashboard.summary }}</p>

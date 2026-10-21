@@ -10,6 +10,7 @@ from fastapi import APIRouter, HTTPException, Query
 from app.config import get_settings
 from app.data.akshare_source import get_data_source
 from app.data.snapshot_store import snapshot_store
+from app.market.sentiment import classify_sentiment
 
 logger = logging.getLogger("sas.api.market")
 router = APIRouter(prefix="/market", tags=["行情"])
@@ -98,6 +99,7 @@ def market_overview() -> dict:
 
     total_amount = float(snapshot["amount"].fillna(0).sum())
     temperature = _market_temperature(up, down, flat, limit_up, total)
+    sentiment = classify_sentiment(temperature)
 
     indices = []
     for row in indices_df.itertuples():
@@ -120,17 +122,35 @@ def market_overview() -> dict:
         },
         "total_amount": round(total_amount, 2),  # 单位：元
         "temperature": temperature,
+        "sentiment": sentiment,  # 5 档情绪等级（含权重与操作建议）
     })
 
 
 @router.get("/indices/{symbol}/kline")
-def index_kline(symbol: str, days: int = Query(60, ge=5, le=500)) -> dict:
-    """指数迷你走势（最近 N 个交易日收盘价）。"""
+def index_kline(
+    symbol: str,
+    days: int = Query(60, ge=5, le=500),
+    refresh: bool = Query(False, description="强制刷新缓存"),
+) -> dict:
+    """指数迷你走势（最近 N 个交易日收盘价，带 Parquet 缓存）。
+
+    指数数据量小且变更慢（每日一根），与个股K线共用 Parquet 缓存
+    （缓存 key 加 idx_ 前缀避免与个股代码冲突），
+    避免前端轮询时反复触发完整数据源降级链。
+    """
+    from app.data.cache import kline_cache
+
+    cache_key = f"idx_{symbol}"
     try:
-        df = get_data_source().get_index_daily(symbol)
+        df = None if refresh else kline_cache.get(cache_key)
+        if df is None:
+            df = get_data_source().get_index_daily(symbol)
+            if not df.empty:
+                kline_cache.save(cache_key, df)
     except Exception as exc:  # noqa: BLE001
+        logger.exception("获取指数K线失败 symbol=%s", symbol)
         raise HTTPException(status_code=502, detail=f"数据源异常: {exc}") from exc
-    if df.empty:
+    if df is None or df.empty:
         raise HTTPException(status_code=404, detail=f"指数 {symbol} 无数据")
     df = df.tail(days)
     return _with_disclaimer({

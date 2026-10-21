@@ -191,14 +191,15 @@ class MarketScheduler:
         logger.info("收盘自动选股开始，策略: %s", strategies)
         try:
             task = await scanner.start_scan(strategies)
+            hit_count = len(task.hits)
             await notifier.notify(
-                f"收盘选股完成：命中 {task.hit_count} 只",
+                f"收盘选股完成：命中 {hit_count} 只",
                 "\n".join(
                     f"{h.strategy} {h.code} {h.name} 价{h.price:.2f}"
                     for h in task.hits[:10]
                 ) or "本轮无命中",
             )
-            return {"task_id": task.task_id, "hit_count": task.hit_count}
+            return {"task_id": task.task_id, "hit_count": hit_count}
         except Exception as exc:  # noqa: BLE001
             logger.exception("收盘自动选股失败")
             await notifier.notify("收盘选股失败", str(exc))

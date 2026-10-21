@@ -1,12 +1,14 @@
-"""选股 API：策略列表、扫描任务、历史信号。"""
+"""选股 API：策略列表、扫描任务、历史信号、命中统计。"""
 from __future__ import annotations
+
+from datetime import datetime
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from app.api.utils import with_disclaimer
 from app.data.cache import db
-from app.screener.scanner import scanner
+from app.screener.scanner import SCAN_SCOPES, scanner
 from app.strategies import registry
 
 router = APIRouter(prefix="/screening", tags=["选股"])
@@ -16,13 +18,27 @@ class ScanRequest(BaseModel):
     """发起扫描的请求体。"""
 
     strategies: list[str] = Field(..., min_length=1, description="策略名列表")
-    codes: list[str] | None = Field(None, description="限定股票代码，缺省为全市场")
+    codes: list[str] | None = Field(None, description="限定股票代码，缺省按 scope")
+    #: 扫描范围: all / sh / sz / cyber / star / bjs / top_amount:N
+    scope: str = Field("all", description="扫描范围")
 
 
 @router.get("/strategies")
 def list_strategies() -> dict:
-    """全部已注册策略的元信息。"""
-    return with_disclaimer({"strategies": registry.list()})
+    """全部已注册策略的元信息 + 今日命中数 + 可用扫描范围。"""
+    today = datetime.now().strftime("%Y-%m-%d")
+    stats = db.signal_stats_by_date(today)
+    return with_disclaimer({
+        "strategies": registry.list(),
+        "today_hits": stats,
+        "scopes": [
+            {"key": key, "label": info["label"]}
+            for key, info in SCAN_SCOPES.items()
+        ] + [
+            {"key": "top_amount:500", "label": "成交额前 500"},
+            {"key": "top_amount:1000", "label": "成交额前 1000"},
+        ],
+    })
 
 
 @router.post("/scan")
@@ -35,8 +51,17 @@ async def start_scan(req: ScanRequest) -> dict:
     unknown = [n for n in req.strategies if n not in registry.names()]
     if unknown:
         raise HTTPException(status_code=400, detail=f"未注册的策略: {unknown}")
-    task_id = await scanner.start_scan(req.strategies, req.codes)
+    task_id = await scanner.start_scan(req.strategies, req.codes, req.scope)
     return {"task_id": task_id}
+
+
+@router.get("/scan/latest")
+def latest_scan() -> dict:
+    """最近一轮扫描任务（供前端刷新页面后恢复结果）。"""
+    task = scanner.latest_task()
+    if task is None:
+        return with_disclaimer({"task": None})
+    return with_disclaimer({"task": _task_payload(task)})
 
 
 @router.get("/scan/{task_id}")
@@ -45,10 +70,24 @@ def scan_status(task_id: str) -> dict:
     task = scanner.get_task(task_id)
     if task is None:
         raise HTTPException(status_code=404, detail="任务不存在")
-    return with_disclaimer({
+    return with_disclaimer(_task_payload(task))
+
+
+def _task_payload(task) -> dict:
+    """任务状态序列化（含耗时统计）。"""
+    duration = None
+    if task.started_at and task.finished_at:
+        try:
+            start = datetime.strptime(task.started_at, "%Y-%m-%d %H:%M:%S")
+            finish = datetime.strptime(task.finished_at, "%Y-%m-%d %H:%M:%S")
+            duration = int((finish - start).total_seconds())
+        except ValueError:
+            pass
+    return {
         "task_id": task.task_id,
         "status": task.status,
         "strategies": task.strategies,
+        "scope": task.scope,
         "total": task.total,
         "scanned": task.scanned,
         "progress": task.progress(),
@@ -57,7 +96,9 @@ def scan_status(task_id: str) -> dict:
         "hits": task.hits if task.status == "done" else [],
         "started_at": task.started_at,
         "finished_at": task.finished_at,
-    })
+        "duration": duration,
+        "sentiment": task.sentiment,  # 扫描开始时市场情绪快照
+    }
 
 
 @router.get("/signals")
