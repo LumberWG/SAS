@@ -6,6 +6,13 @@
                        结果存内存环形缓冲供 API 读取，并按去重键推送通知
   3. auto_scan         每交易日 15:30 收盘后自动全市场选股，
                        命中信号持久化到 SQLite 并推送通知
+  4. auto_watch        收盘自动选股完成后，评分 Top N 的命中自动加入自选股
+  5. pre_market        每交易日 9:20 集合竞价后分析自选股生成本日建议，
+                       并读取昨日「明日关注」
+  6. intraday_monitor  盘中 9:35-15:00 每 5 分钟分析自选股，
+                       生成实时买卖建议（建议买入/建议卖出列表）
+  7. post_market       每交易日 15:35 全市场扫描 + 自选股分析，
+                       生成次日「明日关注」TopN
 
 时钟说明: cron 任务使用本地时区（Asia/Shanghai 由 settings 指定）。
 """
@@ -93,9 +100,31 @@ class MarketScheduler:
             CronTrigger(day_of_week="mon-fri", hour=15, minute=30, timezone=tz),
             id="auto_scan", replace_existing=True,
         )
+        # 4) 开盘前分析（交易日 9:20 集合竞价后）
+        self.scheduler.add_job(
+            self.pre_market,
+            CronTrigger(day_of_week="mon-fri", hour=9, minute=20, timezone=tz),
+            id="pre_market", replace_existing=True,
+        )
+        # 5) 盘中自选股监控（每 N 分钟，任务内判断交易时段）
+        self.scheduler.add_job(
+            self.intraday_monitor,
+            IntervalTrigger(minutes=self.settings.intraday_analysis_interval),
+            id="intraday_monitor", replace_existing=True,
+        )
+        # 6) 盘后分析（交易日 15:35，生成次日关注）
+        self.scheduler.add_job(
+            self.post_market,
+            CronTrigger(day_of_week="mon-fri", hour=15, minute=35, timezone=tz),
+            id="post_market", replace_existing=True,
+        )
 
         self.scheduler.start()
-        logger.info("调度器已启动（快照60s / 异动5min / 收盘选股15:30）")
+        logger.info(
+            "调度器已启动（快照60s / 异动5min / 开盘9:20 / 盘中%dm / "
+            "收盘选股15:30 / 盘后15:35）",
+            self.settings.intraday_analysis_interval,
+        )
 
     def shutdown(self) -> None:
         if self.scheduler is not None:
@@ -191,18 +220,178 @@ class MarketScheduler:
         logger.info("收盘自动选股开始，策略: %s", strategies)
         try:
             task = await scanner.start_scan(strategies)
+            # 等待扫描完成（轮询任务状态，最长约 6 分钟）
+            for _ in range(180):
+                await asyncio.sleep(2)
+                if task.status in ("done", "error"):
+                    break
+            if task.status != "done":
+                return {"error": "扫描未完成"}
             hit_count = len(task.hits)
             await notifier.notify(
                 f"收盘选股完成：命中 {hit_count} 只",
                 "\n".join(
-                    f"{h.strategy} {h.code} {h.name} 价{h.price:.2f}"
+                    f"{h['strategy']} {h['code']} {h['name']} 价{h['price']:.2f}"
                     for h in task.hits[:10]
                 ) or "本轮无命中",
             )
-            return {"task_id": task.task_id, "hit_count": hit_count}
+            # 自动加自选（评分 Top N）
+            watch_result = await self.auto_watch_top_hits(task.hits)
+            return {
+                "task_id": task.task_id, "hit_count": hit_count,
+                **watch_result,
+            }
         except Exception as exc:  # noqa: BLE001
             logger.exception("收盘自动选股失败")
             await notifier.notify("收盘选股失败", str(exc))
+            return {"error": str(exc)}
+
+    # ------------------------------------------------------------------
+    # 自动加自选（收盘自动选股后：评分 Top N 加入自选股）
+    # ------------------------------------------------------------------
+    async def auto_watch_top_hits(self, hits: list[dict]) -> dict:
+        """将评分 Top N 的扫描命中自动加入自选股（跳过已在自选的）。"""
+        if not self.settings.auto_watch_enabled or not hits:
+            return {"added": 0}
+        top_n = self.settings.auto_watch_top_n
+        scored = [
+            (h.get("extra", {}).get("score", 0), h) for h in hits
+        ]
+        scored.sort(key=lambda x: x[0], reverse=True)
+
+        existing = {item["code"] for item in db.list_watchlist()}
+        added = []
+        for _score, hit in scored[:top_n]:
+            code = hit["code"]
+            if code in existing:
+                continue
+            db.add_watch(code, hit.get("name", ""), note="自动加入(收盘选股)")
+            existing.add(code)
+            added.append(f"{code} {hit.get('name', '')}")
+
+        if added:
+            logger.info("自动加自选 %d 只: %s", len(added), ", ".join(added))
+            await notifier.notify(
+                f"自动加入自选 {len(added)} 只",
+                "\n".join(added),
+            )
+        return {"added": len(added)}
+
+    # ------------------------------------------------------------------
+    # 开盘前分析（9:20）：自选股建议 + 读取昨日关注
+    # ------------------------------------------------------------------
+    async def pre_market(self) -> dict:
+        """开盘前分析全部自选股，生成本日建议（批次 premarket_今日）。"""
+        if not is_trading_day():
+            return {"skipped": "非交易日"}
+        from app.analysis.recommender import recommender
+
+        logger.info("开盘前分析开始（9:20）")
+        try:
+            recommendations = await recommender.analyze_watchlist()
+            batch = f"premarket_{datetime.now().strftime('%Y-%m-%d')}"
+            saved = await asyncio.to_thread(
+                db.save_recommendations,
+                [r.__dict__ for r in recommendations], batch,
+            )
+            buys = sum(1 for r in recommendations if r.action == "buy")
+            sells = sum(1 for r in recommendations if r.action == "sell")
+
+            # 昨日关注列表（今日重点关注）
+            focus = db.list_recommendations("focus")
+            focus_note = (
+                f"昨日关注 {len(focus)} 只: "
+                + ", ".join(f"{f['name']}({f['code']})" for f in focus[:5])
+            ) if focus else "昨日无关注列表"
+
+            await notifier.notify(
+                f"开盘建议：买入 {buys} / 卖出 {sells}",
+                focus_note,
+            )
+            return {"batch": batch, "saved": saved, "buy": buys, "sell": sells}
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("开盘前分析失败")
+            return {"error": str(exc)}
+
+    # ------------------------------------------------------------------
+    # 盘中监控（每 N 分钟）：自选股实时买卖建议
+    # ------------------------------------------------------------------
+    async def intraday_monitor(self) -> dict:
+        """盘中分析自选股，更新实时建议（批次 intraday_今日）。"""
+        if not is_trading_hours():
+            return {"skipped": "非交易时段"}
+        from app.analysis.recommender import recommender
+
+        try:
+            recommendations = await recommender.analyze_watchlist()
+            if not recommendations:
+                return {"skipped": "自选股为空"}
+            batch = f"intraday_{datetime.now().strftime('%Y-%m-%d')}"
+            saved = await asyncio.to_thread(
+                db.save_recommendations,
+                [r.__dict__ for r in recommendations], batch,
+            )
+            return {"batch": batch, "saved": saved}
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("盘中监控失败")
+            return {"error": str(exc)}
+
+    # ------------------------------------------------------------------
+    # 盘后分析（15:35）：全市场扫描 → 明日关注 TopN + 自选股建议
+    # ------------------------------------------------------------------
+    async def post_market(self) -> dict:
+        """盘后深度分析：全市场扫描命中 TopN → 明日关注 + 自选股建议。"""
+        if not is_trading_day():
+            return {"skipped": "非交易日"}
+        from app.analysis.recommender import recommender
+        from app.screener.scanner import scanner
+        from app.strategies import registry
+
+        logger.info("盘后分析开始（15:35）")
+        try:
+            # 1) 全市场扫描（复用收盘自动选股的策略集）
+            strategies = self.settings.auto_scan_strategies or registry.names()
+            task = await scanner.start_scan(strategies)
+            # 等待扫描完成（轮询任务状态）
+            for _ in range(180):  # 最长等待约 6 分钟
+                await asyncio.sleep(2)
+                if task.status in ("done", "error"):
+                    break
+            if task.status != "done":
+                return {"error": "盘后扫描未完成"}
+
+            # 2) 明日关注（命中评分 TopN，持久化）
+            today = datetime.now().strftime("%Y-%m-%d")
+            focus = await recommender.post_market_focus(
+                task.hits, self.settings.focus_top_n
+            )
+            focus_batch = f"focus_{today}"
+            await asyncio.to_thread(
+                db.save_recommendations,
+                [r.__dict__ for r in focus], focus_batch,
+            )
+
+            # 3) 自选股建议（同资金歇后分析，批次跟随明日）
+            recommendations = await recommender.analyze_watchlist()
+            pre_batch = f"premarket_{today}"
+            await asyncio.to_thread(
+                db.save_recommendations,
+                [r.__dict__ for r in recommendations], pre_batch,
+            )
+
+            await notifier.notify(
+                f"盘后分析完成：明日关注 {len(focus)} 只",
+                "\n".join(
+                    f"{f['name']}({f['code']}) 评分{f['score']:+.1f}"
+                    for f in focus[:10]
+                ) or "本轮无命中",
+            )
+            return {
+                "focus_batch": focus_batch, "focus": len(focus),
+                "watchlist_saved": len(recommendations),
+            }
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("盘后分析失败")
             return {"error": str(exc)}
 
     # ------------------------------------------------------------------

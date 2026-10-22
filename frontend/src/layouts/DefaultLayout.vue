@@ -10,6 +10,7 @@ import {
   Filter,
   History,
   LayoutDashboard,
+  Lightbulb,
   LineChart,
   ShieldAlert,
 } from 'lucide-vue-next'
@@ -23,6 +24,7 @@ const market = useMarketStore()
 const navItems = [
   { path: '/dashboard', title: '大盘概览', icon: LayoutDashboard },
   { path: '/screening', title: '选股中心', icon: Filter },
+  { path: '/advisory', title: '智能建议', icon: Lightbulb },
   { path: '/stock/600519', title: '个股详情', icon: LineChart },
   { path: '/backtest', title: '回测中心', icon: History },
   { path: '/signals', title: '信号与自选', icon: Bell },

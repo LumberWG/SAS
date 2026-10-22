@@ -296,6 +296,61 @@ export function deleteCustomStrategy(name: string): Promise<{ deleted: boolean }
   return http.delete(`/strategies/custom/${encodeURIComponent(name)}`).then((r) => r.data)
 }
 
+// ==================== 智能建议 ====================
+
+export interface RecommendationItem {
+  id: number
+  code: string
+  name: string
+  action: 'buy' | 'sell' | 'hold' | 'focus'
+  score: number
+  reason: string
+  price: number
+  stop_loss: number | null
+  target_price: number | null
+  sentiment: string
+  batch: string
+  created_at: string
+}
+
+export function getBuyRecommendations(): Promise<{
+  items: RecommendationItem[]
+  batch: string | null
+  updated_at: string | null
+}> {
+  return http.get('/advisory/buy').then((r) => r.data)
+}
+
+export function getSellRecommendations(): Promise<{
+  items: RecommendationItem[]
+  batch: string | null
+  updated_at: string | null
+}> {
+  return http.get('/advisory/sell').then((r) => r.data)
+}
+
+export function getFocusList(): Promise<{
+  items: RecommendationItem[]
+  batch: string | null
+  for_date: string | null
+  updated_at: string | null
+}> {
+  return http.get('/advisory/focus').then((r) => r.data)
+}
+
+export function getAdvisorySummary(): Promise<{
+  buy_count: number
+  sell_count: number
+  focus_count: number
+  focus_batch: string | null
+  trading_hours: boolean
+  trading_day: boolean
+  auto_watch_enabled: boolean
+  auto_watch_top_n: number
+}> {
+  return http.get('/advisory/summary').then((r) => r.data)
+}
+
 // ==================== LLM 分析 ====================
 export interface ChecklistItem {
   label: string

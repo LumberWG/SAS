@@ -206,6 +206,13 @@ class Scanner:
             pct = (df["close"].iloc[-1] / df["close"].iloc[-2] - 1) * 100
             for s in signals:
                 s.extra.setdefault("pct_change", round(float(pct), 2))
+        # 补充技术面评分（盘后 TopN 排序与自动加自选用）
+        if signals:
+            from app.analysis.scoring import score_technical
+
+            technical = score_technical(df)
+            for s in signals:
+                s.extra.setdefault("score", technical.score)
         return signals
 
 

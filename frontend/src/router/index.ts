@@ -39,6 +39,12 @@ const routes = [
         component: () => import('../views/Signals.vue'),
         meta: { title: '信号与自选', icon: 'Bell' },
       },
+      {
+        path: 'advisory',
+        name: 'advisory',
+        component: () => import('../views/Advisory.vue'),
+        meta: { title: '智能建议', icon: 'Lightbulb' },
+      },
     ],
   },
 ]

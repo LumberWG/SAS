@@ -7,7 +7,9 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from app.api import analysis, backtest, market, monitor, screening, strategies, watchlist
+from app.api import (
+    advisory, analysis, backtest, market, monitor, screening, strategies, watchlist,
+)
 from app.config import get_settings
 
 logging.basicConfig(
@@ -74,6 +76,7 @@ def create_app() -> FastAPI:
     app.include_router(watchlist.router, prefix="/api")
     app.include_router(monitor.router, prefix="/api")
     app.include_router(strategies.router, prefix="/api")
+    app.include_router(advisory.router, prefix="/api")
 
     @app.get("/api/health")
     def health() -> dict:

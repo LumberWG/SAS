@@ -67,6 +67,15 @@ class Settings(BaseSettings):
     # 收盘后自动选股使用的策略列表（缺省为全部已注册策略）
     auto_scan_strategies: list[str] = []
 
+    # ---------- 智能建议 / 自动盯盘 ----------
+    # 收盘自动选股后，将评分 Top N 的命中自动加入自选股
+    auto_watch_enabled: bool = True
+    auto_watch_top_n: int = 10
+    # 盘中自选股分析间隔（分钟）
+    intraday_analysis_interval: int = 5
+    # 盘后「明日关注」数量
+    focus_top_n: int = 10
+
     # ---------- 通知管道（可选） ----------
     # Webhook 机器人地址（企业微信/飞书/钉钉均兼容，POST JSON）
     notify_webhook_url: str = ""

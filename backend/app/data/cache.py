@@ -93,6 +93,22 @@ CREATE TABLE IF NOT EXISTS signals (
 );
 CREATE INDEX IF NOT EXISTS idx_signals_code      ON signals(code);
 CREATE INDEX IF NOT EXISTS idx_signals_scan_date ON signals(scan_date);
+-- 智能建议（盘中买卖建议 / 盘后明日关注，按批次存储）
+CREATE TABLE IF NOT EXISTS recommendations (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    code         TEXT NOT NULL,
+    name         TEXT,
+    action       TEXT NOT NULL,   -- buy / sell / hold / focus
+    score        REAL,            -- 技术面评分
+    reason       TEXT,
+    price        REAL,
+    stop_loss    REAL,
+    target_price REAL,
+    sentiment    TEXT,            -- 生成时的市场情绪等级
+    batch        TEXT NOT NULL,   -- 批次：intraday_/premarket_/focus_ + 日期
+    created_at   TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_reco_batch ON recommendations(batch);
 -- 自定义策略（用户在前端改参数另存，启动时自动注册进注册表）
 CREATE TABLE IF NOT EXISTS custom_strategies (
     name          TEXT PRIMARY KEY,
@@ -210,6 +226,79 @@ class Database:
                 (scan_date,),
             ).fetchall()
         return {r["strategy"]: r["cnt"] for r in rows}
+
+    # ---------------- 智能建议 ----------------
+
+    def save_recommendations(
+        self, recommendations: list[dict], batch: str
+    ) -> int:
+        """保存一批建议（先清除同批次旧记录，实现同批次只保留最新）。
+
+        Args:
+            recommendations: 建议 dict 列表（code/name/action/score/reason/
+                price/stop_loss/target_price/sentiment）
+            batch: 批次标识，如 intraday_2026-10-22 / focus_2026-10-21
+
+        Returns:
+            保存条数
+        """
+        if not recommendations:
+            return 0
+        with self._lock, self._connect() as conn:
+            conn.execute("DELETE FROM recommendations WHERE batch=?", (batch,))
+            conn.executemany(
+                "INSERT INTO recommendations(code, name, action, score, reason,"
+                " price, stop_loss, target_price, sentiment, batch, created_at)"
+                " VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                [
+                    (
+                        r["code"], r.get("name", ""), r["action"], r.get("score"),
+                        r.get("reason", ""), r.get("price"), r.get("stop_loss"),
+                        r.get("target_price"), r.get("sentiment", ""), batch, _now(),
+                    )
+                    for r in recommendations
+                ],
+            )
+        return len(recommendations)
+
+    def list_recommendations(
+        self, batch_prefix: str, action: str | None = None
+    ) -> list[dict[str, Any]]:
+        """查询某类批次的最新一批建议（按评分排序）。
+
+        Args:
+            batch_prefix: 批次前缀，如 intraday / focus / premarket
+            action: 可选过滤 buy / sell / hold / focus
+        """
+        with self._lock, self._connect() as conn:
+            # 取该前缀下最新的批次（批次名含日期，字符串最大即最新）
+            row = conn.execute(
+                "SELECT MAX(batch) AS latest FROM recommendations WHERE batch LIKE ?",
+                (f"{batch_prefix}%",),
+            ).fetchone()
+            if not row or not row["latest"]:
+                return []
+            if action:
+                rows = conn.execute(
+                    "SELECT * FROM recommendations WHERE batch=? AND action=?"
+                    " ORDER BY score DESC",
+                    (row["latest"], action),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM recommendations WHERE batch=? ORDER BY score DESC",
+                    (row["latest"],),
+                ).fetchall()
+        return [dict(r) for r in rows]
+
+    def latest_batch(self, batch_prefix: str) -> str | None:
+        """某类批次的最新批次名（含日期）。"""
+        with self._lock, self._connect() as conn:
+            row = conn.execute(
+                "SELECT MAX(batch) AS latest FROM recommendations WHERE batch LIKE ?",
+                (f"{batch_prefix}%",),
+            ).fetchone()
+        return row["latest"] if row and row["latest"] else None
 
     # ---------------- 自定义策略 ----------------
 
