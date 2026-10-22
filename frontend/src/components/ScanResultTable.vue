@@ -149,12 +149,13 @@ function exportCsv() {
           </tr>
         </thead>
         <tbody>
-          <tr
-            v-for="hit in filtered"
-            :key="hit.code + hit.strategy"
-            class="cursor-pointer border-b border-base-600/30 transition-colors hover:bg-primary/10"
-            @click="emit('goDetail', hit)"
-          >
+            <tr
+              v-for="(hit, i) in filtered"
+              :key="hit.code + hit.strategy"
+              class="cursor-pointer transition-colors hover:bg-primary/10"
+              :class="i % 2 === 1 ? 'bg-base-700/20' : ''"
+              @click="emit('goDetail', hit)"
+            >
             <td class="font-num px-4 py-2.5 text-content-muted">{{ hit.code }}</td>
             <td class="px-4 py-2.5 font-medium text-content">{{ hit.name }}</td>
             <td class="px-1 py-2.5">

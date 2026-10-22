@@ -19,10 +19,23 @@ const signals = ref<SignalRecord[]>([])
 const addCode = ref('')
 const adding = ref(false)
 const addError = ref('')
+const watchLoading = ref(false)
+const watchError = ref('')
 
 async function loadWatchlist() {
-  const data = await http.get('/watchlist').then((r) => r.data)
-  watchlist.value = data.items
+  watchLoading.value = true
+  watchError.value = ''
+  try {
+    const data = await http.get('/watchlist').then((r) => r.data)
+    watchlist.value = data.items
+  } catch (e: unknown) {
+    // 失败时保留旧数据不清空，给出重试入口
+    const detail = (e as { response?: { data?: { detail?: string } } })?.response
+      ?.data?.detail
+    watchError.value = detail ?? '自选股列表加载失败'
+  } finally {
+    watchLoading.value = false
+  }
 }
 
 async function loadSignals() {
@@ -97,6 +110,23 @@ onMounted(async () => {
 
       <!-- 列表 -->
       <div class="min-h-0 flex-1 space-y-2 overflow-y-auto">
+        <!-- 加载态 -->
+        <div v-if="watchLoading" class="flex flex-col items-center gap-2 py-12 text-content-faint">
+          <div class="h-6 w-6 animate-spin rounded-full border-2 border-primary-light border-t-transparent" />
+          <p class="text-[12px]">自选股加载中...</p>
+        </div>
+
+        <!-- 错误态（保留旧数据 + 重试） -->
+        <div v-else-if="watchError && watchlist.length === 0" class="flex flex-col items-center gap-3 py-12 text-content-faint">
+          <p class="text-[13px] text-up">{{ watchError }}</p>
+          <button
+            class="rounded-lg border border-base-600 px-3 py-1.5 text-[12px] text-content-muted transition-colors hover:border-primary/50 hover:text-primary-light"
+            @click="loadWatchlist"
+          >
+            重试
+          </button>
+        </div>
+
         <div
           v-for="item in watchlist"
           :key="item.code"

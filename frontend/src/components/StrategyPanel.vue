@@ -47,16 +47,16 @@ const allSelected = computed(
       </div>
       <span class="text-[11px] text-content-faint">{{ selected.length }}/{{ strategies.length }}</span>
     </div>
-    <div class="mb-3 flex gap-2">
+    <div class="mb-3 flex overflow-hidden rounded-lg border border-base-600">
       <button
-        class="flex-1 rounded-md border border-base-600 px-2 py-1 text-[11px] text-content-muted transition-colors hover:border-primary/50 hover:text-primary-light disabled:cursor-not-allowed disabled:opacity-40"
+        class="flex-1 border-r border-base-600 px-2 py-1.5 text-[11px] text-content-muted transition-colors last:border-r-0 hover:bg-primary/10 hover:text-primary-light disabled:cursor-not-allowed disabled:opacity-40"
         :disabled="running || allSelected"
         @click="emit('selectAll')"
       >
         全选
       </button>
       <button
-        class="flex-1 rounded-md border border-base-600 px-2 py-1 text-[11px] text-content-muted transition-colors hover:border-primary/50 hover:text-primary-light disabled:cursor-not-allowed disabled:opacity-40"
+        class="flex-1 px-2 py-1.5 text-[11px] text-content-muted transition-colors hover:bg-primary/10 hover:text-primary-light disabled:cursor-not-allowed disabled:opacity-40"
         :disabled="running || selected.length === 0"
         @click="emit('clearAll')"
       >
@@ -80,15 +80,18 @@ const allSelected = computed(
     <!-- 策略列表（按分类分组） -->
     <div class="min-h-0 flex-1 space-y-4 overflow-y-auto">
       <div v-for="(list, category) in grouped" :key="category">
-        <div class="mb-2 text-[11px] font-medium tracking-wide text-content-faint">{{ category }}</div>
+        <div class="mb-2 flex items-center gap-2 text-[11px] font-medium tracking-wide text-content-faint">
+          <span class="h-1 w-1 rounded-full bg-primary-light" />
+          {{ category }}
+        </div>
         <div class="space-y-2">
           <div
             v-for="s in list"
             :key="s.name"
-            class="group flex cursor-pointer items-start gap-2.5 rounded-lg border p-2.5 transition-all"
+            class="group relative flex cursor-pointer items-start gap-2.5 rounded-lg border p-3 transition-all"
             :class="
               selected.includes(s.name)
-                ? 'border-primary/50 bg-primary/10'
+                ? 'border-primary/50 bg-primary/10 shadow-[inset_2px_0_0_0_#2563EB]'
                 : 'border-base-600/60 hover:border-base-600 hover:bg-base-700/40'
             "
           >
@@ -110,7 +113,7 @@ const allSelected = computed(
                   >
                   <span
                     v-if="todayHits[s.name]"
-                    class="rounded-full bg-primary/15 px-1.5 py-0.5 font-num text-[10px] text-primary-light"
+                    class="rounded-full bg-up/15 px-1.5 py-0.5 font-num text-[10px] font-semibold text-up"
                     :title="`今日已命中 ${todayHits[s.name]} 只`"
                   >
                     {{ todayHits[s.name] }}

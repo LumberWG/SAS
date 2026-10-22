@@ -1,45 +1,55 @@
-"""内存快照存储（带 TTL 与刷新去重）。
+"""内存快照存储（SWR + 刷新去重）。
 
 实时快照数据量大（5000+ 行）且更新频繁，不落 SQLite，
 只在进程内缓存，多接口/定时任务共享，避免重复请求数据源。
 
-刷新去重（防惊群）:
-  全量刷新一次约需 90 秒（59 批顺序请求）。若不加保护，
-  TTL 过期瞬间的多个并发请求会各自触发一次刷新，互相拖慢。
-  这里用 Condition 实现「单刷新者 + 多等待者」:
-    - 第一个线程负责刷新，其余线程等待其完成（带超时）；
-    - 等待者被唤醒后重新检查缓存新鲜度，避免事件竞态；
-    - 等待者超时后抛 TimeoutError，由上层降级（如自选股列表
-      退化为无行情静态列表），避免接口被拖死。
+刷新策略（stale-while-revalidate + 防惊群）:
+  全量刷新一次约 90 秒（59 批顺序请求），远大于 TTL，若让页面请求
+  同步等待刷新，前端 30 秒超时等不起。采用 SWR 模式:
+    1. TTL 内有缓存   → 直接返回新鲜数据；
+    2. TTL 外有旧缓存 → 立即返回旧数据（页面永不等待），
+                        同时后台单线程刷新（去重）；
+    3. 完全无缓存     → 当前线程刷新（首次冷启动），
+                        并发请求单刷新者 + 多等待者（带超时，
+                        超时抛 TimeoutError 由上层降级）。
+  调度器每分钟 force 刷新一次，保证盘中数据持续更新。
 """
 from __future__ import annotations
 
+import logging
 import threading
 import time
 
 import pandas as pd
 
 from app.config import get_settings
-from app.data.akshare_source import get_data_source
+from app.data.akshare_source import DataSourceError, get_data_source
+
+logger = logging.getLogger("sas.snapshot")
 
 
 class SnapshotStore:
     """全市场快照与指数快照的内存缓存。"""
 
-    def __init__(self, ttl: float = 30.0) -> None:
+    def __init__(self, ttl: float = 30.0, fail_cooldown: float = 60.0) -> None:
         self._ttl = ttl
+        #: 刷新失败后的冷却时长（秒）：防止数据源挂掉时每个请求
+        #: 都重复走一遍降级链（慢且刷日志）
+        self._fail_cooldown = fail_cooldown
         self._cond = threading.Condition()
         self._snapshot: pd.DataFrame | None = None
         self._snapshot_at: float = 0.0
         self._indices: pd.DataFrame | None = None
         self._indices_at: float = 0.0
         self._refreshing = False
+        self._failed_at: dict[str, float] = {}  # key → 最近失败时间
 
     # ------------------------------------------------------------------
-    # 通用刷新逻辑（单刷新者 + 多等待者，Condition 防竞态）
+    # 通用刷新逻辑（SWR + 单刷新者 + 多等待者 + 失败冷却）
     # ------------------------------------------------------------------
     def _get_with_refresh(
         self,
+        key: str,
         get_cached,
         get_cached_at,
         fetcher,
@@ -47,59 +57,106 @@ class SnapshotStore:
         wait_timeout: float,
         store,
     ) -> pd.DataFrame:
-        """通用刷新逻辑。
+        """SWR 刷新逻辑。
 
-        Args:
-            get_cached: 读取当前缓存（lambda，刷新后重读防竞态）
-            get_cached_at: 读取缓存时间戳
-            store: 刷新成功后写回缓存的回调（区分快照/指数字段）
+        Returns:
+            新鲜缓存（TTL 内）或旧缓存（后台刷新中）；
+            完全无缓存时同步刷新（可能等待其他刷新者完成）。
+
+        Raises:
+            DataSourceError: 无缓存且最近刷新失败（冷却期内），
+                避免重复触发降级链，由上层降级处理。
         """
         deadline = time.monotonic() + wait_timeout
         with self._cond:
-            while True:
-                cached = get_cached()
-                cached_at = get_cached_at()
-                fresh = (
-                    cached is not None
-                    and (time.monotonic() - cached_at) < self._ttl
-                )
-                if fresh and not force:
-                    return cached  # type: ignore[return-value]
-                if not self._refreshing:
-                    self._refreshing = True
-                    refresher = True
-                    break
-                # 已有线程在刷新：等待其完成（被唤醒后重新检查缓存）
-                refresher = False
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    raise TimeoutError("快照刷新等待超时")
-                self._cond.wait(remaining)
+            cached = get_cached()
+            cached_at = get_cached_at()
+            fresh = (
+                cached is not None
+                and (time.monotonic() - cached_at) < self._ttl
+            )
+            if fresh and not force:
+                return cached  # type: ignore[return-value]
 
-        if refresher:
+            # 失败冷却：无缓存且最近刷新失败过 → 直接报错（不重复触发）
+            failed_at = self._failed_at.get(key, 0.0)
+            if (
+                cached is None
+                and not force
+                and (time.monotonic() - failed_at) < self._fail_cooldown
+            ):
+                raise DataSourceError(f"数据源不可用（{key} 刷新失败冷却中）")
+
+            if not self._refreshing:
+                # 成为刷新者：有旧缓存 → 后台线程刷新（SWR，页面不等待）；
+                # 无旧缓存 → 当前线程同步刷新（首次冷启动）。
+                self._refreshing = True
+                refresher = True
+                background = cached is not None
+            else:
+                # 已有线程在刷新：锁内等待其完成（被唤醒后重读缓存）
+                while True:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise TimeoutError("快照刷新等待超时")
+                    self._cond.wait(remaining)
+                    cached = get_cached()
+                    if cached is not None:
+                        return cached  # type: ignore[return-value]
+
+        if refresher and background:
+            # SWR：立即返回旧数据，后台刷新
+            self._spawn_background_refresh(key, fetcher, store)
+            return cached  # type: ignore[return-value]
+
+        # 冷启动同步刷新（无旧缓存，必须等待数据可用）
+        try:
+            df = fetcher()
+            with self._cond:
+                store(df)
+                self._failed_at.pop(key, None)  # 成功则清除失败冷却
+                self._cond.notify_all()
+            return df
+        except Exception:
+            with self._cond:
+                self._failed_at[key] = time.monotonic()
+            raise
+        finally:
+            with self._cond:
+                self._refreshing = False
+
+    def _spawn_background_refresh(self, key: str, fetcher, store) -> None:
+        """后台线程执行刷新（刷新标志由请求线程持有，线程结束后释放）。"""
+
+        def run() -> None:
             try:
                 df = fetcher()
                 with self._cond:
                     store(df)
+                    self._failed_at.pop(key, None)
                     self._cond.notify_all()
-                return df
+            except Exception:  # noqa: BLE001 - 后台刷新失败静默（旧缓存仍可用）
+                logger.exception("后台快照刷新失败 %s", key)
+                with self._cond:
+                    self._failed_at[key] = time.monotonic()
             finally:
                 with self._cond:
                     self._refreshing = False
-        # 非刷新者走到这里说明缓存已被其他线程刷新（loop 内已 return）
-        raise TimeoutError("快照刷新等待超时")
+
+        threading.Thread(target=run, daemon=True, name="snapshot-refresh").start()
 
     # ------------------------------------------------------------------
     def get_snapshot(
         self, force: bool = False, wait_timeout: float = 15.0
     ) -> pd.DataFrame:
-        """全市场实时快照（TTL 内返回缓存；刷新中去重等待）。"""
+        """全市场实时快照（SWR：旧数据立即可用，后台刷新）。"""
 
         def store(df: pd.DataFrame) -> None:
             self._snapshot = df
             self._snapshot_at = time.monotonic()
 
         return self._get_with_refresh(
+            "snapshot",
             lambda: self._snapshot,
             lambda: self._snapshot_at,
             get_data_source().get_realtime_snapshot,
@@ -109,13 +166,14 @@ class SnapshotStore:
     def get_indices(
         self, force: bool = False, wait_timeout: float = 10.0
     ) -> pd.DataFrame:
-        """主要指数实时快照（TTL 内返回缓存）。"""
+        """主要指数实时快照（SWR：旧数据立即可用，后台刷新）。"""
 
         def store(df: pd.DataFrame) -> None:
             self._indices = df
             self._indices_at = time.monotonic()
 
         return self._get_with_refresh(
+            "indices",
             lambda: self._indices,
             lambda: self._indices_at,
             get_data_source().get_index_snapshot,
