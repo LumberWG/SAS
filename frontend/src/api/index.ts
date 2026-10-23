@@ -29,7 +29,7 @@ export interface Sentiment {
 }
 
 export interface MarketOverview {
-  updated_at: string
+  updated_at: string | null
   trading: boolean
   indices: IndexQuote[]
   breadth: {
@@ -43,6 +43,9 @@ export interface MarketOverview {
   total_amount: number
   temperature: number
   sentiment: Sentiment
+  // 数据源故障（东财/新浪不可达）时后端返回降级结构而非 503 全空
+  degraded?: boolean
+  message?: string
 }
 
 export interface KlineData {

@@ -8,6 +8,13 @@ import pytest
 from app.data.snapshot_store import SnapshotStore
 
 
+@pytest.fixture(autouse=True)
+def _isolate_cache(monkeypatch, tmp_path):
+    """隔离持久化目录：避免加载/写入生产 data/cache 下的遗留快照文件，
+    保证测试依赖的「冷启动无缓存」语义不被污染。"""
+    monkeypatch.setattr("app.data.snapshot_store._CACHE_DIR", tmp_path)
+
+
 @pytest.fixture()
 def store():
     return SnapshotStore(ttl=0.3)  # 短 TTL 便于测试过期逻辑

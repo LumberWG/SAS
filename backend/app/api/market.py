@@ -71,54 +71,90 @@ def _with_disclaimer(data: dict) -> dict:
 # 接口
 # ----------------------------------------------------------------------
 @router.get("/overview")
-def market_overview() -> dict:
-    """大盘概览：主要指数 + 涨跌家数 + 成交额 + 市场温度。"""
+async def market_overview() -> dict:
+    """大盘概览：主要指数 + 涨跌家数 + 成交额 + 市场温度。
+
+    数据源故障（东财/新浪不可达）或冷启动无缓存时，快照拉取可能长时间挂起。
+    这里对每个数据源分别限时等待（25s），失败则降级（返回 200 + degraded 结构），
+    避免首页空白；若磁盘有持久化旧缓存则立即返回旧数据（SWR）。
+    """
+    indices_df: pd.DataFrame | None = None
+    snapshot: pd.DataFrame | None = None
     try:
-        # 快照刷新去重后最长等待 20 秒；超时返回 503，前端轮询恢复
-        indices_df = snapshot_store.get_indices(wait_timeout=20.0)
-        snapshot = snapshot_store.get_snapshot(wait_timeout=20.0)
-    except TimeoutError as exc:
-        raise HTTPException(
-            status_code=503, detail="行情数据刷新中，请稍后重试"
-        ) from exc
+        indices_df = await asyncio.wait_for(
+            asyncio.to_thread(snapshot_store.get_indices, 20.0), timeout=25
+        )
     except Exception as exc:  # noqa: BLE001
-        logger.exception("获取大盘概览失败")
-        raise HTTPException(status_code=502, detail=f"数据源异常: {exc}") from exc
+        logger.warning("指数快照不可用: %s", exc)
+    try:
+        snapshot = await asyncio.wait_for(
+            asyncio.to_thread(snapshot_store.get_snapshot, 20.0), timeout=25
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("全市场快照不可用: %s", exc)
 
-    # ---- 涨跌家数统计 ----
-    pct = snapshot["pct_change"].fillna(0.0)
-    up = int((pct > 0).sum())
-    down = int((pct < 0).sum())
-    flat = int((pct == 0).sum())
-    total = len(snapshot)
+    if indices_df is None and snapshot is None:
+        # 完全无数据：返回降级结构（200），前端展示提示而非空白
+        return _with_disclaimer({
+            "degraded": True,
+            "message": "行情数据源暂不可用，已为您保留最近缓存（若有）",
+            "indices": [],
+            "total_amount": 0,
+            "breadth": {
+                "up": 0, "down": 0, "flat": 0, "total": 0,
+                "limit_up": 0, "limit_down": 0,
+            },
+            "temperature": 50.0,
+            "sentiment": {
+                "level": "未知", "weight": 0,
+                "advice": "数据源暂不可用，情绪指标无法计算",
+            },
+            "updated_at": None,
+        })
 
-    # 涨停/跌停家数：按各板块涨跌停幅度判断（留 0.1% 误差容忍）
-    limit_up = 0
-    limit_down = 0
-    for row in snapshot.itertuples():
-        limit = _limit_pct(row.code, getattr(row, "name", ""))
-        if row.pct_change is not None and not pd.isna(row.pct_change):
-            if row.pct_change >= limit - 0.1:
-                limit_up += 1
-            elif row.pct_change <= -limit + 0.1:
-                limit_down += 1
+    # ---- 涨跌家数统计（无快照时用默认值）----
+    if snapshot is not None and not snapshot.empty:
+        pct = snapshot["pct_change"].fillna(0.0)
+        up = int((pct > 0).sum())
+        down = int((pct < 0).sum())
+        flat = int((pct == 0).sum())
+        total = len(snapshot)
 
-    total_amount = float(snapshot["amount"].fillna(0).sum())
+        # 涨停/跌停家数：按各板块涨跌停幅度判断（留 0.1% 误差容忍）
+        limit_up = 0
+        limit_down = 0
+        for row in snapshot.itertuples():
+            limit = _limit_pct(row.code, getattr(row, "name", ""))
+            if row.pct_change is not None and not pd.isna(row.pct_change):
+                if row.pct_change >= limit - 0.1:
+                    limit_up += 1
+                elif row.pct_change <= -limit + 0.1:
+                    limit_down += 1
+
+        total_amount = float(snapshot["amount"].fillna(0).sum())
+    else:
+        up = down = flat = total = limit_up = limit_down = 0
+        total_amount = 0.0
+
     temperature = _market_temperature(up, down, flat, limit_up, total)
     sentiment = classify_sentiment(temperature)
 
     indices = []
-    for row in indices_df.itertuples():
-        indices.append({
-            "symbol": row.symbol,
-            "name": row.name,
-            "price": None if pd.isna(row.price) else float(row.price),
-            "pct_change": None if pd.isna(row.pct_change) else float(row.pct_change),
-            "change": None if pd.isna(row.change) else float(row.change),
-            "amount": None if pd.isna(row.amount) else float(row.amount),
-        })
+    if indices_df is not None and not indices_df.empty:
+        for row in indices_df.itertuples():
+            indices.append({
+                "symbol": row.symbol,
+                "name": row.name,
+                "price": None if pd.isna(row.price) else float(row.price),
+                "pct_change": None if pd.isna(row.pct_change) else float(row.pct_change),
+                "change": None if pd.isna(row.change) else float(row.change),
+                "amount": None if pd.isna(row.amount) else float(row.amount),
+            })
 
+    # 仅指数可用而快照不可用 → 标记部分降级
+    degraded = snapshot is None
     return _with_disclaimer({
+        "degraded": degraded,
         "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "trading": _is_trading_time(),
         "indices": indices,

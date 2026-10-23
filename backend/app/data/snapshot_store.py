@@ -19,6 +19,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from pathlib import Path
 
 import pandas as pd
 
@@ -27,11 +28,19 @@ from app.data.akshare_source import DataSourceError, get_data_source
 
 logger = logging.getLogger("sas.snapshot")
 
+# 持久化默认目录（与 kline 缓存分离）：重启/数据源故障后保留最近一次成功快照
+_CACHE_DIR = Path(__file__).resolve().parent / "cache"
+
 
 class SnapshotStore:
     """全市场快照与指数快照的内存缓存。"""
 
-    def __init__(self, ttl: float = 30.0, fail_cooldown: float = 60.0) -> None:
+    def __init__(
+        self,
+        ttl: float = 30.0,
+        fail_cooldown: float = 60.0,
+        cache_dir: str | None = None,
+    ) -> None:
         self._ttl = ttl
         #: 刷新失败后的冷却时长（秒）：防止数据源挂掉时每个请求
         #: 都重复走一遍降级链（慢且刷日志）
@@ -43,6 +52,40 @@ class SnapshotStore:
         self._indices_at: float = 0.0
         self._refreshing = False
         self._failed_at: dict[str, float] = {}  # key → 最近失败时间
+        self._cache_dir = Path(cache_dir) if cache_dir is not None else _CACHE_DIR
+        self._snapshot_file = self._cache_dir / "snapshot_latest.parquet"
+        self._indices_file = self._cache_dir / "indices_latest.parquet"
+        self._load_persisted()
+
+    # ------------------------------------------------------------------
+    # 持久化：重启/数据源故障后仍有最近一次成功数据，避免首页空白
+    # ------------------------------------------------------------------
+    def _load_persisted(self) -> None:
+        """启动时加载上次成功的快照/指数（若有）。
+
+        加载后视为「已过期」，触发 SWR 后台刷新（立即返回旧数据，后台补新）。
+        """
+        for path, attr, at_attr in (
+            (self._indices_file, "_indices", "_indices_at"),
+            (self._snapshot_file, "_snapshot", "_snapshot_at"),
+        ):
+            try:
+                if path.exists():
+                    df = pd.read_parquet(path)
+                    if df is not None and not df.empty:
+                        setattr(self, attr, df)
+                        # 视为已过期 → 首次请求触发 SWR 后台刷新（立即返回旧）
+                        setattr(self, at_attr, time.monotonic() - self._ttl - 1)
+                        logger.info("已加载持久化 %s（%d 行）", attr, len(df))
+            except Exception:  # noqa: BLE001
+                logger.exception("加载持久化 %s 失败", attr)
+
+    def _persist(self, path: Path, df: pd.DataFrame) -> None:
+        try:
+            self._cache_dir.mkdir(parents=True, exist_ok=True)
+            df.to_parquet(path)
+        except Exception:  # noqa: BLE001
+            logger.exception("持久化 %s 失败", path)
 
     # ------------------------------------------------------------------
     # 通用刷新逻辑（SWR + 单刷新者 + 多等待者 + 失败冷却）
@@ -154,6 +197,7 @@ class SnapshotStore:
         def store(df: pd.DataFrame) -> None:
             self._snapshot = df
             self._snapshot_at = time.monotonic()
+            self._persist(self._snapshot_file, df)
 
         return self._get_with_refresh(
             "snapshot",
@@ -171,6 +215,7 @@ class SnapshotStore:
         def store(df: pd.DataFrame) -> None:
             self._indices = df
             self._indices_at = time.monotonic()
+            self._persist(self._indices_file, df)
 
         return self._get_with_refresh(
             "indices",
