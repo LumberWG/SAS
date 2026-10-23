@@ -189,6 +189,22 @@ class SnapshotStore:
         threading.Thread(target=run, daemon=True, name="snapshot-refresh").start()
 
     # ------------------------------------------------------------------
+    def peek_snapshot(self) -> pd.DataFrame | None:
+        """只读内存快照（不触发刷新、不等待）。
+
+        用于合并类场景（如自选股行情）：有缓存就用、没有就跳过，
+        绝不为它触发全市场冷启动刷新（避免列表接口被拖慢）。
+        返回缓存引用（可能为 None），调用方需自行容错缺失列。
+        """
+        with self._cond:
+            return self._snapshot
+
+    def peek_indices(self) -> pd.DataFrame | None:
+        """只读内存指数快照（不触发刷新、不等待）。"""
+        with self._cond:
+            return self._indices
+
+    # ------------------------------------------------------------------
     def get_snapshot(
         self, force: bool = False, wait_timeout: float = 15.0
     ) -> pd.DataFrame:

@@ -24,18 +24,21 @@ async def list_watchlist() -> dict:
     """
     items = await asyncio.to_thread(db.list_watchlist)
 
-    # 合并实时快照（超时/失败时仅返回静态列表）
+    # 合并实时快照：仅取内存缓存（不触发全市场冷启动刷新，避免列表卡顿）。
+    # 缓存为空/残缺时跳过（返回静态列表，价格显示 --）。
     snapshot_map: dict[str, dict] = {}
     try:
-        snapshot = await asyncio.wait_for(
-            asyncio.to_thread(snapshot_store.get_snapshot), timeout=15.0
-        )
-        for row in snapshot.itertuples():
-            snapshot_map[row.code] = {
-                "price": None if pd_isna(row.price) else float(row.price),
-                "pct_change": None if pd_isna(row.pct_change) else float(row.pct_change),
-                "amount": None if pd_isna(row.amount) else float(row.amount),
-            }
+        snapshot = snapshot_store.peek_snapshot()
+        if (
+            snapshot is not None and not snapshot.empty
+            and "price" in snapshot.columns and "pct_change" in snapshot.columns
+        ):
+            for row in snapshot.itertuples():
+                snapshot_map[row.code] = {
+                    "price": None if pd_isna(getattr(row, "price", None)) else float(row.price),
+                    "pct_change": None if pd_isna(getattr(row, "pct_change", None)) else float(row.pct_change),
+                    "amount": None if pd_isna(getattr(row, "amount", None)) else float(row.amount),
+                }
     except Exception as exc:  # noqa: BLE001
         logger.warning("自选股行情合并跳过（%s），返回静态列表", exc)
 
