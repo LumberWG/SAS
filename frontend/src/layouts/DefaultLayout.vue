@@ -137,9 +137,11 @@ const statusText = computed(() => (market.trading ? '交易中' : '已收盘'))
       <!-- 页面内容（顶栏高度补偿） -->
       <main class="flex-1 overflow-y-auto pt-14">
         <div class="mx-auto max-w-[1440px] animate-fade-in p-6">
-          <router-view v-slot="{ Component }">
+          <router-view v-slot="{ Component, route }">
             <transition name="fade" mode="out-in">
-              <component :is="Component" />
+              <keep-alive :max="10">
+                <component :is="Component" :key="route.fullPath" />
+              </keep-alive>
             </transition>
           </router-view>
         </div>

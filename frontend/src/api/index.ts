@@ -8,6 +8,44 @@ const http = axios.create({
   timeout: 30000,
 })
 
+// ---- GET 响应缓存（TTL）：减少页面切换 / 轮询的重复请求与后端压力 ----
+// 命中且未过期时通过 axios adapter 短路返回，不再发起网络请求；
+// 仅缓存 GET，且 refresh=true 的主动刷新请求跳过缓存（保证拿到最新）。
+const _getCache = new Map<string, { ts: number; data: unknown }>()
+const GET_CACHE_TTL = 10_000
+
+function _cacheKey(config: { url?: string; params?: unknown }): string {
+  return (config.url ?? '') + '|' + JSON.stringify(config.params ?? {})
+}
+
+http.interceptors.request.use((config) => {
+  const refresh = (config.params as { refresh?: boolean } | undefined)?.refresh
+  if ((config.method ?? 'get').toLowerCase() === 'get' && config.url && !refresh) {
+    const hit = _getCache.get(_cacheKey(config))
+    if (hit && Date.now() - hit.ts < GET_CACHE_TTL) {
+      config.adapter = () =>
+        Promise.resolve({
+          data: hit.data,
+          status: 200,
+          statusText: 'OK',
+          headers: {},
+          config,
+          request: {},
+        } as import('axios').AxiosResponse)
+    }
+  }
+  return config
+})
+
+http.interceptors.response.use((response) => {
+  const cfg = response.config
+  const refresh = (cfg.params as { refresh?: boolean } | undefined)?.refresh
+  if ((cfg.method ?? 'get').toLowerCase() === 'get' && cfg.url && !refresh) {
+    _getCache.set(_cacheKey(cfg), { ts: Date.now(), data: response.data })
+  }
+  return response
+})
+
 // 每个响应都带 disclaimer 字段（后端统一注入），页面顶栏展示
 
 // ==================== 行情 ====================
