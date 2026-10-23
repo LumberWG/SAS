@@ -223,7 +223,6 @@ scanner = Scanner()
 # 扫描范围定义（选股中心「扫描范围」下拉）
 # ----------------------------------------------------------------------
 SCAN_SCOPES: dict[str, dict] = {
-    "all": {"label": "全市场（沪深京）", "filter": None},
     "top_amount:500": {"label": "成交额前 500（推荐）", "filter": None},
     "top_amount:1000": {"label": "成交额前 1000", "filter": None},
     "sh": {"label": "沪市主板", "filter": lambda p: p["code"].str.startswith("60")},
