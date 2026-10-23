@@ -98,7 +98,7 @@ class Scanner:
             # 记录扫描开始时的市场情绪（供结果展示与 LLM 分析上下文）
             task.sentiment = self._current_sentiment()
 
-            pool = get_stock_pool()
+            pool = await asyncio.to_thread(get_stock_pool)
             if codes:
                 wanted = set(codes)
                 pool = pool[pool["code"].isin(wanted)]
@@ -252,7 +252,7 @@ async def warmup_klines(
     settings = get_settings()
     if concurrency is None:
         concurrency = settings.kline_warmup_concurrency
-    pool = get_stock_pool()
+    pool = await asyncio.to_thread(get_stock_pool)
     if codes is not None:
         wanted = set(codes)
         pool = pool[pool["code"].isin(wanted)]

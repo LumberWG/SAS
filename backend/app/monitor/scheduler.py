@@ -363,7 +363,7 @@ class MarketScheduler:
         """全市场K线预热：后台增量刷新本地 Parquet 缓存，消除扫描实时网络拉取。"""
         try:
             if self.settings.kline_warmup_top_n > 0:
-                pool = get_stock_pool()
+                pool = await asyncio.to_thread(get_stock_pool)
                 codes = pool["code"].head(self.settings.kline_warmup_top_n).tolist()
                 return await screener_warmup(codes)
             return await screener_warmup()

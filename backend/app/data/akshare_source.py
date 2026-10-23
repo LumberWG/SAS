@@ -11,6 +11,7 @@
 """
 from __future__ import annotations
 
+import concurrent.futures as _cf
 import logging
 import time
 from datetime import datetime, timedelta
@@ -106,8 +107,14 @@ class AkshareDataSource(BaseDataSource):
     # ------------------------------------------------------------------
     # 内部工具：带重试与熔断的调用
     # ------------------------------------------------------------------
-    def _call(self, func_name: str, retries: int | None = None, **kwargs):
-        """调用 akshare 接口：熔断优先，失败重试（线性退避）。"""
+    def _call(self, func_name: str, retries: int | None = None, timeout: float = 20.0, **kwargs):
+        """调用 akshare 接口：熔断优先，失败重试（线性退避）。
+
+        关键：akshare 底层 requests 不自带超时，网络不通时会挂到 TCP 超时
+        （可达分钟级），叠加重试会把单次调用拖成十几分钟，且若在事件循环
+        线程内同步调用会直接堵死整个后端。这里用线程池 + ``fut.result(timeout)``
+        给每次调用硬上限，超时即视为失败并快速降级。
+        """
         if self._breaker.is_open(func_name):
             # 熔断冷却期内直接失败，交由上层降级
             raise DataSourceError(f"akshare.{func_name} 已熔断，直接降级")
@@ -116,11 +123,29 @@ class AkshareDataSource(BaseDataSource):
         func = getattr(self._ak, func_name)
         last_err: Exception | None = None
         for attempt in range(1, retries + 2):
+            if self._breaker.is_open(func_name):
+                raise DataSourceError(f"akshare.{func_name} 已熔断，直接降级")
+            ex = _cf.ThreadPoolExecutor(max_workers=1)
             try:
-                result = func(**kwargs)
+                _fut = ex.submit(func, **kwargs)
+                result = _fut.result(timeout=timeout)
                 self._breaker.record_success(func_name)
                 return result
+            except _cf.TimeoutError:
+                # 超时即放弃：不等待仍在跑 akshare 的泄漏线程（wait=False），
+                # 否则 shutdown 会 join 该线程（可能卡到 TCP 超时，几分钟）
+                ex.shutdown(wait=False)
+                last_err = TimeoutError(f"akshare.{func_name} 超时({timeout}s)")
+                logger.warning(
+                    "akshare.%s 第 %d 次调用超时(%ds)", func_name, attempt, int(timeout)
+                )
+                if attempt <= retries:
+                    time.sleep(0.5 * attempt)  # 线性退避
+            except DataSourceError:
+                ex.shutdown(wait=False)
+                raise
             except Exception as exc:  # noqa: BLE001 - 数据源异常统一兜底
+                ex.shutdown(wait=False)
                 last_err = exc
                 logger.warning(
                     "akshare.%s 第 %d 次调用失败: %s", func_name, attempt, exc

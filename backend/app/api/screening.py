@@ -55,7 +55,7 @@ async def start_scan(req: ScanRequest) -> dict:
 @router.get("/kline-status")
 async def kline_status() -> dict:
     """K线缓存覆盖状态：已缓存只数 / 股票池总数 / 最近一次预热结果。"""
-    return with_disclaimer(kline_cache_stats())
+    return with_disclaimer(await asyncio.to_thread(kline_cache_stats))
 
 
 @router.post("/warmup")
