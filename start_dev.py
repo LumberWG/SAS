@@ -25,14 +25,17 @@ def start() -> None:
 
     flags = subprocess.CREATE_NEW_PROCESS_GROUP
 
-    # 后端：FastAPI (uvicorn)
+    # 后端：FastAPI (uvicorn)。--reload 监听 app/ 目录变化自动重启，
+    # 开发期改 .py 保存即生效，无需手动重启（生产模式由 SAS 服务托管，
+    # 不需要也不应使用 reload）。
     p1 = subprocess.Popen(
         [rf"{BACKEND}\.venv\Scripts\python.exe", "-m", "uvicorn",
-         "app.main:app", "--host", "127.0.0.1", "--port", "8000"],
+         "app.main:app", "--host", "127.0.0.1", "--port", "8000",
+         "--reload", "--reload-dir", "app"],
         cwd=BACKEND, creationflags=flags,
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
-    print(f"后端启动中 (PID {p1}) → http://127.0.0.1:8000")
+    print(f"后端启动中 (PID {p1}) → http://127.0.0.1:8000（代码改动自动重启）")
 
     # 前端：Vite dev server
     p2 = subprocess.Popen(

@@ -291,7 +291,31 @@ nssm remove SAS confirm                # 卸载服务
 
 **模式区分**：
 - **生产模式**（推荐，公网访问用）：只跑 `SAS` 服务一个进程，访问 http://127.0.0.1:8000
-- **开发模式**（改代码调试用）：`python start_dev.py`（前端 dev server 带热更新，后端手动跑），二者不要同时使用（8000 端口冲突）
+- **开发模式**（改代码调试用）：`python start_dev.py`（前端 Vite HMR + 后端 `--reload` 自动重启），二者不要同时使用（8000 端口冲突）
+
+## 代码更新流程（重要）
+
+改动代码后**不会自动生效**，按改动类型执行：
+
+| 改动 | 需要的动作 |
+| --- | --- |
+| 前端 `.vue` / `.ts` | 重新构建：`cd frontend && npm run build` |
+| 后端 `.py` / 策略 / 配置 | 重启服务：`Restart-Service SAS` |
+| 两者都改 | 一起做 |
+
+**一键部署**（管理员，自动完成 构建前端 → 重启服务 → 验证本地+公网）：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File e:\Study\SAS\deploy.ps1
+```
+
+**推送到 GitHub 不会自动发生**，需手动：
+
+```bash
+git add -A && git commit -m "..." && git push
+```
+
+**开发调试期**（不想反复构建/重启）：用 `python start_dev.py`——前端保存即热更新，后端保存自动重启（`--reload`）。调试完成后再跑 `deploy.ps1` 发布到生产。
 
 ## 测试
 
