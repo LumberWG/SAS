@@ -1,6 +1,7 @@
 """FastAPI 应用入口：CORS、路由注册、生命周期管理。"""
 from __future__ import annotations
 
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -27,16 +28,24 @@ FRONTEND_DIST = BASE_DIR / "frontend" / "dist"
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    """应用生命周期：预热股票池 + 启动调度器。"""
-    logger.info("SAS 后端启动，预热股票池...")
-    try:
-        from app.data.akshare_source import get_data_source
+    """应用生命周期：后台预热股票池 + 启动调度器。
 
-        pool = get_data_source().get_stock_pool()
-        logger.info("股票池预热完成，共 %d 只股票", len(pool))
-    except Exception as exc:  # noqa: BLE001
-        # 预热失败不阻塞启动（可能是网络问题），首次请求时会重试
-        logger.warning("股票池预热失败（将在首次请求时重试）: %s", exc)
+    预热放后台线程执行，不阻塞应用就绪——否则开机自启场景下
+    服务显示 Running 但端口未监听（东财/降级链可能要几十秒），
+    health 检查失败、公网访问 502。
+    """
+    logger.info("SAS 后端启动（股票池后台预热中）")
+
+    async def warmup() -> None:
+        try:
+            from app.data.akshare_source import get_data_source
+
+            pool = await asyncio.to_thread(get_data_source().get_stock_pool)
+            logger.info("股票池预热完成，共 %d 只股票", len(pool))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("股票池预热失败（将在首次请求时重试）: %s", exc)
+
+    warmup_task = asyncio.create_task(warmup())
 
     # 加载自定义策略（用户此前保存的参数化策略）
     try:
@@ -51,6 +60,7 @@ async def lifespan(_: FastAPI):
 
     scheduler.start()
     yield
+    warmup_task.cancel()
     scheduler.shutdown()
     logger.info("SAS 后端关闭")
 
