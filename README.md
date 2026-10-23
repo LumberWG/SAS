@@ -60,6 +60,79 @@
 建议数据按批次持久化（`recommendations` 表：`intraday_/premarket_/focus_` + 日期），
 买卖建议只展示当日批次，明日关注按生成日期对应次日开盘。
 
+## 公网部署（cpolar 内网穿透）
+
+面向个人使用的公网访问方案：前端构建为静态文件由 FastAPI 托管（单端口），再用 cpolar 穿透到公网。
+
+### 1. 构建前端（代码更新后重新执行）
+
+```bash
+cd frontend && npm run build
+```
+
+`dist/` 产物由后端自动托管，无需 Nginx。
+
+### 2. 启动后端（单端口提供页面 + API）
+
+```bash
+cd backend
+uvicorn app.main:app --host 0.0.0.0 --port 8000
+```
+
+此时 http://127.0.0.1:8000 即可访问完整系统（页面 + `/api` + `/docs`）。`dist/` 不存在时后端仍可作为纯 API 服务运行（开发模式不受影响）。
+
+### 3. 配置 cpolar 隧道
+
+**固定域名（推荐，需 cpolar 付费版）**：先在 [cpolar 后台](https://dashboard.cpolar.com) → 预留 → 创建 HTTP 隧道（如子域名 `mysas`，本地地址 `8000`），创建后会自动同步到本地配置。之后编辑 `C:\Users\<你的用户名>\.cpolar\cpolar.yml`，确认 `tunnels:` 下包含：
+
+```yaml
+tunnels:
+  mysas:
+    id: xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx   # dashboard 创建时自动生成，勿改动
+    subdomain: mysas
+    proto: http
+    addr: "8000"
+    bind_tls: both
+    region: cn_top
+    start_type: enable    # 开机/服务重启后自动恢复
+```
+
+**随机域名（免费版）**：yml 中不写 id 与 subdomain，由 cpolar 每次分配：
+
+```yaml
+tunnels:
+  sas:
+    proto: http
+    addr: "8000"
+    bind_tls: both
+    start_type: enable
+```
+
+### 4. 重启 cpolar 服务使配置生效
+
+修改 yml 后 **service 不会热加载**，需重启（管理员权限）：
+
+```powershell
+Restart-Service cpolar   # 管理员 PowerShell
+```
+
+重启后 service 自动拉起 `start_type: enable` 的隧道，此时在 **cpolar Web UI（http://127.0.0.1:9200）与 dashboard 隧道列表中都能看到**。
+
+### 5. 访问验证
+
+固定域名直接访问 https://mysas.vip.cpolar.cn（http/https 双协议）；
+随机域名在日志中查找（`cpolar start <隧道名> -log=stdout` 会输出
+`Tunnel established at https://xxxx.r10.cpolar.top`）。
+
+### 注意事项
+
+- **CLI 进程 vs service 隧道**：`cpolar start <name>` 命令行启动的是独立进程，
+  能连通但**不在 Web UI/dashboard 列表中显示**，进程结束即断。要持久化+列表可见，
+  必须用 yml + service 方式（本文档方式）
+- 安全：公网暴露期间任何人可访问；建议在 dashboard 配置访问认证，且不要在公网环境配置真实 LLM Key
+- 数据源：服务器在本机，A股数据源直连不受穿透影响
+- 调度任务：自动盯盘（盘中建议/收盘选股）依赖后端进程存活，关机或关闭后端后当天任务不执行
+
 ## 技术栈
 
 - **后端**：Python 3.11+ / FastAPI / Pandas / akshare / SQLite + Parquet / APScheduler

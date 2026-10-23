@@ -25,3 +25,7 @@ Thumbs.db
 
 # 工具私有数据（不推送）
 .codebuddy/
+
+# 本地临时文件
+cpolar_*.log
+*.log

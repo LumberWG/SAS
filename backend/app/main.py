@@ -3,20 +3,26 @@ from __future__ import annotations
 
 import logging
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 
 from app.api import (
     advisory, analysis, backtest, market, monitor, screening, strategies, watchlist,
 )
-from app.config import get_settings
+from app.config import BASE_DIR, get_settings
 
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
 )
 logger = logging.getLogger("sas")
+
+#: 前端生产构建产物目录（cpolar 单端口部署时由后端托管）
+FRONTEND_DIST = BASE_DIR / "frontend" / "dist"
 
 
 @asynccontextmanager
@@ -81,6 +87,34 @@ def create_app() -> FastAPI:
     @app.get("/api/health")
     def health() -> dict:
         return {"status": "ok", "disclaimer": settings.disclaimer}
+
+    # ------------------------------------------------------------------
+    # 前端静态托管（生产部署：cpolar 只需穿透 8000 单端口）
+    # dist 不存在时（纯后端开发模式）跳过，不影响 /api 与 /docs
+    # ------------------------------------------------------------------
+    if FRONTEND_DIST.is_dir():
+        # 静态资源（JS/CSS/图片）单独挂载，长缓存友好
+        assets_dir = FRONTEND_DIST / "assets"
+        if assets_dir.is_dir():
+            app.mount(
+                "/assets",
+                StaticFiles(directory=assets_dir),
+                name="assets",
+            )
+
+        @app.get("/", include_in_schema=False)
+        def index() -> FileResponse:
+            return FileResponse(FRONTEND_DIST / "index.html")
+
+        @app.get("/{full_path:path}", include_in_schema=False)
+        def spa_fallback(full_path: str) -> FileResponse:
+            """SPA history 模式回退：非 API 路径统一返回 index.html。
+
+            注册在最后，/api/* 已注册路由优先匹配，不会拦截 API。
+            """
+            return FileResponse(FRONTEND_DIST / "index.html")
+
+        logger.info("前端静态托管已启用: %s", FRONTEND_DIST)
 
     return app
 
