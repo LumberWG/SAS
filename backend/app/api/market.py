@@ -1,6 +1,7 @@
 """行情 API：大盘概览、指数走势、个股快照与K线。"""
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime
 
@@ -132,7 +133,7 @@ def market_overview() -> dict:
 
 
 @router.get("/indices/{symbol}/kline")
-def index_kline(
+async def index_kline(
     symbol: str,
     days: int = Query(60, ge=5, le=500),
     refresh: bool = Query(False, description="强制刷新缓存"),
@@ -149,9 +150,16 @@ def index_kline(
     try:
         df = None if refresh else kline_cache.get(cache_key)
         if df is None:
-            df = get_data_source().get_index_daily(symbol)
+            # 限时拉取：数据源故障时最多 12s 返回 503，避免前端长时间挂起
+            source = get_data_source()
+            df = await asyncio.wait_for(
+                asyncio.to_thread(source.get_index_daily, symbol, 8, 0),
+                timeout=12,
+            )
             if not df.empty:
                 kline_cache.save(cache_key, df)
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=503, detail="数据源暂时不可用（超时）") from None
     except Exception as exc:  # noqa: BLE001
         logger.exception("获取指数K线失败 symbol=%s", symbol)
         raise HTTPException(status_code=502, detail=f"数据源异常: {exc}") from exc
@@ -196,7 +204,7 @@ def stock_quote(code: str) -> dict:
 
 
 @router.get("/stocks/{code}/kline")
-def stock_kline(
+async def stock_kline(
     code: str,
     days: int = Query(120, ge=20, le=1000),
     adjust: str = Query("qfq", pattern="^(qfq|hfq|)$"),
@@ -206,7 +214,15 @@ def stock_kline(
     from app.data.service import get_kline_cached
 
     try:
-        df = get_kline_cached(code, adjust=adjust, refresh=refresh)
+        # 限时拉取：数据源故障时最多 12s 返回 503，避免前端长时间挂起
+        # （默认 _call 为 20s×3 次重试≈60s；k线接口不重试、短超时）
+        df = await asyncio.wait_for(
+            asyncio.to_thread(get_kline_cached, code, adjust=adjust,
+                              refresh=refresh, timeout=8, retries=0),
+            timeout=12,
+        )
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=503, detail="数据源暂时不可用（超时）") from None
     except Exception as exc:  # noqa: BLE001
         logger.exception("获取K线失败 code=%s", code)
         raise HTTPException(status_code=502, detail=f"数据源异常: {exc}") from exc

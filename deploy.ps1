@@ -67,6 +67,30 @@ if ($health) {
     Write-Host "Local     : FAILED after 60s (log: data\logs\sas-service-error.log)" -ForegroundColor Red
 }
 
+# Business API readiness: /api/health responding does NOT guarantee the
+# backend is usable. On 2026-10-23 the event loop was blocked by a sync
+# data-source call, so health returned 200 but every business API timed out.
+# Probe a few cheap (DB-only) endpoints to catch that class of failure.
+$bizPaths = @("/api/paper/account", "/api/screening/strategies", "/api/analysis/status")
+$bizOk = $true
+foreach ($p in $bizPaths) {
+    try {
+        $sw = Measure-Command { $br = Invoke-WebRequest -Uri ("http://127.0.0.1:8000" + $p) -UseBasicParsing -TimeoutSec 15 }
+        if ($br.StatusCode -ge 500) {
+            $bizOk = $false
+            Write-Host ("Business  : {0} -> HTTP {1} [DEGRADED]" -f $p, $br.StatusCode) -ForegroundColor Yellow
+        } else {
+            Write-Host ("Business  : {0} -> HTTP {1} ({2}ms)" -f $p, $br.StatusCode, [int]$sw.TotalMilliseconds) -ForegroundColor Green
+        }
+    } catch {
+        $bizOk = $false
+        Write-Host ("Business  : {0} -> TIMEOUT/ERR (event loop may be blocked)" -f $p) -ForegroundColor Red
+    }
+}
+if (-not $bizOk) {
+    Write-Host "[WARN] Some business APIs not ready - backend may be blocked or data-source degraded." -ForegroundColor Yellow
+}
+
 # Public URL check (fixed subdomain; change if yours differs)
 $PublicUrl = "https://mysas.vip.cpolar.cn"
 # PS 5.1: Invoke-WebRequest has no -SkipCertificateCheck; trust all certs for this check

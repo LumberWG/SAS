@@ -17,6 +17,8 @@ def get_kline_cached(
     adjust: str = "qfq",
     refresh: bool = False,
     days: int | None = None,
+    timeout: float | None = None,
+    retries: int | None = None,
 ) -> pd.DataFrame:
     """获取日K线：本地 Parquet 缓存优先，增量更新。
 
@@ -29,10 +31,11 @@ def get_kline_cached(
     cached = None if refresh else kline_cache.get(code)
 
     if cached is None:
-        df = source.get_daily_kline(code, adjust=adjust)
+        df = source.get_daily_kline(code, adjust=adjust, timeout=timeout, retries=retries)
     else:
         last = kline_cache.last_date(code)
-        new_df = source.get_daily_kline(code, adjust=adjust, start_date=last)
+        new_df = source.get_daily_kline(code, adjust=adjust, start_date=last,
+                                        timeout=timeout, retries=retries)
         if new_df.empty:
             df = cached
         else:

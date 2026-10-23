@@ -217,7 +217,8 @@ class AkshareDataSource(BaseDataSource):
     # ------------------------------------------------------------------
     def get_daily_kline(
         self, code: str, adjust: str = "qfq", start_date: str | None = None,
-        end_date: str | None = None,
+        end_date: str | None = None, timeout: float | None = None,
+        retries: int | None = None,
     ) -> pd.DataFrame:
         """单只股票日线历史。
 
@@ -242,6 +243,7 @@ class AkshareDataSource(BaseDataSource):
                 start_date=start_norm.replace("-", ""),
                 end_date=end_norm.replace("-", ""),
                 adjust=adjust,
+                timeout=timeout, retries=retries,
             )
         except DataSourceError:
             # 降级链：腾讯K线 → 新浪K线（均忽略原始日期参数，拉取后自行过滤）
@@ -346,10 +348,10 @@ class AkshareDataSource(BaseDataSource):
         df = df[df["em_code"].isin(wanted)]
         return df.reset_index(drop=True)
 
-    def get_index_daily(self, symbol: str) -> pd.DataFrame:
+    def get_index_daily(self, symbol: str, timeout: float | None = None, retries: int | None = None) -> pd.DataFrame:
         """指数日线历史（新浪代码格式，如 sh000001）。主源东财，失败降级新浪。"""
         try:
-            df = self._call("stock_zh_index_daily_em", symbol=symbol)
+            df = self._call("stock_zh_index_daily_em", symbol=symbol, timeout=timeout, retries=retries)
         except DataSourceError:
             logger.warning("东方财富指数日线不可用，降级为新浪K线 symbol=%s", symbol)
             return sina_kline(symbol)
