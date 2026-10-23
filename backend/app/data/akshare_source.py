@@ -186,6 +186,10 @@ class AkshareDataSource(BaseDataSource):
             df = sina_quotes(symbols)
             if df.empty:
                 raise DataSourceError("所有数据源均不可用（实时快照）") from None
+            # 新浪降级路径偶发返回残缺结构（仅 code 列），判废而非落盘污染缓存
+            for col in ("code", "price", "pct_change", "amount"):
+                if col not in df.columns:
+                    raise DataSourceError(f"新浪快照缺失关键列: {col}")
             return df.reset_index(drop=True)
 
         df = df.rename(columns={
@@ -210,6 +214,11 @@ class AkshareDataSource(BaseDataSource):
                 df[col] = pd.to_numeric(df[col], errors="coerce")
         # 剔除停牌（最新价为 NaN）的股票
         df = df[df["price"].notna()]
+        # 东财接口偶发返回结构异常（列缺失），残缺快照持久化后会污染缓存
+        # 并触发 overview 500，故在此判废而非落盘
+        for col in ("code", "price", "pct_change", "amount"):
+            if col not in df.columns:
+                raise DataSourceError(f"实时快照缺失关键列: {col}")
         return df.reset_index(drop=True)
 
     # ------------------------------------------------------------------

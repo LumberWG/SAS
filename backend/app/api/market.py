@@ -112,8 +112,14 @@ async def market_overview() -> dict:
             "updated_at": None,
         })
 
-    # ---- 涨跌家数统计（无快照时用默认值）----
-    if snapshot is not None and not snapshot.empty:
+    # ---- 涨跌家数统计（快照列不完整时降级，避免 KeyError 致 500）----
+    # 注意：新浪降级路径有时会返回残缺快照（仅 code 列），持久化后
+    # 旧缓存也可能缺列。这里对关键列做存在性检查，缺失则视为不可用。
+    snapshot_usable = (
+        snapshot is not None and not snapshot.empty
+        and "pct_change" in snapshot.columns and "amount" in snapshot.columns
+    )
+    if snapshot_usable:
         pct = snapshot["pct_change"].fillna(0.0)
         up = int((pct > 0).sum())
         down = int((pct < 0).sum())
@@ -125,10 +131,11 @@ async def market_overview() -> dict:
         limit_down = 0
         for row in snapshot.itertuples():
             limit = _limit_pct(row.code, getattr(row, "name", ""))
-            if row.pct_change is not None and not pd.isna(row.pct_change):
-                if row.pct_change >= limit - 0.1:
+            v = row.pct_change
+            if v is not None and not pd.isna(v):
+                if v >= limit - 0.1:
                     limit_up += 1
-                elif row.pct_change <= -limit + 0.1:
+                elif v <= -limit + 0.1:
                     limit_down += 1
 
         total_amount = float(snapshot["amount"].fillna(0).sum())
@@ -143,16 +150,16 @@ async def market_overview() -> dict:
     if indices_df is not None and not indices_df.empty:
         for row in indices_df.itertuples():
             indices.append({
-                "symbol": row.symbol,
-                "name": row.name,
-                "price": None if pd.isna(row.price) else float(row.price),
-                "pct_change": None if pd.isna(row.pct_change) else float(row.pct_change),
-                "change": None if pd.isna(row.change) else float(row.change),
-                "amount": None if pd.isna(row.amount) else float(row.amount),
+                "symbol": getattr(row, "symbol", None),
+                "name": getattr(row, "name", None),
+                "price": None if pd.isna(getattr(row, "price", float("nan"))) else float(row.price),
+                "pct_change": None if pd.isna(getattr(row, "pct_change", float("nan"))) else float(row.pct_change),
+                "change": None if pd.isna(getattr(row, "change", float("nan"))) else float(row.change),
+                "amount": None if pd.isna(getattr(row, "amount", float("nan"))) else float(row.amount),
             })
 
-    # 仅指数可用而快照不可用 → 标记部分降级
-    degraded = snapshot is None
+    # 指数或快照任一部分不可用 → 标记部分降级（前端顶部提示）
+    degraded = (not snapshot_usable) or (indices_df is None or indices_df.empty)
     return _with_disclaimer({
         "degraded": degraded,
         "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
