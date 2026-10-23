@@ -41,14 +41,17 @@ async function load(force = false) {
     // 迷你走势：仅首次或用户手动刷新时拉取（后端已加 Parquet 缓存，
     // 但指数K线首次要走完整降级链较慢，不应随 30s 轮询重复请求）
     if (force || !sparkReady.value) {
-      for (const idx of overview.value.indices.slice(0, 4)) {
-        try {
-          const data = await getIndexKline(idx.symbol, 60)
-          sparklines[idx.symbol] = data.closes
-        } catch {
-          sparklines[idx.symbol] = []
-        }
-      }
+      // 并发拉取前 4 个指数迷你走势，避免顺序 await 叠加等待（单接口慢时
+      // 串行会放大到数倍耗时）；单个失败不影响其余与页面渲染。
+      const syms = (overview.value.indices || []).slice(0, 4).map((i) => i.symbol)
+      const results = await Promise.all(
+        syms.map((sym) =>
+          getIndexKline(sym, 60)
+            .then((d) => [sym, d.closes] as const)
+            .catch(() => [sym, [] as (number | null)[]] as const),
+        ),
+      )
+      for (const [sym, closes] of results) sparklines[sym] = closes
       sparkReady.value = true
     }
     // 拉取最近异动（调度器检测结果，轻量）
