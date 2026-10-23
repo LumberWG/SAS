@@ -50,7 +50,7 @@ class SnapshotStore:
         self._snapshot_at: float = 0.0
         self._indices: pd.DataFrame | None = None
         self._indices_at: float = 0.0
-        self._refreshing = False
+        self._refreshing_keys: set[str] = set()  # 各 key 独立刷新标志，避免 indices/snapshot 互相阻塞
         self._failed_at: dict[str, float] = {}  # key → 最近失败时间
         self._cache_dir = Path(cache_dir) if cache_dir is not None else _CACHE_DIR
         self._snapshot_file = self._cache_dir / "snapshot_latest.parquet"
@@ -130,10 +130,10 @@ class SnapshotStore:
             ):
                 raise DataSourceError(f"数据源不可用（{key} 刷新失败冷却中）")
 
-            if not self._refreshing:
+            if key not in self._refreshing_keys:
                 # 成为刷新者：有旧缓存 → 后台线程刷新（SWR，页面不等待）；
                 # 无旧缓存 → 当前线程同步刷新（首次冷启动）。
-                self._refreshing = True
+                self._refreshing_keys.add(key)
                 refresher = True
                 background = cached is not None
             else:
@@ -166,7 +166,7 @@ class SnapshotStore:
             raise
         finally:
             with self._cond:
-                self._refreshing = False
+                self._refreshing_keys.discard(key)
 
     def _spawn_background_refresh(self, key: str, fetcher, store) -> None:
         """后台线程执行刷新（刷新标志由请求线程持有，线程结束后释放）。"""
@@ -184,7 +184,7 @@ class SnapshotStore:
                     self._failed_at[key] = time.monotonic()
             finally:
                 with self._cond:
-                    self._refreshing = False
+                    self._refreshing_keys.discard(key)
 
         threading.Thread(target=run, daemon=True, name="snapshot-refresh").start()
 
