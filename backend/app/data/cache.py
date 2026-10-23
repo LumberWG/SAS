@@ -93,6 +93,44 @@ CREATE TABLE IF NOT EXISTS signals (
 );
 CREATE INDEX IF NOT EXISTS idx_signals_code      ON signals(code);
 CREATE INDEX IF NOT EXISTS idx_signals_scan_date ON signals(scan_date);
+-- 模拟交易（Paper Trading）：单账户 + 持仓 + 交易流水 + 每日净值
+CREATE TABLE IF NOT EXISTS paper_account (
+    id             INTEGER PRIMARY KEY CHECK (id = 1),  -- 单账户约束
+    initial_capital REAL NOT NULL,   -- 初始资金
+    cash           REAL NOT NULL,    -- 可用现金
+    created_at     TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS paper_positions (
+    code       TEXT PRIMARY KEY,
+    name       TEXT,
+    shares     INTEGER NOT NULL,     -- 持仓股数（整手100）
+    cost_price REAL NOT NULL,        -- 摊薄成本价（含买入手续费）
+    buy_date   TEXT NOT NULL,        -- 最近一次买入日期（T+1 可卖判断）
+    strategy   TEXT,                 -- 买入来源（策略/建议原因）
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS paper_trades (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    code       TEXT NOT NULL,
+    name       TEXT,
+    side       TEXT NOT NULL,        -- buy / sell
+    price      REAL NOT NULL,        -- 成交价
+    shares     INTEGER NOT NULL,     -- 成交股数
+    amount     REAL NOT NULL,        -- 成交金额（不含费用）
+    fee        REAL NOT NULL,        -- 费用合计（佣金+印花税+过户费）
+    reason     TEXT,                 -- 交易原因
+    trade_date TEXT NOT NULL,        -- 信号/交易日期
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_paper_trades_date ON paper_trades(trade_date);
+-- 每日净值快照（模拟盘净值曲线）
+CREATE TABLE IF NOT EXISTS paper_equity (
+    date          TEXT PRIMARY KEY,
+    total_asset   REAL NOT NULL,     -- 总资产 = 现金 + 持仓市值
+    cash          REAL NOT NULL,
+    market_value  REAL NOT NULL,
+    created_at    TEXT NOT NULL
+);
 -- 智能建议（盘中买卖建议 / 盘后明日关注，按批次存储）
 CREATE TABLE IF NOT EXISTS recommendations (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -226,6 +264,130 @@ class Database:
                 (scan_date,),
             ).fetchall()
         return {r["strategy"]: r["cnt"] for r in rows}
+
+    # ---------------- 模拟交易 ----------------
+
+    def get_paper_account(self) -> dict[str, Any] | None:
+        """模拟账户（不存在返回 None）。"""
+        with self._lock, self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM paper_account WHERE id=1"
+            ).fetchone()
+        return dict(row) if row else None
+
+    def init_paper_account(self, initial_capital: float) -> dict[str, Any]:
+        """初始化模拟账户（幂等：已存在则直接返回）。"""
+        existing = self.get_paper_account()
+        if existing:
+            return existing
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                "INSERT INTO paper_account(id, initial_capital, cash, created_at)"
+                " VALUES(1,?,?,?)",
+                (initial_capital, initial_capital, _now()),
+            )
+        return {"initial_capital": initial_capital, "cash": initial_capital}
+
+    def update_paper_cash(self, cash: float) -> None:
+        with self._lock, self._connect() as conn:
+            conn.execute("UPDATE paper_account SET cash=? WHERE id=1", (cash,))
+
+    def list_paper_positions(self) -> list[dict[str, Any]]:
+        with self._lock, self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM paper_positions ORDER BY created_at"
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_paper_position(self, code: str) -> dict[str, Any] | None:
+        with self._lock, self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM paper_positions WHERE code=?", (code,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def upsert_paper_position(
+        self, code: str, name: str, shares: int, cost_price: float,
+        buy_date: str, strategy: str,
+    ) -> None:
+        """新增/覆盖持仓（同代码重复买入时摊薄成本由调用方算好传入）。"""
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                "INSERT INTO paper_positions(code, name, shares, cost_price,"
+                " buy_date, strategy, created_at) VALUES(?,?,?,?,?,?,?)"
+                " ON CONFLICT(code) DO UPDATE SET name=excluded.name,"
+                " shares=excluded.shares, cost_price=excluded.cost_price,"
+                " buy_date=excluded.buy_date, strategy=excluded.strategy",
+                (code, name, shares, cost_price, buy_date, strategy, _now()),
+            )
+
+    def remove_paper_position(self, code: str) -> None:
+        with self._lock, self._connect() as conn:
+            conn.execute("DELETE FROM paper_positions WHERE code=?", (code,))
+
+    def insert_paper_trade(
+        self, code: str, name: str, side: str, price: float, shares: int,
+        amount: float, fee: float, reason: str, trade_date: str,
+    ) -> None:
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                "INSERT INTO paper_trades(code, name, side, price, shares,"
+                " amount, fee, reason, trade_date, created_at)"
+                " VALUES(?,?,?,?,?,?,?,?,?,?)",
+                (code, name, side, price, shares, amount, fee, reason,
+                 trade_date, _now()),
+            )
+
+    def list_paper_trades(
+        self, limit: int = 100, code: str | None = None
+    ) -> list[dict[str, Any]]:
+        """交易流水（按时间倒序）。"""
+        with self._lock, self._connect() as conn:
+            if code:
+                rows = conn.execute(
+                    "SELECT * FROM paper_trades WHERE code=? ORDER BY id DESC LIMIT ?",
+                    (code, limit),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM paper_trades ORDER BY id DESC LIMIT ?", (limit,)
+                ).fetchall()
+        return [dict(r) for r in rows]
+
+    def save_paper_equity(
+        self, date: str, total_asset: float, cash: float, market_value: float
+    ) -> None:
+        """保存每日净值快照（同日覆盖）。"""
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                "INSERT INTO paper_equity(date, total_asset, cash, market_value,"
+                " created_at) VALUES(?,?,?,?,?)"
+                " ON CONFLICT(date) DO UPDATE SET total_asset=excluded.total_asset,"
+                " cash=excluded.cash, market_value=excluded.market_value",
+                (date, total_asset, cash, market_value, _now()),
+            )
+
+    def list_paper_equity(self, limit: int = 250) -> list[dict[str, Any]]:
+        """净值曲线（按日期升序，限制条数）。"""
+        with self._lock, self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM paper_equity ORDER BY date LIMIT ?", (limit,)
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def reset_paper_account(self, initial_capital: float) -> None:
+        """重置模拟账户：清空持仓/流水/净值，资金恢复初始值。"""
+        with self._lock, self._connect() as conn:
+            conn.execute("DELETE FROM paper_positions")
+            conn.execute("DELETE FROM paper_trades")
+            conn.execute("DELETE FROM paper_equity")
+            conn.execute(
+                "INSERT INTO paper_account(id, initial_capital, cash, created_at)"
+                " VALUES(1,?,?,?)"
+                " ON CONFLICT(id) DO UPDATE SET initial_capital=excluded.initial_capital,"
+                " cash=excluded.cash",
+                (initial_capital, initial_capital, _now()),
+            )
 
     # ---------------- 智能建议 ----------------
 

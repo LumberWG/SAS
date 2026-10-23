@@ -76,6 +76,14 @@ class Settings(BaseSettings):
     # 盘后「明日关注」数量
     focus_top_n: int = 10
 
+    # ---------- 模拟交易（验证选股思路） ----------
+    # 初始模拟资金
+    paper_initial_capital: float = 100000.0
+    # 最大持仓只数（等分资金）
+    paper_max_positions: int = 10
+    # 是否自动执行系统建议（false 时仅记录信号不成交）
+    paper_auto_trade: bool = True
+
     # ---------- 通知管道（可选） ----------
     # Webhook 机器人地址（企业微信/飞书/钉钉均兼容，POST JSON）
     notify_webhook_url: str = ""

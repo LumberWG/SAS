@@ -13,6 +13,10 @@
                        生成实时买卖建议（建议买入/建议卖出列表）
   7. post_market       每交易日 15:35 全市场扫描 + 自选股分析，
                        生成次日「明日关注」TopN
+  8. paper_settle      每交易日 15:40 模拟盘收盘结算（止盈止损 + 净值快照）
+
+模拟交易联动: 开盘/盘中分析产生的买卖建议自动送入模拟盘执行
+（受 PAPER_AUTO_TRADE 开关控制），盘后统一结算。
 
 时钟说明: cron 任务使用本地时区（Asia/Shanghai 由 settings 指定）。
 """
@@ -118,11 +122,17 @@ class MarketScheduler:
             CronTrigger(day_of_week="mon-fri", hour=15, minute=35, timezone=tz),
             id="post_market", replace_existing=True,
         )
+        # 7) 模拟盘收盘结算（交易日 15:40，止盈止损 + 净值快照）
+        self.scheduler.add_job(
+            self.paper_settle,
+            CronTrigger(day_of_week="mon-fri", hour=15, minute=40, timezone=tz),
+            id="paper_settle", replace_existing=True,
+        )
 
         self.scheduler.start()
         logger.info(
             "调度器已启动（快照60s / 异动5min / 开盘9:20 / 盘中%dm / "
-            "收盘选股15:30 / 盘后15:35）",
+            "收盘选股15:30 / 盘后15:35 / 模拟盘结算15:40）",
             self.settings.intraday_analysis_interval,
         )
 
@@ -281,10 +291,11 @@ class MarketScheduler:
     # 开盘前分析（9:20）：自选股建议 + 读取昨日关注
     # ------------------------------------------------------------------
     async def pre_market(self) -> dict:
-        """开盘前分析全部自选股，生成本日建议（批次 premarket_今日）。"""
+        """开盘前分析全部自选股，生成本日建议并驱动模拟盘。"""
         if not is_trading_day():
             return {"skipped": "非交易日"}
         from app.analysis.recommender import recommender
+        from app.paper.engine import PaperEngine
 
         logger.info("开盘前分析开始（9:20）")
         try:
@@ -294,6 +305,8 @@ class MarketScheduler:
                 db.save_recommendations,
                 [r.__dict__ for r in recommendations], batch,
             )
+            # 驱动模拟盘（开盘执行昨日分析的结论）
+            trades = await PaperEngine().execute_recommendations(recommendations)
             buys = sum(1 for r in recommendations if r.action == "buy")
             sells = sum(1 for r in recommendations if r.action == "sell")
 
@@ -308,19 +321,41 @@ class MarketScheduler:
                 f"开盘建议：买入 {buys} / 卖出 {sells}",
                 focus_note,
             )
-            return {"batch": batch, "saved": saved, "buy": buys, "sell": sells}
+            return {"batch": batch, "saved": saved, "buy": buys, "sell": sells,
+                    "trades": [t.side for t in trades]}
         except Exception as exc:  # noqa: BLE001
             logger.exception("开盘前分析失败")
+            return {"error": str(exc)}
+
+    # ------------------------------------------------------------------
+    # 模拟盘收盘结算（15:40）
+    # ------------------------------------------------------------------
+    async def paper_settle(self) -> dict:
+        """模拟盘收盘结算：止盈止损检查 + 记录净值快照。"""
+        if not is_trading_day():
+            return {"skipped": "非交易日"}
+        from app.paper.engine import PaperEngine
+
+        try:
+            detail = await PaperEngine().settle()
+            return {
+                "total_asset": detail["total_asset"],
+                "return_pct": detail["return_pct"],
+                "positions": detail["position_count"],
+            }
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("模拟盘结算失败")
             return {"error": str(exc)}
 
     # ------------------------------------------------------------------
     # 盘中监控（每 N 分钟）：自选股实时买卖建议
     # ------------------------------------------------------------------
     async def intraday_monitor(self) -> dict:
-        """盘中分析自选股，更新实时建议（批次 intraday_今日）。"""
+        """盘中分析自选股，更新实时建议并驱动模拟盘执行。"""
         if not is_trading_hours():
             return {"skipped": "非交易时段"}
         from app.analysis.recommender import recommender
+        from app.paper.engine import PaperEngine
 
         try:
             recommendations = await recommender.analyze_watchlist()
@@ -331,7 +366,10 @@ class MarketScheduler:
                 db.save_recommendations,
                 [r.__dict__ for r in recommendations], batch,
             )
-            return {"batch": batch, "saved": saved}
+            # 驱动模拟盘（自动执行买卖，受 PAPER_AUTO_TRADE 控制）
+            trades = await PaperEngine().execute_recommendations(recommendations)
+            return {"batch": batch, "saved": saved,
+                    "trades": [t.side for t in trades]}
         except Exception as exc:  # noqa: BLE001
             logger.exception("盘中监控失败")
             return {"error": str(exc)}

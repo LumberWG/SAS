@@ -351,6 +351,72 @@ export function getAdvisorySummary(): Promise<{
   return http.get('/advisory/summary').then((r) => r.data)
 }
 
+// ==================== 模拟交易 ====================
+
+export interface PaperAccount {
+  initial_capital: number
+  cash: number
+  market_value: number
+  total_asset: number
+  total_pnl: number
+  return_pct: number
+  position_count: number
+  positions: Array<{
+    code: string
+    name: string
+    shares: number
+    cost_price: number
+    price: number
+    market_value: number
+    pnl: number
+    pnl_pct: number
+    buy_date: string
+    strategy: string
+  }>
+}
+
+export interface PaperTrade {
+  id: number
+  code: string
+  name: string
+  side: 'buy' | 'sell'
+  price: number
+  shares: number
+  amount: number
+  fee: number
+  reason: string
+  trade_date: string
+  created_at: string
+}
+
+export function getPaperAccount(): Promise<PaperAccount> {
+  return http.get('/paper/account').then((r) => r.data)
+}
+
+export function getPaperTrades(
+  limit = 100,
+  code?: string
+): Promise<{ trades: PaperTrade[] }> {
+  return http
+    .get('/paper/trades', { params: { limit, code } })
+    .then((r) => r.data)
+}
+
+export function getPaperEquity(): Promise<{
+  equity: Array<{
+    date: string
+    total_asset: number
+    cash: number
+    market_value: number
+  }>
+}> {
+  return http.get('/paper/equity').then((r) => r.data)
+}
+
+export function resetPaperAccount(): Promise<{ reset: boolean }> {
+  return http.post('/paper/reset').then((r) => r.data)
+}
+
 // ==================== LLM 分析 ====================
 export interface ChecklistItem {
   label: string

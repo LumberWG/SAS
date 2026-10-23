@@ -45,6 +45,12 @@ const routes = [
         component: () => import('../views/Advisory.vue'),
         meta: { title: '智能建议', icon: 'Lightbulb' },
       },
+      {
+        path: 'paper',
+        name: 'paper',
+        component: () => import('../views/PaperTrading.vue'),
+        meta: { title: '模拟交易', icon: 'Wallet' },
+      },
     ],
   },
 ]
