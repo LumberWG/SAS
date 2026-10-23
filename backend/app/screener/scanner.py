@@ -19,7 +19,7 @@ from datetime import datetime
 import pandas as pd
 
 from app.config import get_settings
-from app.data.cache import db
+from app.data.cache import db, kline_cache
 from app.data.service import get_kline_cached, get_stock_pool
 from app.indicators import add_all_indicators
 from app.strategies.base import Signal, Strategy
@@ -219,6 +219,9 @@ class Scanner:
 # 全局单例
 scanner = Scanner()
 
+#: 最近一次K线预热结果（供状态接口读取）
+_last_warmup: dict = {}
+
 # ----------------------------------------------------------------------
 # 扫描范围定义（选股中心「扫描范围」下拉）
 # ----------------------------------------------------------------------
@@ -268,8 +271,31 @@ async def warmup_klines(
                 logger.debug("K线预热失败 %s: %s", code, exc)
 
     await asyncio.gather(*(one(c) for c in pool["code"]))
+    result = {"ok": ok, "fail": fail, "total": len(pool)}
+    _last_warmup.update(
+        {"result": result, "at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+    )
     logger.info("K线预热完成：成功 %d，失败 %d，共 %d", ok, fail, len(pool))
-    return {"ok": ok, "fail": fail, "total": len(pool)}
+    return result
+
+
+def kline_cache_stats() -> dict:
+    """统计本地K线缓存覆盖情况（Parquet 文件存在即计为已缓存）。
+
+    供前端展示预热进度：已缓存多少只 / 股票池总数 / 最近一次预热结果。
+    """
+    pool = get_stock_pool()
+    total = len(pool)
+    cached = 0
+    for code in pool["code"]:
+        if kline_cache._path(code).exists():
+            cached += 1
+    return {
+        "total": total,
+        "cached": cached,
+        "ratio": round(cached / total * 100, 1) if total else 0.0,
+        "last_warmup": dict(_last_warmup),
+    }
 
 
 def filter_pool_by_scope(pool: pd.DataFrame, scope: str) -> pd.DataFrame:

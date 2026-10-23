@@ -14,6 +14,8 @@ import {
   getStrategies,
   startScan,
   warmupKlines,
+  getKlineStatus,
+  type KlineStatus,
   type ScanHit,
   type ScanScope,
   type ScanTask,
@@ -55,6 +57,25 @@ const upCount = computed(
 const scopeLabel = computed(
   () => scopes.value.find((s) => s.key === scope.value)?.label ?? scope.value
 )
+
+// K线缓存覆盖状态（预热进度）
+const klineStatus = ref<KlineStatus | null>(null)
+let statusPoller: number | undefined
+
+async function loadKlineStatus() {
+  try {
+    klineStatus.value = await getKlineStatus()
+  } catch {
+    // 状态获取失败静默
+  }
+}
+
+function stopStatusPolling() {
+  if (statusPoller) {
+    window.clearInterval(statusPoller)
+    statusPoller = undefined
+  }
+}
 
 async function loadStrategies() {
   const data = await getStrategies()
@@ -126,6 +147,9 @@ async function warmup() {
   try {
     await warmupKlines()
     toast('K线预热已在后台开始，完成后扫描将直接使用本地缓存')
+    // 预热期间轮询进度，直到命中本地缓存比例接近满或预热按钮恢复
+    stopStatusPolling()
+    statusPoller = window.setInterval(loadKlineStatus, 3000)
   } catch {
     toast('预热触发失败，请稍后重试')
   } finally {
@@ -140,7 +164,10 @@ function stopPolling() {
   }
 }
 
-onUnmounted(stopPolling)
+onUnmounted(() => {
+  stopPolling()
+  stopStatusPolling()
+})
 
 function goDetail(hit: ScanHit) {
   router.push(`/stock/${hit.code}`)
@@ -179,7 +206,7 @@ function fmtDuration(seconds: number | null): string {
 }
 
 onMounted(async () => {
-  await Promise.all([loadStrategies(), restoreLatest()])
+  await Promise.all([loadStrategies(), restoreLatest(), loadKlineStatus()])
 })
 </script>
 
@@ -236,6 +263,14 @@ onMounted(async () => {
           <div class="hidden min-w-0 flex-1 text-[12px] text-content-faint md:block">
             <span class="text-content-muted">{{ selected.length }}</span> 个策略 ·
             <span class="text-content-muted">{{ scopeLabel }}</span>
+            <span
+              v-if="klineStatus"
+              class="ml-2 rounded bg-base-700 px-1.5 py-0.5 font-num"
+              :class="klineStatus.ratio >= 99 ? 'text-up' : 'text-content-muted'"
+              :title="klineStatus.last_warmup?.at ? `最近预热: ${klineStatus.last_warmup.at}` : '尚未预热'"
+            >
+              本地K线 {{ klineStatus.cached }}/{{ klineStatus.total }} ({{ klineStatus.ratio }}%)
+            </span>
           </div>
 
           <!-- 进度区 -->

@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 
 from app.api.utils import with_disclaimer
 from app.data.cache import db
-from app.screener.scanner import SCAN_SCOPES, scanner, warmup_klines
+from app.screener.scanner import SCAN_SCOPES, scanner, warmup_klines, kline_cache_stats
 from app.strategies import registry
 
 router = APIRouter(prefix="/screening", tags=["选股"])
@@ -50,6 +50,12 @@ async def start_scan(req: ScanRequest) -> dict:
         raise HTTPException(status_code=400, detail=f"未注册的策略: {unknown}")
     task_id = await scanner.start_scan(req.strategies, req.codes, req.scope)
     return {"task_id": task_id}
+
+
+@router.get("/kline-status")
+async def kline_status() -> dict:
+    """K线缓存覆盖状态：已缓存只数 / 股票池总数 / 最近一次预热结果。"""
+    return with_disclaimer(kline_cache_stats())
 
 
 @router.post("/warmup")

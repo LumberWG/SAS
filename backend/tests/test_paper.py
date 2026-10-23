@@ -56,6 +56,26 @@ class TestKlineWarmup:
         assert result["ok"] == 1
         assert result["fail"] == 1
 
+    def test_kline_cache_stats_counts_existing(self, monkeypatch, tmp_path):
+        """缓存统计应按 Parquet 文件存在计数（含最近预热结果）。"""
+        import app.screener.scanner as scanner_module
+
+        monkeypatch.setattr(
+            scanner_module, "get_stock_pool",
+            lambda: __import__("pandas").DataFrame({"code": ["600000", "600001", "600002"]}),
+        )
+        # 仅 600000 / 600001 有缓存文件
+        def fake_exists(code):
+            return code in ("600000", "600001")
+
+        monkeypatch.setattr(scanner_module.kline_cache, "_path", lambda code: type(
+            "P", (), {"exists": lambda self: fake_exists(code)}
+        )())
+        stats = scanner_module.kline_cache_stats()
+        assert stats["total"] == 3
+        assert stats["cached"] == 2
+        assert stats["ratio"] == pytest.approx(66.7, abs=0.1)
+
 
 @dataclass
 class FakeRec:

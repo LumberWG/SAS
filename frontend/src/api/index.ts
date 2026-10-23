@@ -423,6 +423,17 @@ export function warmupKlines(): Promise<{ started: boolean; message: string }> {
   return http.post('/screening/warmup').then((r) => r.data)
 }
 
+export interface KlineStatus {
+  total: number
+  cached: number
+  ratio: number
+  last_warmup: { result?: { ok: number; fail: number; total: number }; at?: string }
+}
+
+export function getKlineStatus(): Promise<KlineStatus> {
+  return http.get('/screening/kline-status').then((r) => r.data)
+}
+
 // ==================== LLM 分析 ====================
 export interface ChecklistItem {
   label: string

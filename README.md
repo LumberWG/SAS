@@ -304,6 +304,7 @@ nssm remove SAS confirm                # 卸载服务
   - 选股中心「预热K线」按钮可手动触发全市场预热（后台执行，不阻塞）
   - 预热完成后扫描直接读本地缓存，消除实时网络拉取与数据源限流等待
 - 配置项：`kline_warmup_concurrency`（预热并发）、`kline_warmup_top_n`（开机预热只数，0=全市场）
+- 预热进度可见：选股中心操作栏显示「本地K线 已缓存/总数 (百分比)」，点「预热K线」后实时轮询刷新；后端接口 `GET /api/screening/kline-status`
 
 ### 7. 模拟交易（验证选股思路）
 
