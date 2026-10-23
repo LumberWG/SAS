@@ -9,8 +9,6 @@
 #
 # It does NOT git commit/push - do that separately.
 
-$ErrorActionPreference = "Stop"
-
 # ---------- 0. Admin check ----------
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $principal = New-Object Security.Principal.WindowsPrincipal($identity)
@@ -20,13 +18,27 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
 }
 
 # ---------- 1. Build frontend ----------
+# NOTE: do NOT set $ErrorActionPreference='Stop' globally - npm emits build
+# warnings on stderr which PowerShell 5.1 would treat as a terminating
+# NativeCommandError and abort the pipeline. Use explicit exit-code checks.
 Write-Host "[BUILD] Building frontend (npm run build)..."
 Push-Location e:\Study\SAS\frontend
+$buildOk = $true
 try {
-    npm run build 2>&1 | Select-Object -Last 5
-    if ($LASTEXITCODE -ne 0) { throw "npm run build failed (exit $LASTEXITCODE)" }
+    & npm run build 2>&1 | ForEach-Object { $_.ToString() }
+    if ($LASTEXITCODE -ne 0) {
+        $buildOk = $false
+        Write-Host ("[BUILD] npm run build failed (exit {0})" -f $LASTEXITCODE) -ForegroundColor Red
+    }
+} catch {
+    $buildOk = $false
+    Write-Host ("[BUILD] exception: {0}" -f $_.Exception.Message) -ForegroundColor Red
 } finally {
     Pop-Location
+}
+if (-not $buildOk) {
+    Write-Host "[BUILD] Aborted - fix build errors and re-run." -ForegroundColor Red
+    exit 1
 }
 Write-Host "[BUILD] Done -> frontend/dist" -ForegroundColor Green
 
