@@ -488,4 +488,27 @@ export function removeWatch(code: string): Promise<{ removed: boolean }> {
   return http.delete(`/watchlist/${code}`).then((r) => r.data)
 }
 
+// ==================== 统一错误 / 数据源降级提示 ====================
+// 后端在数据源故障时会返回 502（异常）或 503（超时降级），网络层错误则为
+// 无 response。这类情况应统一提示一次「行情数据源暂不可用」，而不是让每个
+// 页面各自写错误逻辑（且有些页面会因此永久卡在 loading）。
+import { useNotifyStore } from '../stores/notify'
+
+http.interceptors.response.use(
+  (response) => response,
+  (error) => {
+    const status = error.response?.status
+    const isDown =
+      status === 502 || status === 503 || status === 504 || !error.response
+    if (isDown) {
+      try {
+        useNotifyStore().markDataSourceDown()
+      } catch {
+        // pinia 尚未激活（理论上不会在请求发生时触发）
+      }
+    }
+    return Promise.reject(error)
+  },
+)
+
 export default http

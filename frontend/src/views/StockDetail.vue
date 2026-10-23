@@ -24,6 +24,7 @@ const code = computed(() => String(route.params.code ?? '600519'))
 
 const quote = ref<StockQuote | null>(null)
 const kline = ref<{ dates: string[]; kline: number[][]; volumes: number[] } | null>(null)
+const klineError = ref(false)
 const dashboard = ref<DecisionDashboard | null>(null)
 const analyzing = ref(false)
 const inWatchlist = ref(false)     // 是否已在自选股
@@ -31,8 +32,14 @@ const watchToggling = ref(false)  // 按钮防重复点击
 const watchMsg = ref('')          // 操作反馈
 
 async function loadKline() {
-  const data = await getStockKline(code.value, 120)
-  kline.value = { dates: data.dates, kline: data.kline, volumes: data.volumes }
+  klineError.value = false
+  try {
+    const data = await getStockKline(code.value, 120)
+    kline.value = { dates: data.dates, kline: data.kline, volumes: data.volumes }
+  } catch {
+    // 数据源降级 / 超时：标记为错误，模板展示统一降级卡片（避免永久 loading）
+    klineError.value = true
+  }
 }
 
 async function loadQuote() {
@@ -183,6 +190,14 @@ function statusColor(status: string) {
           :volumes="kline.volumes"
           height="440px"
         />
+        <div
+          v-else-if="klineError"
+          class="flex h-[440px] flex-col items-center justify-center gap-2 text-content-faint"
+        >
+          <AlertTriangle class="h-8 w-8 text-warn" />
+          <span class="text-[13px]">行情数据源暂不可用</span>
+          <span class="text-[11px]">K线加载失败，请稍后重试（已尽量使用本地缓存）</span>
+        </div>
         <div v-else class="flex h-[440px] items-center justify-center text-content-faint">
           K线加载中...
         </div>
