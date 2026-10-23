@@ -224,12 +224,53 @@ scanner = Scanner()
 # ----------------------------------------------------------------------
 SCAN_SCOPES: dict[str, dict] = {
     "all": {"label": "全市场（沪深京）", "filter": None},
+    "top_amount:500": {"label": "成交额前 500（推荐）", "filter": None},
+    "top_amount:1000": {"label": "成交额前 1000", "filter": None},
     "sh": {"label": "沪市主板", "filter": lambda p: p["code"].str.startswith("60")},
     "sz": {"label": "深市主板", "filter": lambda p: p["code"].str.startswith(("00", "001"))},
     "cyber": {"label": "创业板", "filter": lambda p: p["code"].str.startswith(("30", "301"))},
     "star": {"label": "科创板", "filter": lambda p: p["code"].str.startswith("68")},
     "bjs": {"label": "北交所", "filter": lambda p: p["code"].str.startswith(("43", "83", "87", "88", "92"))},
 }
+
+
+async def warmup_klines(
+    codes: list[str] | None = None,
+    concurrency: int | None = None,
+) -> dict:
+    """后台批量预热K线：把股票日K增量缓存到本地Parquet，加速扫描。
+
+    已有缓存的股票只增量拉取最近几天（很快）；缺失的首次全量拉取
+    （较慢但在后台进行，不阻塞服务）。预热完成后扫描直接读本地缓存。
+
+    Args:
+        codes: 指定代码列表；None 表示全市场
+        concurrency: 预热并发（默认取配置 kline_warmup_concurrency）
+    """
+    settings = get_settings()
+    if concurrency is None:
+        concurrency = settings.kline_warmup_concurrency
+    pool = get_stock_pool()
+    if codes is not None:
+        wanted = set(codes)
+        pool = pool[pool["code"].isin(wanted)]
+    sem = asyncio.Semaphore(concurrency)
+    ok = 0
+    fail = 0
+
+    async def one(code: str) -> None:
+        nonlocal ok, fail
+        async with sem:
+            try:
+                await asyncio.to_thread(get_kline_cached, code)
+                ok += 1
+            except Exception as exc:  # noqa: BLE001 - 单股失败跳过
+                fail += 1
+                logger.debug("K线预热失败 %s: %s", code, exc)
+
+    await asyncio.gather(*(one(c) for c in pool["code"]))
+    logger.info("K线预热完成：成功 %d，失败 %d，共 %d", ok, fail, len(pool))
+    return {"ok": ok, "fail": fail, "total": len(pool)}
 
 
 def filter_pool_by_scope(pool: pd.DataFrame, scope: str) -> pd.DataFrame:

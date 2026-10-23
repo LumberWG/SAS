@@ -417,6 +417,12 @@ export function resetPaperAccount(): Promise<{ reset: boolean }> {
   return http.post('/paper/reset').then((r) => r.data)
 }
 
+// ==================== K线预热 ====================
+
+export function warmupKlines(): Promise<{ started: boolean; message: string }> {
+  return http.post('/screening/warmup').then((r) => r.data)
+}
+
 // ==================== LLM 分析 ====================
 export interface ChecklistItem {
   label: string

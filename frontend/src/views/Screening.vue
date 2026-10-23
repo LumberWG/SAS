@@ -5,7 +5,7 @@
  */
 import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
-import { AlertCircle, CheckCircle2, Clock, Play, Search, Square, TrendingUp } from 'lucide-vue-next'
+import { AlertCircle, CheckCircle2, Clock, Database, Play, Search, Square, TrendingUp } from 'lucide-vue-next'
 
 import {
   addWatch,
@@ -13,6 +13,7 @@ import {
   getScanTask,
   getStrategies,
   startScan,
+  warmupKlines,
   type ScanHit,
   type ScanScope,
   type ScanTask,
@@ -29,7 +30,7 @@ const strategies = ref<StrategyInfo[]>([])
 const scopes = ref<ScanScope[]>([])
 const todayHits = ref<Record<string, number>>({})
 const selected = ref<string[]>([])
-const scope = ref('all')
+const scope = ref('top_amount:500')
 const task = ref<ScanTask | null>(null)
 const editingStrategy = ref<StrategyInfo | null>(null)
 let poller: number | undefined
@@ -117,6 +118,21 @@ async function start() {
   }, 2000)
 }
 
+// 手动触发K线预热（后台批量缓存日K，加速后续扫描）
+const warming = ref(false)
+async function warmup() {
+  if (warming.value) return
+  warming.value = true
+  try {
+    await warmupKlines()
+    toast('K线预热已在后台开始，完成后扫描将直接使用本地缓存')
+  } catch {
+    toast('预热触发失败，请稍后重试')
+  } finally {
+    warming.value = false
+  }
+}
+
 function stopPolling() {
   if (poller) {
     window.clearInterval(poller)
@@ -199,6 +215,14 @@ onMounted(async () => {
       <div class="glass-card p-4">
         <div class="flex flex-wrap items-center gap-4">
           <!-- 主操作按钮 -->
+          <button
+            class="flex items-center gap-1.5 rounded-lg border border-base-600 px-3 py-2.5 text-[12px] text-content-muted transition-colors hover:border-primary/50 hover:text-primary-light disabled:cursor-not-allowed disabled:opacity-50"
+            :disabled="running || warming"
+            @click="warmup"
+          >
+            <Database class="h-3.5 w-3.5" />
+            {{ warming ? '预热中...' : '预热K线' }}
+          </button>
           <button
             class="group flex items-center gap-2 rounded-lg bg-gradient-to-r from-primary to-primary-light px-5 py-2.5 text-[13px] font-semibold text-white shadow-glow transition-all hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50"
             :disabled="running || selected.length === 0"

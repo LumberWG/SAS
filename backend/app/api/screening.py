@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 
 from app.api.utils import with_disclaimer
 from app.data.cache import db
-from app.screener.scanner import SCAN_SCOPES, scanner
+from app.screener.scanner import SCAN_SCOPES, scanner, warmup_klines
 from app.strategies import registry
 
 router = APIRouter(prefix="/screening", tags=["选股"])
@@ -34,9 +34,6 @@ def list_strategies() -> dict:
         "scopes": [
             {"key": key, "label": info["label"]}
             for key, info in SCAN_SCOPES.items()
-        ] + [
-            {"key": "top_amount:500", "label": "成交额前 500"},
-            {"key": "top_amount:1000", "label": "成交额前 1000"},
         ],
     })
 
@@ -53,6 +50,19 @@ async def start_scan(req: ScanRequest) -> dict:
         raise HTTPException(status_code=400, detail=f"未注册的策略: {unknown}")
     task_id = await scanner.start_scan(req.strategies, req.codes, req.scope)
     return {"task_id": task_id}
+
+
+@router.post("/warmup")
+async def trigger_warmup() -> dict:
+    """手动触发全市场K线预热（后台执行，不阻塞请求）。
+
+    预热把股票日K增量缓存到本地 Parquet，完成后扫描直接读本地缓存，
+    消除实时网络拉取与数据源限流带来的等待。
+    """
+    asyncio.create_task(warmup_klines())
+    return with_disclaimer(
+        {"started": True, "message": "K线预热已在后台开始，完成后扫描将使用本地缓存"}
+    )
 
 
 @router.get("/scan/latest")

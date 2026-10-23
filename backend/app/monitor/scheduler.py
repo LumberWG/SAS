@@ -35,6 +35,7 @@ from app.config import get_settings
 from app.data.cache import db
 from app.data.snapshot_store import snapshot_store
 from app.notify import notifier
+from app.screener.scanner import warmup_klines as screener_warmup
 
 logger = logging.getLogger("sas.monitor")
 
@@ -128,11 +129,19 @@ class MarketScheduler:
             CronTrigger(day_of_week="mon-fri", hour=15, minute=40, timezone=tz),
             id="paper_settle", replace_existing=True,
         )
+        # 8) K线预热（交易日 16:00，全市场日K增量刷新本地缓存，加速后续扫描）
+        self.scheduler.add_job(
+            self.warmup_klines,
+            CronTrigger(day_of_week="mon-fri", hour=16, minute=0, timezone=tz),
+            id="kline_warmup", replace_existing=True,
+        )
 
         self.scheduler.start()
+        # 开机后台预热K线（低并发，不阻塞服务就绪；其余由16:00调度补全）
+        asyncio.create_task(self.warmup_klines())
         logger.info(
             "调度器已启动（快照60s / 异动5min / 开盘9:20 / 盘中%dm / "
-            "收盘选股15:30 / 盘后15:35 / 模拟盘结算15:40）",
+            "收盘选股15:30 / 盘后15:35 / 模拟盘结算15:40 / K线预热16:00）",
             self.settings.intraday_analysis_interval,
         )
 
@@ -345,6 +354,21 @@ class MarketScheduler:
             }
         except Exception as exc:  # noqa: BLE001
             logger.exception("模拟盘结算失败")
+            return {"error": str(exc)}
+
+    # ------------------------------------------------------------------
+    # K线预热（后台，加速扫描）
+    # ------------------------------------------------------------------
+    async def warmup_klines(self) -> dict:
+        """全市场K线预热：后台增量刷新本地 Parquet 缓存，消除扫描实时网络拉取。"""
+        try:
+            if self.settings.kline_warmup_top_n > 0:
+                pool = get_stock_pool()
+                codes = pool["code"].head(self.settings.kline_warmup_top_n).tolist()
+                return await screener_warmup(codes)
+            return await screener_warmup()
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("K线预热失败")
             return {"error": str(exc)}
 
     # ------------------------------------------------------------------

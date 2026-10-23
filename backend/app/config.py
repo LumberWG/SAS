@@ -37,6 +37,9 @@ class Settings(BaseSettings):
     scan_concurrency: int = 20
     # 单股数据获取失败重试次数（扫描时坏股票不拖垮整轮）
     fetch_retries: int = 2
+    # K线预热：后台批量缓存日K到本地Parquet，消除扫描时的实时网络拉取
+    kline_warmup_concurrency: int = 10   # 预热并发（低于扫描并发，避免触发数据源限流）
+    kline_warmup_top_n: int = 1000       # 开机预热流动性前N只（其余由收盘调度补全）
     # HTTP 请求超时（秒）
     request_timeout: float = 15.0
     # 实时快照内存缓存 TTL（秒）。全量刷新一次约 90 秒，

@@ -13,6 +13,50 @@ from app.paper.engine import (
 )
 
 
+class TestKlineWarmup:
+    def test_warmup_uses_cache(self, monkeypatch, tmp_path):
+        """K线预热应调用增量缓存（get_kline_cached），并统计成功/失败。"""
+        from app.screener import scanner as scanner_module
+
+        calls = []
+
+        def fake_get_kline(code):
+            calls.append(code)
+            return None
+
+        monkeypatch.setattr(
+            scanner_module, "get_kline_cached", fake_get_kline
+        )
+        monkeypatch.setattr(
+            scanner_module, "get_stock_pool",
+            lambda: __import__("pandas").DataFrame({"code": ["600000", "600001", "600002"]}),
+        )
+
+        result = asyncio.run(scanner_module.warmup_klines())
+        assert result["total"] == 3
+        assert result["ok"] == 3
+        assert result["fail"] == 0
+        assert calls == ["600000", "600001", "600002"]
+
+    def test_warmup_counts_failures(self, monkeypatch):
+        """单股取数异常应计入 fail 而不中断整轮。"""
+        from app.screener import scanner as scanner_module
+
+        def fake_get_kline(code):
+            if code == "600001":
+                raise RuntimeError("网络错误")
+            return None
+
+        monkeypatch.setattr(scanner_module, "get_kline_cached", fake_get_kline)
+        monkeypatch.setattr(
+            scanner_module, "get_stock_pool",
+            lambda: __import__("pandas").DataFrame({"code": ["600000", "600001"]}),
+        )
+        result = asyncio.run(scanner_module.warmup_klines())
+        assert result["ok"] == 1
+        assert result["fail"] == 1
+
+
 @dataclass
 class FakeRec:
     """模拟 Recommendation（只含引擎用到的字段）。"""
