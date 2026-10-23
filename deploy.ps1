@@ -44,7 +44,15 @@ Write-Host "[BUILD] Done -> frontend/dist" -ForegroundColor Green
 
 # ---------- 2. Restart SAS service ----------
 Write-Host "[RESTART] Restarting SAS service..."
-Restart-Service SAS
+# 确保 nssm 停止服务时连同子进程(uvicorn)一起终止。否则旧进程残留占用
+# 8000 端口会导致新进程绑定失败，线上继续跑旧代码(且 overview 仍慢)。
+$nssm = (Get-ChildItem "$env:LOCALAPPDATA\Microsoft\WinGet\Packages" -Recurse -Filter nssm.exe -ErrorAction SilentlyContinue | Select-Object -First 1).FullName
+if ($nssm) {
+    & $nssm set SAS AppKillProcessTree 1 2>&1 | ForEach-Object { $_.ToString() } | Out-Null
+}
+Stop-Service SAS -Force -ErrorAction SilentlyContinue
+Start-Sleep -Seconds 3
+Start-Service SAS -ErrorAction SilentlyContinue
 Write-Host "[RESTART] Service restarted" -ForegroundColor Green
 
 # ---------- 3. Verify (poll health up to 60s) ----------
