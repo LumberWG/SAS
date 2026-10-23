@@ -265,6 +265,34 @@ NOTIFY_WEBHOOK_URL=https://qyapi.weixin.qq.com/cgi-bin/webhook/send?key=xxxx
 - K线成交量已统一换算为「手」；成交额为估算值（腾讯/新浪源不返回真实成交额）
 - 交易日判断不含法定节假日（个人使用场景可接受）
 
+### 6. 注册为 Windows 服务（开机自启 + 崩溃自动重启）
+
+生产环境建议把后端注册为系统服务，实现开机自启与进程崩溃自动重启：
+
+```powershell
+# 管理员 PowerShell（或右键 install_service.ps1 → 使用 PowerShell 运行）
+powershell -ExecutionPolicy Bypass -File e:\Study\SAS\install_service.ps1
+```
+
+脚本自动完成：
+- 通过 NSSM 注册 `SAS` 服务（uvicorn 生产模式，托管前端 dist，单端口 8000）
+- 启动类型 = 自动（开机自启）
+- 进程退出自动重启（`AppExit Default Restart` + 5 秒节流防崩溃循环）
+- 日志输出到 `data/logs/`（10MB 自动轮转）
+- 同时给 cpolar 服务配置失败恢复策略（1/2/5 分钟三级重启）
+
+常用运维命令：
+
+```powershell
+Restart-Service SAS                    # 重启
+Get-Content e:\Study\SAS\data\logs\sas-service.log -Tail 50   # 看日志
+nssm remove SAS confirm                # 卸载服务
+```
+
+**模式区分**：
+- **生产模式**（推荐，公网访问用）：只跑 `SAS` 服务一个进程，访问 http://127.0.0.1:8000
+- **开发模式**（改代码调试用）：`python start_dev.py`（前端 dev server 带热更新，后端手动跑），二者不要同时使用（8000 端口冲突）
+
 ## 测试
 
 ```bash
