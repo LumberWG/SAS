@@ -22,6 +22,21 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
 # warnings on stderr which PowerShell 5.1 would treat as a terminating
 # NativeCommandError and abort the pipeline. Use explicit exit-code checks.
 Write-Host "[BUILD] Building frontend (npm run build)..."
+
+# Entry-chunk hash BEFORE build, used to prove the bundle actually changed.
+function Get-EntryHash {
+    param([string]$DistDir)
+    $idx = Join-Path $DistDir 'index.html'
+    if (-not (Test-Path $idx)) { return '(none)' }
+    $m = Select-String -Path $idx -Pattern 'assets/index-([A-Za-z0-9_-]+)\.js' -ErrorAction SilentlyContinue |
+         Select-Object -First 1
+    if ($m) { return $m.Matches[0].Groups[1].Value }
+    return '(unknown)'
+}
+$DistDir  = 'e:\Study\SAS\frontend\dist'
+$entryOld = Get-EntryHash $DistDir
+Write-Host ("[BUILD] Current entry: index-{0}.js" -f $entryOld)
+
 Push-Location e:\Study\SAS\frontend
 $buildOk = $true
 try {
@@ -42,6 +57,32 @@ if (-not $buildOk) {
 }
 Write-Host "[BUILD] Done -> frontend/dist" -ForegroundColor Green
 
+# ---------- 1b. Verify the built bundle matches index.html ----------
+# Guards against the 2026-10-25 incident: source edited at 20:24 but dist was
+# still yesterday's build, so the site silently served stale code.
+$entryNew = Get-EntryHash $DistDir
+Write-Host ("[VERIFY] Entry: index-{0}.js -> index-{1}.js" -f $entryOld, $entryNew)
+if ($entryOld -ne $entryNew) {
+    Write-Host "[VERIFY] Entry changed - new bundle will be served" -ForegroundColor Green
+} else {
+    Write-Host "[VERIFY] Entry unchanged (source may not have changed)" -ForegroundColor Yellow
+}
+
+$refs = Select-String -Path (Join-Path $DistDir 'index.html') -Pattern '(?:src|href)="(/assets/[^"]+)"' -AllMatches |
+        ForEach-Object { $_.Matches } |
+        ForEach-Object { $_.Groups[1].Value } |
+        Sort-Object -Unique
+$missing = @()
+foreach ($r in $refs) {
+    if (-not (Test-Path (Join-Path $DistDir $r.TrimStart('/')))) { $missing += $r }
+}
+if ($missing.Count -gt 0) {
+    Write-Host "[VERIFY] index.html references missing assets:" -ForegroundColor Red
+    $missing | ForEach-Object { Write-Host ("  " + $_) -ForegroundColor Red }
+    exit 1
+}
+Write-Host ("[VERIFY] All {0} referenced assets present" -f $refs.Count) -ForegroundColor Green
+
 # ---------- 2. Restart SAS service ----------
 Write-Host "[RESTART] Restarting SAS service..."
 # 确保 nssm 停止服务时连同子进程(uvicorn)一起终止。否则旧进程残留占用
@@ -54,6 +95,11 @@ Stop-Service SAS -Force -ErrorAction SilentlyContinue
 Start-Sleep -Seconds 3
 Start-Service SAS -ErrorAction SilentlyContinue
 Write-Host "[RESTART] Service restarted" -ForegroundColor Green
+
+# Frontend service loads serve_frontend.py (proxy + cache headers); restart it so
+# edits to that file take effect. Changes under frontend/dist need no restart.
+Restart-Service SAS-frontend -Force -ErrorAction SilentlyContinue
+Write-Host "[RESTART] Frontend service restarted" -ForegroundColor Green
 
 # ---------- 3. Verify (poll health up to 60s) ----------
 $health = $null
@@ -100,7 +146,15 @@ if (-not $bizOk) {
 }
 
 # Public URL check (fixed subdomain; change if yours differs)
-$PublicUrl = "https://mysas.vip.cpolar.cn"
+# 2026-10-25: mysas tunnel is pinned to region cn_top -> *.cpolar.top
+$PublicUrl = "https://mysas.cpolar.top"
+# PS 5.1 defaults to TLS 1.0/1.1 and the handshake against cpolar fails with
+# "connection closed" - force TLS 1.2 before the request.
+try {
+    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+} catch {
+    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+}
 # PS 5.1: Invoke-WebRequest has no -SkipCertificateCheck; trust all certs for this check
 [Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
 try {
