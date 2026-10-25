@@ -197,6 +197,7 @@ export interface ScanTask {
   finished_at: string
   duration: number | null
   sentiment: Sentiment | null
+  error?: string
 }
 
 export interface ScanScope {

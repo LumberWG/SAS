@@ -20,7 +20,13 @@ import pandas as pd
 
 from app.config import get_settings
 from app.data.base import BaseDataSource
-from app.data.fallback import code_to_symbol, sina_kline, sina_quotes, tencent_kline
+from app.data.fallback import (
+    code_to_symbol,
+    sina_kline,
+    sina_quotes,
+    tencent_kline,
+    xueqiu_kline,
+)
 from app.net import apply_data_network_settings
 
 logger = logging.getLogger("sas.data.akshare")
@@ -41,6 +47,9 @@ class CircuitBreaker:
     熔断后冷却期内直接走降级源，冷却期结束自动恢复试探。
     """
 
+    #: 冷却时间上限：数据源长时间不可用时最多暂停 30 分钟，避免每轮扫描都白踩超时
+    MAX_COOLDOWN = 1800.0
+
     def __init__(self, threshold: int = 3, cooldown: float = 300.0) -> None:
         self.threshold = threshold
         self.cooldown = cooldown
@@ -56,13 +65,46 @@ class CircuitBreaker:
         self._open_until.pop(key, None)
 
     def record_failure(self, key: str) -> None:
+        """记录一次失败；达到阈值后熔断，冷却时间随连续失败次数指数增长。
+
+        注意：重试循环里每次尝试失败都应调用本方法（而不是整次调用结束才记一次），
+        否则并发扫描时一轮重试要白白消耗几分钟才能熔断。
+        """
         count = self._failures.get(key, 0) + 1
         self._failures[key] = count
         if count >= self.threshold:
-            self._open_until[key] = time.monotonic() + self.cooldown
-            logger.warning(
-                "接口 %s 连续失败 %d 次，熔断 %d 秒", key, count, self.cooldown
+            cooldown = min(
+                self.cooldown * (2 ** (count - self.threshold)), self.MAX_COOLDOWN
             )
+            self._open_until[key] = time.monotonic() + cooldown
+            logger.warning(
+                "接口 %s 连续失败 %d 次，熔断 %d 秒", key, count, int(cooldown)
+            )
+
+
+def _is_connection_error(exc: BaseException) -> bool:
+    """是否为主机级连接错误（连接被拒/重置/代理不可用）。
+
+    这类错误立即重试不会有不同结果，应直接降级而不是消耗重试次数，
+    否则每只股票都要多等 2-3 次尝试（实测约 7.5 秒）。
+    """
+    import requests
+
+    if isinstance(
+        exc,
+        (
+            requests.exceptions.ConnectionError,
+            requests.exceptions.ProxyError,
+            ConnectionError,
+        ),
+    ):
+        return True
+    return type(exc).__name__ in (
+        "RemoteDisconnected",
+        "ConnectionResetError",
+        "ConnectionRefusedError",
+        "ConnectionAbortedError",
+    )
 
 
 def _market_of(code: str) -> str:
@@ -135,6 +177,7 @@ class AkshareDataSource(BaseDataSource):
                 # 超时即放弃：不等待仍在跑 akshare 的泄漏线程（wait=False），
                 # 否则 shutdown 会 join 该线程（可能卡到 TCP 超时，几分钟）
                 ex.shutdown(wait=False)
+                self._breaker.record_failure(func_name)  # 每次尝试失败即计数
                 last_err = TimeoutError(f"akshare.{func_name} 超时({timeout}s)")
                 logger.warning(
                     "akshare.%s 第 %d 次调用超时(%ds)", func_name, attempt, int(timeout)
@@ -146,21 +189,33 @@ class AkshareDataSource(BaseDataSource):
                 raise
             except Exception as exc:  # noqa: BLE001 - 数据源异常统一兜底
                 ex.shutdown(wait=False)
+                self._breaker.record_failure(func_name)  # 每次尝试失败即计数
                 last_err = exc
                 logger.warning(
                     "akshare.%s 第 %d 次调用失败: %s", func_name, attempt, exc
                 )
+                # 连接被拒/被重置属于主机级不可达，立即重试不会有不同结果：
+                # 直接结束本次调用（熔断计数已累计 1 次），把时间留给降级源。
+                # 实测否则每只股票要多花约 7.5 秒（3 次尝试）才降级。
+                if _is_connection_error(exc):
+                    raise DataSourceError(
+                        f"akshare.{func_name} 连接不可用: {exc}"
+                    ) from exc
                 if attempt <= retries:
                     time.sleep(0.5 * attempt)  # 线性退避
-        self._breaker.record_failure(func_name)
+        # 失败计数已在每次尝试时记录，这里直接抛出让上层降级
         raise DataSourceError(f"akshare.{func_name} 调用失败: {last_err}") from last_err
 
     # ------------------------------------------------------------------
     # 股票池
     # ------------------------------------------------------------------
     def get_stock_pool(self) -> pd.DataFrame:
-        """全A股股票池（含沪深京，剔除退市）。"""
-        df = self._call("stock_info_a_code_name")
+        """全A股股票池（含沪深京，剔除退市）。
+
+        该接口在部分网络环境不可达：akshare 内部会分段请求（耗时可达分钟级），
+        这里用更短超时 + 单次重试尽快失败并交给上层降级，避免长时间占用线程。
+        """
+        df = self._call("stock_info_a_code_name", retries=1, timeout=15.0)
         df = df.rename(columns={"code": "code", "name": "name"})
         df["code"] = df["code"].astype(str).str.zfill(6)
         df["market"] = df["code"].map(_market_of)
@@ -179,7 +234,11 @@ class AkshareDataSource(BaseDataSource):
             df = self._call("stock_zh_a_spot_em")
         except DataSourceError:
             logger.warning("东方财富快照不可用，降级为新浪批量实时行情")
-            pool = self.get_stock_pool()
+            # 用服务层股票池（东财列表/新浪列表/快照多级降级 + 缓存）取代码表，
+            # 避免这里的 akshare 池接口超时把整次快照刷新拖成分钟级
+            from app.data.service import get_stock_pool
+
+            pool = get_stock_pool()
             symbols = [
                 code_to_symbol(r.code, r.market) for r in pool.itertuples()
             ]
@@ -286,20 +345,48 @@ class AkshareDataSource(BaseDataSource):
     def _kline_from_fallback(
         self, code: str, adjust: str, start_norm: str, end_norm: str
     ) -> pd.DataFrame:
-        """K线降级链：腾讯 → 新浪。
+        """K线降级链：腾讯 → 雪球 → 新浪。
 
-        两个备用源均忽略调用方传入的日期参数（按固定根数拉取），
+        三个备用源均忽略调用方传入的日期参数（按固定根数拉取），
         拉取后再按 [start_norm, end_norm] 过滤。
-        注意：新浪源不支持复权参数，返回其默认口径。
+        注意：新浪源不支持复权参数，返回其默认口径；雪球源带真实成交额。
+
+        每个备用源独立熔断：某源触发风控（腾讯 501 / 雪球 token 失效）后，
+        冷却期内直接跳过，省去每只股票必然失败的重试开销。
         """
-        try:
-            logger.warning("东方财富K线不可用，降级为腾讯K线 code=%s", code)
-            df = tencent_kline(code, adjust=adjust)
-        except Exception as exc:  # noqa: BLE001 - 腾讯也可能触发风控
-            logger.warning("腾讯K线不可用(%s)，降级为新浪K线 code=%s", exc, code)
-            df = sina_kline(code_to_symbol(code), datalen=300)
-        if df.empty:
-            return df
+        df: pd.DataFrame | None = None
+
+        # 雪球优先：连接复用后单只约 0.07s（腾讯约 1s），且返回**真实成交额**
+        if not self._breaker.is_open("xueqiu_kline"):
+            try:
+                df = xueqiu_kline(code, adjust=adjust)
+                if df.empty:
+                    df = None
+                else:
+                    self._breaker.record_success("xueqiu_kline")
+            except Exception as exc:  # noqa: BLE001 - token 失效/北交所不支持
+                self._breaker.record_failure("xueqiu_kline")
+                logger.warning("雪球K线不可用(%s)，尝试腾讯K线 code=%s", exc, code)
+                df = None
+
+        if df is None and not self._breaker.is_open("tencent_kline"):
+            try:
+                logger.warning("东方财富K线不可用，降级为腾讯K线 code=%s", code)
+                df = tencent_kline(code, adjust=adjust)
+                if df.empty:
+                    df = None
+                else:
+                    self._breaker.record_success("tencent_kline")
+            except Exception as exc:  # noqa: BLE001 - 腾讯也可能触发风控
+                self._breaker.record_failure("tencent_kline")
+                logger.warning("腾讯K线不可用(%s)，降级为新浪K线 code=%s", exc, code)
+                df = None
+
+        if df is None:
+            # 必须传入正确市场：92 开头是北交所（bj），不能按 9 判成上交所
+            df = sina_kline(code_to_symbol(code, _market_of(code)), datalen=300)
+        if df is None or df.empty:
+            return pd.DataFrame()
         return df[(df["date"] >= start_norm) & (df["date"] <= end_norm)].reset_index(
             drop=True
         )

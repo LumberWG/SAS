@@ -39,9 +39,10 @@ async def lifespan(_: FastAPI):
 
     async def warmup() -> None:
         try:
-            from app.data.akshare_source import get_data_source
+            # 使用服务层 get_stock_pool（主源不可用时自动降级为持久化快照代码表）
+            from app.data.service import get_stock_pool
 
-            pool = await asyncio.to_thread(get_data_source().get_stock_pool)
+            pool = await asyncio.to_thread(get_stock_pool)
             logger.info("股票池预热完成，共 %d 只股票", len(pool))
         except Exception as exc:  # noqa: BLE001
             logger.warning("股票池预热失败（将在首次请求时重试）: %s", exc)

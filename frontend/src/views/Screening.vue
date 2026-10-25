@@ -35,9 +35,49 @@ const selected = ref<string[]>([])
 const scope = ref('top_amount:500')
 const task = ref<ScanTask | null>(null)
 const editingStrategy = ref<StrategyInfo | null>(null)
+const loadingStrategies = ref(true)
+const loadError = ref('')
 let poller: number | undefined
 
 const running = computed(() => task.value?.status === 'running' || task.value?.status === 'pending')
+
+// 扫描中每秒刷新一次的时钟：首只股票扫完前 scanned 一直是 0，
+// 没有跳动的耗时会让人误以为进度卡死
+const nowTick = ref(Date.now())
+let ticker: number | undefined
+
+function startTicker() {
+  stopTicker()
+  nowTick.value = Date.now()
+  ticker = window.setInterval(() => {
+    nowTick.value = Date.now()
+  }, 1000)
+}
+
+function stopTicker() {
+  if (ticker) {
+    window.clearInterval(ticker)
+    ticker = undefined
+  }
+}
+
+/** 扫描已耗时（秒），running 时每秒跳动。 */
+const elapsedSec = computed(() => {
+  const t = task.value
+  if (!t || t.status !== 'running' || !t.started_at) return 0
+  const started = Date.parse(t.started_at.replace(' ', 'T'))
+  if (Number.isNaN(started)) return 0
+  return Math.max(0, Math.round((nowTick.value - started) / 1000))
+})
+
+/** 当前阶段提示：代码池准备中 / 首批K线拉取中（进度为 0 时说明在干什么）。 */
+const phaseHint = computed(() => {
+  const t = task.value
+  if (!t || t.status !== 'running') return ''
+  if (!t.total) return '正在准备股票池…'
+  if (!t.scanned) return '正在拉取K线（首批完成后开始计数）…'
+  return ''
+})
 
 // 今日历史命中总数（信号库统计，用于空状态上下文提示）
 const todayHitTotal = computed(() =>
@@ -78,12 +118,22 @@ function stopStatusPolling() {
 }
 
 async function loadStrategies() {
-  const data = await getStrategies()
-  strategies.value = data.strategies
-  scopes.value = data.scopes
-  todayHits.value = data.today_hits
-  // 默认全选（新增自定义策略自动勾选）
-  selected.value = data.strategies.map((s) => s.name)
+  loadError.value = ''
+  loadingStrategies.value = true
+  try {
+    const data = await getStrategies()
+    strategies.value = data.strategies
+    scopes.value = data.scopes
+    todayHits.value = data.today_hits
+    // 默认全选（新增自定义策略自动勾选）
+    selected.value = data.strategies.map((s) => s.name)
+  } catch {
+    // 策略加载失败（后端未就绪/网络异常）：保留错误态供用户重试，
+    // 避免按钮静默禁用看起来像"点击没反应"
+    loadError.value = '策略列表加载失败：请确认后端服务已启动（http://127.0.0.1:8000），点击重试'
+  } finally {
+    loadingStrategies.value = false
+  }
 }
 
 /** 自定义策略保存/删除后：刷新列表 + 自动勾选新策略。 */
@@ -105,16 +155,48 @@ async function onStrategyDeleted(name: string) {
 async function restoreLatest() {
   try {
     const { task: latest } = await getLatestScan()
-    if (latest) {
-      task.value = latest
-      if (latest.status === 'running') {
-        // 后端重启会导致任务中断，标记为失败态由用户重扫
-        task.value = { ...latest, status: 'error' }
-      }
+    if (!latest) return
+    task.value = latest
+    // 后端重启会清空内存任务，此时接口返回 null；
+    // 能返回 running 说明任务确实在跑（刷新页面前点的扫描），继续轮询
+    if (latest.status === 'running' || latest.status === 'pending') {
+      startTicker()
+      startPolling(latest.task_id)
     }
   } catch {
     // 恢复失败静默（首次使用无历史任务）
   }
+}
+
+/** 轮询扫描任务；任务丢失（如后端重启）时明确提示，不一直显示“扫描中”。 */
+function startPolling(taskId: string) {
+  stopPolling()
+  let misses = 0
+  poller = window.setInterval(async () => {
+    try {
+      const t = await getScanTask(taskId)
+      misses = 0
+      task.value = t
+      if (t.status === 'done' || t.status === 'error') {
+        stopPolling()
+        stopTicker()
+        loadKlineStatus()
+      }
+    } catch {
+      misses += 1
+      if (misses >= 3) {
+        stopPolling()
+        stopTicker()
+        if (task.value) {
+          task.value = {
+            ...task.value,
+            status: 'error',
+            error: '任务已丢失（后端可能已重启），请重新扫描',
+          }
+        }
+      }
+    }
+  }, 2000)
 }
 
 function toggleStrategy(name: string) {
@@ -127,16 +209,17 @@ function toggleStrategy(name: string) {
 
 async function start() {
   if (selected.value.length === 0) return
-  const { task_id } = await startScan(selected.value, undefined, scope.value)
-  task.value = await getScanTask(task_id)
-  // 2 秒轮询任务状态
-  poller = window.setInterval(async () => {
-    if (!task.value) return
-    task.value = await getScanTask(task.value.task_id)
-    if (task.value.status === 'done' || task.value.status === 'error') {
-      stopPolling()
-    }
-  }, 2000)
+  try {
+    const { task_id } = await startScan(selected.value, undefined, scope.value)
+    task.value = await getScanTask(task_id)
+    startTicker()
+    startPolling(task_id)
+  } catch (e: unknown) {
+    // 启动失败（400 未注册策略 / 500 等）：明确反馈，避免静默无响应
+    const detail = (e as { response?: { data?: { detail?: string } } })?.response
+      ?.data?.detail
+    toast(detail ?? '扫描启动失败，请稍后重试')
+  }
 }
 
 // 手动触发K线预热（后台批量缓存日K，加速后续扫描）
@@ -167,6 +250,7 @@ function stopPolling() {
 onUnmounted(() => {
   stopPolling()
   stopStatusPolling()
+  stopTicker()
 })
 
 function goDetail(hit: ScanHit) {
@@ -238,6 +322,21 @@ onMounted(async () => {
 
     <!-- 右侧扫描区 -->
     <section class="flex min-w-0 flex-1 flex-col gap-4">
+      <!-- 策略加载失败提示（含重试） -->
+      <div
+        v-if="loadError"
+        class="flex items-center justify-between gap-3 rounded-lg border border-down/40 bg-down/10 px-4 py-3 text-[12px] text-down"
+      >
+        <span>{{ loadError }}</span>
+        <button
+          class="shrink-0 rounded-md border border-down/40 px-2.5 py-1 text-[12px] transition-colors hover:bg-down/20"
+          :disabled="loadingStrategies"
+          @click="loadStrategies"
+        >
+          {{ loadingStrategies ? '加载中...' : '重试' }}
+        </button>
+      </div>
+
       <!-- 操作栏 -->
       <div class="glass-card p-4">
         <div class="flex flex-wrap items-center gap-4">
@@ -253,6 +352,7 @@ onMounted(async () => {
           <button
             class="group flex items-center gap-2 rounded-lg bg-gradient-to-r from-primary to-primary-light px-5 py-2.5 text-[13px] font-semibold text-white shadow-glow transition-all hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50"
             :disabled="running || selected.length === 0"
+            :title="selected.length === 0 ? '请先在左侧勾选至少一个策略' : ''"
             @click="start"
           >
             <Play class="h-4 w-4 transition-transform group-hover:scale-110" />
@@ -283,14 +383,30 @@ onMounted(async () => {
                 {{ task.status === 'done' ? '扫描完成' : task.status === 'error' ? '扫描中断' : '正在扫描' }}
                 <span v-if="task.total" class="font-num">· {{ task.scanned }}/{{ task.total }} 只</span>
                 <span v-if="task.skipped" class="font-num">· 跳过 {{ task.skipped }}</span>
-                <span v-if="task.duration !== null" class="text-content-faint">
+                <span v-if="task.status === 'running' && elapsedSec > 0" class="font-num text-content-faint">
+                  <Clock class="ml-1 inline h-3 w-3" />{{ fmtDuration(elapsedSec) }}
+                </span>
+                <span v-else-if="task.duration !== null" class="text-content-faint">
                   <Clock class="ml-1 inline h-3 w-3" />{{ fmtDuration(task.duration) }}
+                </span>
+                <span v-if="task.status === 'error' && task.error" class="text-down" :title="task.error">
+                  · {{ task.error }}
                 </span>
               </span>
               <span class="font-num text-content">{{ task.progress }}%</span>
             </div>
+            <!-- 阶段提示：进度还是 0 的时候告诉用户在干什么，避免误以为卡死 -->
+            <p v-if="phaseHint" class="mb-1.5 text-[11px] text-content-faint">
+              {{ phaseHint }}
+            </p>
             <div class="relative h-2 overflow-hidden rounded-full bg-base-700">
+              <!-- 尚未产生进度：用往复滚动的不确定进度条表示仍在工作 -->
               <div
+                v-if="task.status === 'running' && task.progress <= 0"
+                class="progress-indeterminate absolute h-full rounded-full bg-gradient-to-r from-primary to-primary-light"
+              />
+              <div
+                v-else
                 class="relative h-full rounded-full bg-gradient-to-r from-primary to-primary-light transition-all duration-500"
                 :class="task.status === 'running' ? 'progress-shimmer overflow-hidden' : ''"
                 :style="{ width: `${task.progress}%` }"

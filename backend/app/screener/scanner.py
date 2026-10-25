@@ -11,8 +11,10 @@
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -42,6 +44,7 @@ class ScanTask:
     finished_at: str = ""
     scope: str = "all"               # 扫描范围
     sentiment: dict = field(default_factory=dict)    # 扫描开始时市场情绪快照
+    error: str = ""                  # 失败原因（status=error 时供前端展示）
 
     def progress(self) -> float:
         return round(self.scanned / self.total * 100, 1) if self.total else 0.0
@@ -54,6 +57,13 @@ class Scanner:
         self.settings = get_settings()
         self._tasks: dict[str, ScanTask] = {}
         self._lock = asyncio.Lock()
+        # 扫描 IO 专用线程池：asyncio 默认执行器只有 cpu+4 个 worker，
+        # 冷缓存全市场扫描（每只要走降级链、单只可达十几秒）会严重供不应求；
+        # 这里按扫描并发上限单独扩容，信号量仍然限制同时在飞的股票数。
+        self._io = ThreadPoolExecutor(
+            max_workers=max(self.settings.scan_concurrency, 8),
+            thread_name_prefix="scan-io",
+        )
 
     # ------------------------------------------------------------------
     # 任务管理
@@ -66,6 +76,10 @@ class Scanner:
         if not self._tasks:
             return None
         return max(self._tasks.values(), key=lambda t: t.started_at or "")
+
+    def has_active_scan(self) -> bool:
+        """是否有扫描正在运行（后台预热据此让路，优先保证扫描出结果）。"""
+        return any(t.status in ("pending", "running") for t in self._tasks.values())
 
     async def start_scan(
         self,
@@ -95,17 +109,27 @@ class Scanner:
         task.status = "running"
         task.started_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         try:
+            loop = asyncio.get_running_loop()
             # 记录扫描开始时的市场情绪（供结果展示与 LLM 分析上下文）
-            task.sentiment = self._current_sentiment()
+            # 取快照可能触发冷启动同步刷新（分钟级），必须放到线程池，
+            # 否则会阻塞事件循环导致整个 API 无响应
+            task.sentiment = await loop.run_in_executor(
+                self._io, self._current_sentiment
+            )
 
-            pool = await asyncio.to_thread(get_stock_pool)
+            pool = await loop.run_in_executor(self._io, get_stock_pool)
             if codes:
-                wanted = set(codes)
-                pool = pool[pool["code"].isin(wanted)]
+                # 显式指定代码时直接以其为准：股票池可能来自降级快照
+                # （覆盖不全），不能再用 isin 过滤，否则会漏扫
+                wanted = [str(c).zfill(6) for c in codes]
+                names = dict(zip(pool["code"], pool["name"])) if "name" in pool else {}
+                pool = pd.DataFrame(
+                    {"code": wanted, "name": [names.get(c, c) for c in wanted]}
+                )
             elif scope.startswith("top_amount:"):
                 # 成交额前 N（流动性优先，冷缓存下最快出结果的范围）
                 n = int(scope.split(":", 1)[1] or 500)
-                pool = await asyncio.to_thread(self._top_amount_pool, pool, n)
+                pool = await loop.run_in_executor(self._io, self._top_amount_pool, pool, n)
             else:
                 pool = filter_pool_by_scope(pool, scope)
             task.total = len(pool)
@@ -125,7 +149,7 @@ class Scanner:
                         logger.debug("扫描 %s 失败: %s", row.code, exc)
                     finally:
                         task.scanned += 1
-                        if task.scanned % 200 == 0:
+                        if task.scanned % 50 == 0:
                             logger.info(
                                 "扫描进度 %d/%d (%.0f%%)",
                                 task.scanned, task.total, task.progress(),
@@ -147,6 +171,7 @@ class Scanner:
             )
         except Exception as exc:  # noqa: BLE001 - 整轮失败记录状态
             task.status = "error"
+            task.error = str(exc)
             task.finished_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             logger.exception("扫描任务失败: %s", exc)
 
@@ -186,10 +211,11 @@ class Scanner:
     ) -> list[Signal]:
         """扫描单只股票：取K线 → 算指标 → 逐策略评估。"""
         # 网络与计算都是阻塞操作，放到线程池避免卡住事件循环
-        df = await asyncio.to_thread(get_kline_cached, code)
+        loop = asyncio.get_running_loop()
+        df = await loop.run_in_executor(self._io, get_kline_cached, code)
         if df is None or df.empty or len(df) < 30:
             return []
-        df = await asyncio.to_thread(add_all_indicators, df)
+        df = await loop.run_in_executor(self._io, add_all_indicators, df)
 
         signals: list[Signal] = []
         for strategy in strategies:
@@ -236,6 +262,18 @@ SCAN_SCOPES: dict[str, dict] = {
 }
 
 
+async def run_in_io(fn, /, *args, **kwargs):
+    """在扫描专用 IO 线程池里执行阻塞调用。
+
+    asyncio 默认执行器只有 cpu+4 个 worker，被预热/扫描占满时其他接口
+    （同样用 asyncio.to_thread）会排队到超时，因此对外统一用这个池。
+    """
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        scanner._io, functools.partial(fn, *args, **kwargs)
+    )
+
+
 async def warmup_klines(
     codes: list[str] | None = None,
     concurrency: int | None = None,
@@ -252,7 +290,8 @@ async def warmup_klines(
     settings = get_settings()
     if concurrency is None:
         concurrency = settings.kline_warmup_concurrency
-    pool = await asyncio.to_thread(get_stock_pool)
+    loop = asyncio.get_running_loop()
+    pool = await run_in_io(get_stock_pool)
     if codes is not None:
         wanted = set(codes)
         pool = pool[pool["code"].isin(wanted)]
@@ -264,13 +303,27 @@ async def warmup_klines(
         nonlocal ok, fail
         async with sem:
             try:
-                await asyncio.to_thread(get_kline_cached, code)
+                # 走扫描专用线程池：默认执行器（cpu+4）会被预热占满，
+                # 导致其他接口的 asyncio.to_thread 排队（实测 kline-status 13s）
+                await loop.run_in_executor(scanner._io, get_kline_cached, code)
                 ok += 1
             except Exception as exc:  # noqa: BLE001 - 单股失败跳过
                 fail += 1
                 logger.debug("K线预热失败 %s: %s", code, exc)
 
-    await asyncio.gather(*(one(c) for c in pool["code"]))
+    # 分批预热：每批之间检查是否有用户扫描在跑，有则立即让路。
+    # 预热与扫描抢的是同一批数据源连接与节流额度，若同时进行，
+    # 刚点下的扫描会几十秒看不到任何进度（实测冷启动差 1 分钟以上）。
+    codes_all = list(pool["code"])
+    chunk = max(concurrency * 5, 50)
+    for start in range(0, len(codes_all), chunk):
+        if scanner.has_active_scan():
+            logger.info(
+                "扫描任务进行中，K线预热让路：已完成 %d/%d 只", ok, len(codes_all)
+            )
+            break
+        await asyncio.gather(*(one(c) for c in codes_all[start : start + chunk]))
+
     result = {"ok": ok, "fail": fail, "total": len(pool)}
     _last_warmup.update(
         {"result": result, "at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}

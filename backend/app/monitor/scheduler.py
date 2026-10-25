@@ -33,6 +33,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 
 from app.config import get_settings
 from app.data.cache import db
+from app.data.service import get_stock_pool
 from app.data.snapshot_store import snapshot_store
 from app.notify import notifier
 from app.screener.scanner import warmup_klines as screener_warmup

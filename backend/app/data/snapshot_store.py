@@ -31,6 +31,11 @@ logger = logging.getLogger("sas.snapshot")
 # 持久化默认目录（与 kline 缓存分离）：重启/数据源故障后保留最近一次成功快照
 _CACHE_DIR = Path(__file__).resolve().parent / "cache"
 
+#: 防残缺快照覆盖：旧快照至少这么多行时才做数量对比校验
+_SNAPSHOT_MIN_ROWS = 1000
+#: 新快照行数低于旧快照的这个比例即判为残缺（分批抓取部分失败）
+_SNAPSHOT_MIN_KEEP_RATIO = 0.6
+
 
 class SnapshotStore:
     """全市场快照与指数快照的内存缓存。"""
@@ -211,6 +216,21 @@ class SnapshotStore:
         """全市场实时快照（SWR：旧数据立即可用，后台刷新）。"""
 
         def store(df: pd.DataFrame) -> None:
+            # 降级源（新浪批量）是分批抓取的，部分批次失败会返回大幅缩水的
+            # 结果。这里拒绝用这种残缺数据覆盖已有完整快照，否则
+            # 「成交额前 N」等依赖快照的功能会突然只覆盖很少的股票。
+            prev = self._snapshot
+            if (
+                prev is not None
+                and len(prev) >= _SNAPSHOT_MIN_ROWS
+                and len(df) < len(prev) * _SNAPSHOT_MIN_KEEP_RATIO
+            ):
+                logger.warning(
+                    "快照数据量异常（%d → %d 条），保留旧快照不覆盖",
+                    len(prev), len(df),
+                )
+                self._snapshot_at = time.monotonic()  # 避免每个请求都重试刷新
+                return
             self._snapshot = df
             self._snapshot_at = time.monotonic()
             self._persist(self._snapshot_file, df)

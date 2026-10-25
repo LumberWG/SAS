@@ -49,7 +49,7 @@ class Settings(BaseSettings):
     # 将数据源域名加入 NO_PROXY 绕过代理（LLM 等海外服务不受影响）
     data_direct_only: bool = True
     data_no_proxy_domains: list[str] = [
-        "eastmoney.com", "sina.com.cn", "gtimg.cn",
+        "eastmoney.com", "sina.com.cn", "gtimg.cn", "qq.com",
         "szse.cn", "sse.com.cn", "hexun.com", "10jqka.com.cn",
     ]
 

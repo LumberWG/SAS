@@ -118,4 +118,19 @@
       transform: translateX(100%);
     }
   }
+
+  /* 尚未产生真实进度时的不确定进度条（扫描首批K线期间）：
+     进度为 0 时真实百分比无法体现工作状态，用往复滚动的色块表示“仍在进行” */
+  .progress-indeterminate {
+    width: 40%;
+    animation: indeterminate 1.3s ease-in-out infinite;
+  }
+  @keyframes indeterminate {
+    0% {
+      transform: translateX(-100%);
+    }
+    100% {
+      transform: translateX(350%);
+    }
+  }
 }

@@ -1,6 +1,7 @@
 """选股 API：策略列表、扫描任务、历史信号、命中统计。"""
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime
 
 from fastapi import APIRouter, HTTPException, Query
@@ -8,7 +9,13 @@ from pydantic import BaseModel, Field
 
 from app.api.utils import with_disclaimer
 from app.data.cache import db
-from app.screener.scanner import SCAN_SCOPES, scanner, warmup_klines, kline_cache_stats
+from app.screener.scanner import (
+    SCAN_SCOPES,
+    kline_cache_stats,
+    run_in_io,
+    scanner,
+    warmup_klines,
+)
 from app.strategies import registry
 
 router = APIRouter(prefix="/screening", tags=["选股"])
@@ -55,7 +62,7 @@ async def start_scan(req: ScanRequest) -> dict:
 @router.get("/kline-status")
 async def kline_status() -> dict:
     """K线缓存覆盖状态：已缓存只数 / 股票池总数 / 最近一次预热结果。"""
-    return with_disclaimer(await asyncio.to_thread(kline_cache_stats))
+    return with_disclaimer(await run_in_io(kline_cache_stats))
 
 
 @router.post("/warmup")
@@ -114,6 +121,7 @@ def _task_payload(task) -> dict:
         "finished_at": task.finished_at,
         "duration": duration,
         "sentiment": task.sentiment,  # 扫描开始时市场情绪快照
+        "error": task.error,          # 失败原因（status=error 时前端展示）
     }
 
 

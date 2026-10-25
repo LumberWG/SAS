@@ -1,10 +1,14 @@
 """启动 SAS 前后端开发服务器（后台运行，验证后保持存活）。"""
 import subprocess
+import sys
 import time
 import urllib.request
+from pathlib import Path
 
-BACKEND = r"e:\Study\SAS\backend"
-FRONTEND = r"e:\Study\SAS\frontend"
+ROOT = Path(__file__).resolve().parent
+BACKEND = str(ROOT / "backend")
+FRONTEND = str(ROOT / "frontend")
+PYTHON = str(Path(BACKEND) / ".venv" / "Scripts" / "python.exe")
 
 
 def kill_port(port: int) -> None:
@@ -28,8 +32,11 @@ def start() -> None:
     # 后端：FastAPI (uvicorn)。--reload 监听 app/ 目录变化自动重启，
     # 开发期改 .py 保存即生效，无需手动重启（生产模式由 SAS 服务托管，
     # 不需要也不应使用 reload）。
+    if not Path(PYTHON).exists():
+        sys.exit(f"未找到虚拟环境解释器：{PYTHON}\n请先执行：cd backend && python -m venv .venv && .venv\\Scripts\\pip install -r requirements.txt")
+
     p1 = subprocess.Popen(
-        [rf"{BACKEND}\.venv\Scripts\python.exe", "-m", "uvicorn",
+        [PYTHON, "-m", "uvicorn",
          "app.main:app", "--host", "127.0.0.1", "--port", "8000",
          "--reload", "--reload-dir", "app"],
         cwd=BACKEND, creationflags=flags,
