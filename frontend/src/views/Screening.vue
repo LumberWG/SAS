@@ -3,7 +3,7 @@
  * 选股中心：策略多选 + 扫描范围 → 触发扫描 → 进度轮询 → 命中结果。
  * 刷新页面后自动恢复最近一轮扫描结果。
  */
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { AlertCircle, CheckCircle2, Clock, Database, Play, Search, Square, TrendingUp } from 'lucide-vue-next'
 
@@ -38,6 +38,10 @@ const editingStrategy = ref<StrategyInfo | null>(null)
 const loadingStrategies = ref(true)
 const loadError = ref('')
 let poller: number | undefined
+
+// 策略面板收起状态（窄屏或看结果时腾出宽度），记忆到本地
+const panelCollapsed = ref(localStorage.getItem('screening.panelCollapsed') === '1')
+watch(panelCollapsed, (v) => localStorage.setItem('screening.panelCollapsed', v ? '1' : '0'))
 
 const running = computed(() => task.value?.status === 'running' || task.value?.status === 'pending')
 
@@ -295,9 +299,14 @@ onMounted(async () => {
 </script>
 
 <template>
-  <div class="flex h-[calc(100vh-8rem)] gap-5">
+  <!-- 仅本页做视口内固定高度，不改公共布局：
+       可用高度 = 100dvh − 顶栏 56px − 内容区上下 padding 48px（共 6.5rem），
+       多减 0.1rem 容错，避免亚像素溢出导致整页出现滚动条。
+       操作栏 / 统计卡 / 工具行 / 表头固定，只有股票列表数据区滚动 -->
+  <div class="flex h-[calc(100dvh-6.6rem)] min-h-0 min-w-0 gap-5 overflow-hidden">
     <!-- 左侧策略面板 -->
     <StrategyPanel
+      v-model:collapsed="panelCollapsed"
       :strategies="strategies"
       :selected="selected"
       :today-hits="todayHits"
@@ -320,8 +329,9 @@ onMounted(async () => {
       @deleted="onStrategyDeleted"
     />
 
-    <!-- 右侧扫描区 -->
-    <section class="flex min-w-0 flex-1 flex-col gap-4">
+    <!-- 右侧扫描区：操作栏固定，仅结果表内部滚动。
+         w-0 作为收缩基准，避免内部宽表格把整页横向撑开 -->
+    <section class="flex w-0 min-h-0 min-w-0 flex-1 flex-col gap-4">
       <!-- 策略加载失败提示（含重试） -->
       <div
         v-if="loadError"
@@ -338,7 +348,7 @@ onMounted(async () => {
       </div>
 
       <!-- 操作栏 -->
-      <div class="glass-card p-4">
+      <div class="glass-card shrink-0 p-4">
         <div class="flex flex-wrap items-center gap-4">
           <!-- 主操作按钮 -->
           <button
@@ -475,7 +485,16 @@ onMounted(async () => {
       />
 
       <!-- 空状态（本轮无命中 / 扫描中断 / 未开始） -->
-      <ScanEmptyState v-else :status="task?.status ?? null" :today-hit-total="todayHitTotal" />
+      <ScanEmptyState
+        v-else
+        :status="task?.status ?? null"
+        :today-hit-total="todayHitTotal"
+        :strategy-count="selected.length"
+        :scope-label="scopeLabel"
+        :kline-cached="klineStatus?.cached ?? 0"
+        :kline-total="klineStatus?.total ?? 0"
+        :kline-ratio="klineStatus?.ratio ?? 0"
+      />
     </section>
 
     <!-- 轻量 toast 反馈（独立放置，避免插入 v-if/v-else 之间导致配对错位） -->

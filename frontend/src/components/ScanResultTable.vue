@@ -118,9 +118,9 @@ function exportCsv() {
       </button>
     </div>
 
-    <!-- 表格 -->
+    <!-- 表格：单元格不换行，列宽不足时横向滚动 -->
     <div class="min-h-0 flex-1 overflow-auto">
-      <table class="w-full text-left text-[13px]">
+      <table class="w-full min-w-[1080px] whitespace-nowrap text-left text-[13px]">
         <thead class="sticky top-0 z-10 bg-base-800/95 text-[11px] text-content-faint backdrop-blur">
           <tr class="border-b border-base-600/60">
             <th class="px-4 py-2.5 font-medium">代码</th>
