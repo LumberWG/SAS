@@ -77,6 +77,8 @@ CREATE TABLE IF NOT EXISTS watchlist (
     code       TEXT PRIMARY KEY,
     name       TEXT NOT NULL DEFAULT '',
     note       TEXT NOT NULL DEFAULT '',
+    -- 来源：auto=程序自选（扫描/收盘任务写入），manual=手动自选（用户添加）
+    source     TEXT NOT NULL DEFAULT 'manual',
     created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS signals (
@@ -192,27 +194,97 @@ class Database:
     def _init_schema(self) -> None:
         with self._lock, self._connect() as conn:
             conn.executescript(_SCHEMA_SQL)
+            self._migrate_watchlist_source(conn)
+
+    @staticmethod
+    def _migrate_watchlist_source(conn: sqlite3.Connection) -> None:
+        """老库补 source 列：历史备注含“自动加入”的视为程序自选。"""
+        cols = {row["name"] for row in conn.execute("PRAGMA table_info(watchlist)")}
+        if "source" in cols:
+            return
+        conn.execute(
+            "ALTER TABLE watchlist ADD COLUMN source TEXT NOT NULL DEFAULT 'manual'"
+        )
+        conn.execute(
+            "UPDATE watchlist SET source='auto' WHERE note LIKE '%自动加入%'"
+        )
 
     # ---------------- 自选股 ----------------
 
-    def add_watch(self, code: str, name: str, note: str = "") -> None:
-        """添加/更新自选股（按 code 主键幂等）。"""
+    def add_watch(
+        self, code: str, name: str, note: str = "", source: str = "manual"
+    ) -> None:
+        """添加/更新自选股（按 code 主键幂等）。
+
+        来源优先级：已存在于「手动自选」的记录不会被程序自选覆盖，
+        避免扫描把用户主动关注的股票降级为程序自选。
+        """
         with self._lock, self._connect() as conn:
             conn.execute(
-                "INSERT INTO watchlist(code, name, note, created_at) VALUES(?,?,?,?) "
-                "ON CONFLICT(code) DO UPDATE SET name=excluded.name, note=excluded.note",
-                (code, name, note, _now()),
+                "INSERT INTO watchlist(code, name, note, source, created_at) "
+                "VALUES(?,?,?,?,?) "
+                "ON CONFLICT(code) DO UPDATE SET "
+                "name=excluded.name, "
+                "source=CASE WHEN watchlist.source='manual' THEN 'manual' "
+                "ELSE excluded.source END",
+                (code, name, note, source, _now()),
             )
+
+    def add_watch_many(
+        self, items: list[tuple[str, str]], source: str = "auto", note: str = ""
+    ) -> int:
+        """批量加入自选股，返回真正新增的条数（已存在的手动自选不计入）。"""
+        if not items:
+            return 0
+        added = 0
+        with self._lock, self._connect() as conn:
+            for code, name in items:
+                exists = conn.execute(
+                    "SELECT source FROM watchlist WHERE code=?", (code,)
+                ).fetchone()
+                if exists is not None and exists["source"] == "manual":
+                    continue
+                if exists is None:
+                    added += 1
+                conn.execute(
+                    "INSERT INTO watchlist(code, name, note, source, created_at) "
+                    "VALUES(?,?,?,?,?) "
+                    "ON CONFLICT(code) DO UPDATE SET name=excluded.name, "
+                    "source=excluded.source, note=excluded.note",
+                    (code, name, note, source, _now()),
+                )
+        return added
+
+    def set_watch_source(self, codes: list[str], source: str) -> int:
+        """批量修改自选股来源（程序自选 → 手动自选），返回实际更新条数。"""
+        if not codes:
+            return 0
+        placeholders = ",".join("?" for _ in codes)
+        with self._lock, self._connect() as conn:
+            cur = conn.execute(
+                f"UPDATE watchlist SET source=? WHERE code IN ({placeholders})",
+                (source, *codes),
+            )
+            return cur.rowcount or 0
 
     def remove_watch(self, code: str) -> None:
         with self._lock, self._connect() as conn:
             conn.execute("DELETE FROM watchlist WHERE code=?", (code,))
 
-    def list_watchlist(self) -> list[dict[str, Any]]:
+    def list_watchlist(self, source: str | None = None) -> list[dict[str, Any]]:
+        """自选股列表；source 为空时返回全部（auto/manual）。"""
         with self._lock, self._connect() as conn:
-            rows = conn.execute(
-                "SELECT code, name, note, created_at FROM watchlist ORDER BY created_at"
-            ).fetchall()
+            if source:
+                rows = conn.execute(
+                    "SELECT code, name, note, source, created_at FROM watchlist "
+                    "WHERE source=? ORDER BY created_at",
+                    (source,),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT code, name, note, source, created_at FROM watchlist "
+                    "ORDER BY created_at"
+                ).fetchall()
         return [dict(r) for r in rows]
 
     # ---------------- 策略信号 ----------------

@@ -74,6 +74,8 @@ class Settings(BaseSettings):
     # 收盘自动选股后，将评分 Top N 的命中自动加入自选股
     auto_watch_enabled: bool = True
     auto_watch_top_n: int = 10
+    # 每轮手动扫描后，命中按评分 Top N 写入「程序自选」（0 表示关闭）
+    scan_auto_watch_limit: int = 50
     # 盘中自选股分析间隔（分钟）
     intraday_analysis_interval: int = 5
     # 盘后「明日关注」数量

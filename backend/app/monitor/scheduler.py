@@ -285,7 +285,9 @@ class MarketScheduler:
             code = hit["code"]
             if code in existing:
                 continue
-            db.add_watch(code, hit.get("name", ""), note="自动加入(收盘选股)")
+            db.add_watch(
+                code, hit.get("name", ""), note="自动加入(收盘选股)", source="auto"
+            )
             existing.add(code)
             added.append(f"{code} {hit.get('name', '')}")
 

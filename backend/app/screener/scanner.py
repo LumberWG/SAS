@@ -165,15 +165,38 @@ class Scanner:
             # 信号持久化
             scan_date = datetime.now().strftime("%Y-%m-%d")
             db.save_signals(task.hits, scan_date=scan_date)
+            # 命中自动进入「程序自选」（按评分取前 N，配置为 0 时关闭）
+            auto_added = await loop.run_in_executor(
+                self._io, self._auto_watch_hits, task.hits
+            )
             logger.info(
-                "扫描完成: %d 只股票, 命中 %d 个信号, 跳过 %d 只",
-                task.total, len(task.hits), task.skipped,
+                "扫描完成: %d 只股票, 命中 %d 个信号, 跳过 %d 只, 程序自选新增 %d",
+                task.total, len(task.hits), task.skipped, auto_added,
             )
         except Exception as exc:  # noqa: BLE001 - 整轮失败记录状态
             task.status = "error"
             task.error = str(exc)
             task.finished_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             logger.exception("扫描任务失败: %s", exc)
+
+    def _auto_watch_hits(self, hits: list[dict]) -> int:
+        """本轮命中按技术面评分 Top N 写入「程序自选」，返回新增条数。
+
+        程序自选只是推荐关注池，已存在于手动自选的股票不会被降级。
+        """
+        limit = self.settings.scan_auto_watch_limit
+        if limit <= 0 or not hits:
+            return 0
+        ranked = sorted(
+            hits, key=lambda h: h.get("extra", {}).get("score", 0), reverse=True
+        )
+        items = [
+            (str(h["code"]), str(h.get("name") or h["code"])) for h in ranked[:limit]
+        ]
+        added = db.add_watch_many(items, source="auto", note="自动加入(扫描命中)")
+        if added:
+            logger.info("程序自选新增 %d 只（本轮命中 Top %d）", added, limit)
+        return added
 
     def _resolve_strategies(self, names: list[str]) -> list[Strategy]:
         from app.strategies import registry

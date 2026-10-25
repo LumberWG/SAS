@@ -508,22 +508,53 @@ export function analyzeStock(code: string, refresh = false): Promise<DecisionDas
 
 // ==================== 自选股 ====================
 
+/** 自选股来源：auto=程序自选（扫描命中） / manual=手动自选（用户添加） */
+export type WatchSource = 'auto' | 'manual'
+
 export interface WatchItem {
   code: string
   name: string
   note: string
+  source: WatchSource
   created_at: string
   // 后端合并的实时行情字段（快照失败时为 null）
   price?: number | null
   pct_change?: number | null
 }
 
-export function getWatchlist(): Promise<{ items: WatchItem[] }> {
-  return http.get('/watchlist').then((r) => r.data)
+export interface WatchCounts {
+  auto: number
+  manual: number
+  total: number
 }
 
-export function addWatch(code: string): Promise<{ added: boolean }> {
-  return http.post(`/watchlist/${code}`).then((r) => r.data)
+export function getWatchlist(
+  source?: WatchSource
+): Promise<{ items: WatchItem[]; counts: WatchCounts }> {
+  return http
+    .get('/watchlist', { params: source ? { source } : {} })
+    .then((r) => r.data)
+}
+
+export function addWatch(
+  code: string,
+  source: WatchSource = 'manual'
+): Promise<{ added: boolean }> {
+  return http.post(`/watchlist/${code}`, null, { params: { source } }).then((r) => r.data)
+}
+
+/** 批量加入自选股（扫描命中 → 程序自选）。 */
+export function addWatchBatch(
+  codes: string[],
+  source: WatchSource = 'auto',
+  note = ''
+): Promise<{ added: number; codes: string[] }> {
+  return http.post('/watchlist/batch', { codes, source, note }).then((r) => r.data)
+}
+
+/** 把程序自选转入手动自选。 */
+export function promoteWatch(codes: string[]): Promise<{ promoted: number }> {
+  return http.post('/watchlist/promote', { codes }).then((r) => r.data)
 }
 
 export function removeWatch(code: string): Promise<{ removed: boolean }> {
