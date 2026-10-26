@@ -49,6 +49,7 @@ class PendingSignal:
     created_at: datetime
     expire_at: datetime
     price_at_signal: float | None = None
+    score: float = 0.0               # 第 2 次排序总分（用于第 3 次排序与仓位权重）
 
     def to_dict(self) -> dict:
         return {
@@ -60,7 +61,16 @@ class PendingSignal:
             "expire_at": self.expire_at.strftime("%m-%d %H:%M"),
             "waiting_seconds": int((datetime.now() - self.created_at).total_seconds()),
             "price_at_signal": self.price_at_signal,
+            "score": round(self.score, 1),
         }
+
+
+def _signal_score(rec) -> float:
+    """建议携带的排序分（缺失或异常按 0 处理）。"""
+    try:
+        return float(getattr(rec, "score", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 class LiveTrader:
@@ -140,6 +150,7 @@ class LiveTrader:
                 created_at=now,
                 expire_at=expire,
                 price_at_signal=getattr(rec, "price", None),
+                score=_signal_score(rec),
             )
             added += 1
         if added:
@@ -205,10 +216,17 @@ class LiveTrader:
         # 1) 实时止盈止损（T+1 由 engine 内部拦截）
         stop_trades = await self.engine.check_stop_loss_target(prices)
 
-        # 2) 队列信号（卖出优先由 engine 内部保证）
+        # 2) 队列信号：第 3 次排序——卖出优先，其余按评分从高到低
+        ordered = sorted(
+            self._pending.values(),
+            key=lambda s: (s.action != "sell", -s.score),
+        )
         recs = [
-            SimpleNamespace(code=s.code, name=s.name, action=s.action, reason=s.reason)
-            for s in self._pending.values()
+            SimpleNamespace(
+                code=s.code, name=s.name, action=s.action, reason=s.reason,
+                score=s.score,
+            )
+            for s in ordered
         ]
         results = await self.engine.execute_recommendations(recs, prices=prices)
 

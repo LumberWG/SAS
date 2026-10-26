@@ -11,7 +11,6 @@ import {
   History,
   LayoutDashboard,
   Lightbulb,
-  LineChart,
   ShieldAlert,
   Wallet,
 } from 'lucide-vue-next'
@@ -22,14 +21,14 @@ const route = useRoute()
 const router = useRouter()
 const market = useMarketStore()
 
+// 按业务流程排序：概览 → ①扫描选股 → ②加入自选 → ③排序出建议 → ④自动交易/持仓 → 回测
 const navItems = [
   { path: '/dashboard', title: '大盘概览', icon: LayoutDashboard },
   { path: '/screening', title: '选股中心', icon: Filter },
+  { path: '/signals', title: '信号与自选', icon: Bell },
   { path: '/advisory', title: '智能建议', icon: Lightbulb },
   { path: '/paper', title: '模拟交易', icon: Wallet },
-  { path: '/stock/600519', title: '个股详情', icon: LineChart },
   { path: '/backtest', title: '回测中心', icon: History },
-  { path: '/signals', title: '信号与自选', icon: Bell },
 ]
 
 // 顶栏时钟
@@ -93,8 +92,7 @@ const statusText = computed(() => phase.value || (market.trading ? '交易中' :
           :to="item.path"
           class="group flex items-center gap-3 rounded-lg px-3 py-2.5 text-[13px] font-medium transition-all duration-200"
           :class="
-            route.path === item.path ||
-            (item.path === '/stock/600519' && route.name === 'stock-detail')
+            route.path === item.path
               ? 'bg-primary/15 text-primary-light shadow-[inset_0_0_0_1px_rgba(56,189,248,0.25)]'
               : 'text-content-muted hover:bg-base-700/60 hover:text-content'
           "

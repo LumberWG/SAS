@@ -39,8 +39,15 @@ http.interceptors.request.use((config) => {
 
 http.interceptors.response.use((response) => {
   const cfg = response.config
+  const method = (cfg.method ?? 'get').toLowerCase()
+  // 写操作（切换模式/下单/撮合/重置）会让之前的 GET 快照全部过期：
+  // 若不清缓存，紧随其后的 load() 会读回旧数据，页面看起来「切换没生效」。
+  if (method !== 'get') {
+    _getCache.clear()
+    return response
+  }
   const refresh = (cfg.params as { refresh?: boolean } | undefined)?.refresh
-  if ((cfg.method ?? 'get').toLowerCase() === 'get' && cfg.url && !refresh) {
+  if (cfg.url && !refresh) {
     _getCache.set(_cacheKey(cfg), { ts: Date.now(), data: response.data })
   }
   return response
@@ -209,6 +216,10 @@ export interface ScanHit {
   target_price: number | null
   date: string
   extra: Record<string, unknown>
+  /** 第 1 次排序名次（1 起，同股并列；历史信号来自 DB signals.rank） */
+  rank?: number
+  /** 技术面评分（= extra.score，落库字段） */
+  score?: number | null
   /** 当前实时行情（快照不可用时缺省，前端回退到记录值） */
   realtime?: HitRealtime | null
 }
@@ -384,10 +395,27 @@ export interface RecommendationItem {
   stop_loss: number | null
   target_price: number | null
   sentiment: string
+  /** 第 2 次排序名次（1 起，0=未参与排序） */
+  rank?: number
+  /** 因子分项明细（第 2 次排序打分依据） */
+  detail?: RecommendationFactor[] | null
   batch: string
   created_at: string
   /** 当前实时行情（price 为建议生成价，展示以本字段为准） */
   realtime?: HitRealtime | null
+}
+
+/** 单因子评分明细 */
+export interface RecommendationFactor {
+  key: string
+  label: string
+  group: string
+  weight: number
+  /** 归一化得分 [-1, 1] */
+  sub: number
+  /** 对总分的贡献（weight × sub） */
+  contrib: number
+  detail: string
 }
 
 export function getBuyRecommendations(): Promise<{
@@ -480,6 +508,8 @@ export interface PaperPendingSignal {
   expire_at: string
   waiting_seconds: number
   price_at_signal: number | null
+  /** 排序分（第 3 次排序按评分降序执行、加权仓位） */
+  score?: number
 }
 
 export interface PaperLiveTrade {
@@ -514,7 +544,8 @@ export interface PaperLiveStatus {
 }
 
 export function getPaperLive(): Promise<PaperLiveStatus> {
-  return http.get('/paper/live').then((r) => r.data)
+  // 引擎状态（模式/报价/信号）属实时数据，跳过 10s GET 缓存
+  return http.get('/paper/live', { params: { refresh: true } }).then((r) => r.data)
 }
 
 /** 立即撮合一次（不必等定时 tick） */

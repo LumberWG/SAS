@@ -5,21 +5,25 @@
   - 盘中(每5分钟) intraday : 分析全部自选股 → 实时买卖建议
   - 盘后(15:35) post_market: 全市场扫描 → 明日关注 TopN + 自选股分析
 
-分级规则（技术面评分 ±8 + 市场情绪修正）:
-  评分 >= +3            → 买入建议
-  评分 <= -3            → 卖出建议
+分级规则（多因子总分 ±100 + 市场情绪修正，见 app/analysis/factors.py）:
+  总分 >= +15           → 买入建议
+  总分 <= -15           → 卖出建议
   其他                  → 持有观察
   情绪权重 <= -0.5 时，买入建议降级为持有（逆环境谨慎，宁可错过）
+
+一次分析产出的建议会按总分降序排名（rank 从 1 开始），并把各因子分项写入
+detail（JSON 字符串），供前端展示「为什么排这个位置」。
 
 止损/目标价沿用 default_stop_target（10 日最低价 / +15%）。
 """
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from dataclasses import dataclass
 
-from app.analysis.scoring import score_technical
+from app.analysis.factors import compute_factors
 from app.config import get_settings
 from app.data.cache import db
 from app.data.service import get_kline_cached
@@ -39,12 +43,14 @@ class Recommendation:
     code: str
     name: str
     action: str               # buy / sell / hold / focus
-    score: float              # 技术面评分（未含情绪降级）
+    score: float              # 多因子总分 [-100, 100]（未含情绪降级）
     reason: str               # 人类可读理由
     price: float
     stop_loss: float | None
     target_price: float | None
     sentiment: str = ""       # 生成时的市场情绪等级
+    rank: int = 0             # 本轮自选股排序名次（1 起，0=未排名）
+    detail: str = ""          # 因子分项明细（JSON 字符串）
 
 
 class Recommender:
@@ -80,7 +86,7 @@ class Recommender:
             return None
 
         df = await asyncio.to_thread(add_all_indicators, df)
-        result = score_technical(df)
+        result = await asyncio.to_thread(compute_factors, df)
         # 建议价：优先当前实时价，缺失才用K线最后收盘
         price = (
             float(current_price)
@@ -104,31 +110,27 @@ class Recommender:
             sentiment_level = ""
             weight = 0.0
 
-        if result.score >= 3:
-            action = "buy"
-        elif result.score <= -3:
-            action = "sell"
-        else:
-            action = "hold"
+        action = result.action  # 已按 ±15 分阈值给出 buy/sell/hold
         if weight <= -0.5 and action == "buy":
             action = "hold"
 
-        # 理由：取最强的一正一负信号
-        positives = result.reasons(("pass",))
-        negatives = result.reasons(("fail",))
-        reason_parts = [f"技术面评分 {result.score:+.1f}"]
+        # 理由：取贡献最大的正/负因子
+        positives = result.top_reasons(positive=True)
+        negatives = result.top_reasons(positive=False)
+        reason_parts = [f"综合评分 {result.total:+.0f}"]
         if positives:
-            reason_parts.append("；".join(positives[:2]))
+            reason_parts.append("；".join(positives))
         if negatives and action in ("sell", "hold"):
-            reason_parts.append("；".join(negatives[:2]))
+            reason_parts.append("；".join(negatives))
         if sentiment_level:
             reason_parts.append(f"市场情绪{sentiment_level}({weight:+})")
         reason = "，".join(reason_parts)
 
         return Recommendation(
-            code=code, name=name, action=action, score=result.score,
+            code=code, name=name, action=action, score=result.total,
             reason=reason, price=round(price, 2),
             stop_loss=stop, target_price=target, sentiment=sentiment_level,
+            detail=json.dumps(result.breakdown(), ensure_ascii=False),
         )
 
     # ------------------------------------------------------------------
@@ -160,6 +162,11 @@ class Recommender:
         recommendations = [
             r for r in results if isinstance(r, Recommendation)
         ]
+        # 第 2 次排序：按多因子总分降序，名次从 1 开始（rank=0 表示未参与排序）
+        recommendations.sort(key=lambda r: r.score, reverse=True)
+        for idx, rec in enumerate(recommendations, 1):
+            rec.rank = idx
+
         logger.info(
             "自选股分析完成: %d 只 → 买入 %d / 卖出 %d / 持有 %d",
             len(recommendations),

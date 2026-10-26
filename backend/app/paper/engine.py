@@ -5,8 +5,9 @@
 
 交易规则（对齐 A 股实盘，简化但透明）:
   1. 初始资金默认 10 万，账户为单账户（个人使用）；
-  2. 仓位管理：等分资金，最多持有 max_positions（默认10）只，
-     单只买入金额 = min(可用现金/剩余名额, 总资产×单票上限20%)；
+  2. 仓位管理：按建议评分加权（第 3 次排序）——评分高者先买、分到更多资金，
+     预算 = min(可用现金 × 该股评分占比, 总资产×20%)，最多持有
+     max_positions（默认10）只；
   3. 整手交易：买入数量向下取整到 100 股；
   4. T+1：当日买入次日才能卖出；
   5. 费用：佣金万2.5（最低5元）+ 卖出印花税千1 + 双边过户费万0.1；
@@ -43,6 +44,14 @@ SINGLE_POSITION_MAX_RATIO = 0.20    # 单票市值不超过总资产 20%
 STOP_LOSS_RATIO = 0.08              # 默认止损 -8%
 TAKE_PROFIT_RATIO = 0.20            # 默认止盈 +20%
 LOT_SIZE = 100                      # A股整手
+
+
+def _rec_score(rec) -> float:
+    """建议携带的排序分（缺失或异常按 0 处理）。"""
+    try:
+        return float(getattr(rec, "score", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return 0.0
 
 
 @dataclass
@@ -182,8 +191,11 @@ class PaperEngine:
                 rec.code, pos["name"], "sell", shares, price, amount, fee,
                 getattr(rec, "reason", "卖出信号")))
 
-        # ---- 买入（等分资金，受最大持仓数与单票上限约束） ----
+        # ---- 买入（第 3 次排序：评分加权仓位，受持仓数与单票上限约束） ----
+        # 规则：评分高者先买；可用现金按评分比例分配（分数越高仓位越大），
+        # 单票不超过总资产 20%，整手取整，费用从现金扣除。
         max_positions = self.settings.paper_max_positions
+        candidates: list[tuple[float, object, float]] = []
         for rec in buy_candidates:
             if rec.code in positions:
                 results.append(TradeResult(
@@ -201,10 +213,32 @@ class PaperEngine:
                     rec.code, getattr(rec, "name", ""), "skip", 0,
                     0.0, 0.0, 0.0, "取价失败"))
                 continue
-            # 目标金额：可用现金/剩余名额 与 单票上限 取小
-            slots = max_positions - len(positions)
-            budget = min(cash / slots, total_asset * SINGLE_POSITION_MAX_RATIO)
+            candidates.append((_rec_score(rec), rec, price))
+
+        candidates.sort(key=lambda c: c[0], reverse=True)
+        weights = {rec.code: max(score, 1.0) for score, rec, _ in candidates}
+
+        for _score, rec, price in candidates:
+            weight = weights.pop(rec.code, 1.0)
+            weight_total = weight + sum(weights.values())
+            if len(positions) >= max_positions:
+                results.append(TradeResult(
+                    rec.code, getattr(rec, "name", ""), "skip", 0,
+                    0.0, 0.0, 0.0, f"持仓已满({max_positions}只)"))
+                continue
+            # 目标金额 = 可用现金 × 评分占比，再受单票上限与剩余现金约束
+            share_of_cash = weight / weight_total if weight_total > 0 else 1.0
+            budget = min(
+                cash * share_of_cash,
+                total_asset * SINGLE_POSITION_MAX_RATIO,
+                cash,
+            )
             shares = int(budget / price / LOT_SIZE) * LOT_SIZE
+            # 费用可能让「金额+费用」超出可用现金，逐手回退
+            while shares >= LOT_SIZE and price * shares + self.calc_fee(
+                "buy", price * shares
+            ) > cash:
+                shares -= LOT_SIZE
             if shares < LOT_SIZE:
                 results.append(TradeResult(
                     rec.code, getattr(rec, "name", ""), "skip", 0,

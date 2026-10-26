@@ -42,6 +42,31 @@ def _num(value) -> float | None:
     return None if result != result else result
 
 
+def rank_hits(hits: list[dict]) -> list[dict]:
+    """第 1 次排序：命中信号按技术面评分降序排名（原地排序并写入 rank）。
+
+    - 主键：``extra.score``（缺省按 0），同分看触发价；
+    - 名次按**股票**编号：同一只股票命中多个策略时并列同一 rank，
+      保证前端聚合后列表的名次连续（1,2,3...）。
+    """
+    hits.sort(
+        key=lambda h: (
+            (h.get("extra") or {}).get("score") or 0,
+            h.get("price") or 0,
+        ),
+        reverse=True,
+    )
+    rank = 0
+    ranked_codes: set[str] = set()
+    for hit in hits:
+        code = str(hit.get("code") or "")
+        if code not in ranked_codes:
+            ranked_codes.add(code)
+            rank += 1
+        hit["rank"] = rank
+    return hits
+
+
 @dataclass
 class ScanTask:
     """一轮扫描任务的状态（内存中管理，前端轮询）。"""
@@ -283,8 +308,8 @@ class Scanner:
 
             await asyncio.gather(*(scan_one(r) for r in pool.itertuples()))
 
-            # 命中的股票补充名称（信号生成时还不知道名称的场景已由 scan_stock 填充）
-            task.hits.sort(key=lambda h: h.get("price", 0), reverse=True)
+            # 第 1 次排序：按技术面评分降序，同股并列同一名次
+            rank_hits(task.hits)
             task.status = "done"
             task.finished_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -384,9 +409,17 @@ class Scanner:
         ranked = sorted(
             hits, key=lambda h: h.get("extra", {}).get("score", 0), reverse=True
         )
-        items = [
-            (str(h["code"]), str(h.get("name") or h["code"])) for h in ranked[:limit]
-        ]
+        # 一只股票命中多个策略时只取一次，避免 TopN 名额被同一只股票吃掉
+        items: list[tuple[str, str]] = []
+        seen: set[str] = set()
+        for hit in ranked:
+            code = str(hit.get("code") or "")
+            if not code or code in seen:
+                continue
+            seen.add(code)
+            items.append((code, str(hit.get("name") or code)))
+            if len(items) >= limit:
+                break
         added = db.add_watch_many(items, source="auto", note="自动加入(扫描命中)")
         if added:
             logger.info("程序自选新增 %d 只（本轮命中 Top %d）", added, limit)

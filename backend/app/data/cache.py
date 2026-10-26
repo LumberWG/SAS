@@ -90,6 +90,8 @@ CREATE TABLE IF NOT EXISTS signals (
     reason       TEXT DEFAULT '',
     stop_loss    REAL,
     target_price REAL,
+    score        REAL,            -- 技术面评分（第 1 次排序依据）
+    rank         INTEGER DEFAULT 0,  -- 本轮扫描名次（1 起，同股并列）
     scan_date    TEXT NOT NULL,
     created_at   TEXT NOT NULL
 );
@@ -145,6 +147,8 @@ CREATE TABLE IF NOT EXISTS recommendations (
     stop_loss    REAL,
     target_price REAL,
     sentiment    TEXT,            -- 生成时的市场情绪等级
+    rank         INTEGER DEFAULT 0,  -- 本轮自选股排名（1 起，0=未参与排序）
+    detail       TEXT DEFAULT '[]',  -- 因子分项明细（JSON）
     batch        TEXT NOT NULL,   -- 批次：intraday_/premarket_/focus_ + 日期
     created_at   TEXT NOT NULL
 );
@@ -201,6 +205,8 @@ class Database:
         with self._lock, self._connect() as conn:
             conn.executescript(_SCHEMA_SQL)
             self._migrate_watchlist_source(conn)
+            self._migrate_recommendation_rank(conn)
+            self._migrate_signal_rank(conn)
             self._dedupe_signals(conn)
 
     @staticmethod
@@ -228,6 +234,30 @@ class Database:
         conn.execute(
             "UPDATE watchlist SET source='auto' WHERE note LIKE '%自动加入%'"
         )
+
+    @staticmethod
+    def _migrate_signal_rank(conn: sqlite3.Connection) -> None:
+        """老库补 score / rank 列（第 1 次排序：扫描命中评分与名次）。"""
+        cols = {row["name"] for row in conn.execute("PRAGMA table_info(signals)")}
+        if "score" not in cols:
+            conn.execute("ALTER TABLE signals ADD COLUMN score REAL")
+        if "rank" not in cols:
+            conn.execute("ALTER TABLE signals ADD COLUMN rank INTEGER DEFAULT 0")
+
+    @staticmethod
+    def _migrate_recommendation_rank(conn: sqlite3.Connection) -> None:
+        """老库补 rank / detail 列（第 2 次排序的名次与因子分项）。"""
+        cols = {
+            row["name"] for row in conn.execute("PRAGMA table_info(recommendations)")
+        }
+        if "rank" not in cols:
+            conn.execute(
+                "ALTER TABLE recommendations ADD COLUMN rank INTEGER DEFAULT 0"
+            )
+        if "detail" not in cols:
+            conn.execute(
+                "ALTER TABLE recommendations ADD COLUMN detail TEXT DEFAULT '[]'"
+            )
 
     # ---------------- 运行时状态 ----------------
 
@@ -341,14 +371,16 @@ class Database:
                     "DELETE FROM signals WHERE code=? AND strategy=? AND scan_date=?",
                     (s["code"], s["strategy"], scan_date),
                 )
+                extra = s.get("extra") or {}
+                score = s.get("score", extra.get("score"))
                 conn.execute(
                     "INSERT INTO signals(code, name, strategy, price, reason,"
-                    " stop_loss, target_price, scan_date, created_at)"
-                    " VALUES(?,?,?,?,?,?,?,?,?)",
+                    " stop_loss, target_price, score, rank, scan_date, created_at)"
+                    " VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                     (
                         s["code"], s.get("name", ""), s["strategy"], s.get("price"),
                         s.get("reason", ""), s.get("stop_loss"), s.get("target_price"),
-                        scan_date, _now(),
+                        score, int(s.get("rank") or 0), scan_date, _now(),
                     ),
                 )
 
@@ -527,13 +559,16 @@ class Database:
             conn.execute("DELETE FROM recommendations WHERE batch=?", (batch,))
             conn.executemany(
                 "INSERT INTO recommendations(code, name, action, score, reason,"
-                " price, stop_loss, target_price, sentiment, batch, created_at)"
-                " VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                " price, stop_loss, target_price, sentiment, rank, detail,"
+                " batch, created_at)"
+                " VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 [
                     (
                         r["code"], r.get("name", ""), r["action"], r.get("score"),
                         r.get("reason", ""), r.get("price"), r.get("stop_loss"),
-                        r.get("target_price"), r.get("sentiment", ""), batch, _now(),
+                        r.get("target_price"), r.get("sentiment", ""),
+                        int(r.get("rank") or 0), r.get("detail") or "[]",
+                        batch, _now(),
                     )
                     for r in recommendations
                 ],
@@ -557,15 +592,16 @@ class Database:
             ).fetchone()
             if not row or not row["latest"]:
                 return []
+            # 优先按第 2 次排序的名次（rank>0），未排名的（如明日关注）退回评分排序
+            order = " ORDER BY CASE WHEN rank > 0 THEN rank ELSE 9999 END, score DESC"
             if action:
                 rows = conn.execute(
-                    "SELECT * FROM recommendations WHERE batch=? AND action=?"
-                    " ORDER BY score DESC",
+                    "SELECT * FROM recommendations WHERE batch=? AND action=?" + order,
                     (row["latest"], action),
                 ).fetchall()
             else:
                 rows = conn.execute(
-                    "SELECT * FROM recommendations WHERE batch=? ORDER BY score DESC",
+                    "SELECT * FROM recommendations WHERE batch=?" + order,
                     (row["latest"],),
                 ).fetchall()
         return [dict(r) for r in rows]

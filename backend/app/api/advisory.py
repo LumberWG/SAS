@@ -1,6 +1,7 @@
 """智能建议 API：建议买入/卖出列表、明日关注、概况。"""
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime
 
@@ -24,7 +25,7 @@ def buy_recommendations() -> dict:
     """
     items = _latest_by_action(("intraday", "premarket"), "buy")
     return with_disclaimer({
-        "items": with_realtime(items),
+        "items": with_realtime(_with_detail(items)),
         "batch": _batch_of(items),
         "updated_at": _latest_time(items),
     })
@@ -35,7 +36,7 @@ def sell_recommendations() -> dict:
     """建议卖出列表（今日最新批次，附带当前行情）。"""
     items = _latest_by_action(("intraday", "premarket"), "sell")
     return with_disclaimer({
-        "items": with_realtime(items),
+        "items": with_realtime(_with_detail(items)),
         "batch": _batch_of(items),
         "updated_at": _latest_time(items),
     })
@@ -47,7 +48,7 @@ def focus_list() -> dict:
     items = db.list_recommendations("focus", "focus")
     batch = db.latest_batch("focus")
     return with_disclaimer({
-        "items": with_realtime(items),
+        "items": with_realtime(_with_detail(items)),
         "batch": batch,
         # focus_2026-10-21 → 对应 2026-10-22 开盘关注
         "for_date": batch.split("_", 1)[1] if batch else None,
@@ -88,6 +89,24 @@ def _latest_by_action(prefixes: tuple[str, ...], action: str) -> list[dict]:
         if items and items[0]["batch"].endswith(today):
             return items
     return []
+
+
+def _with_detail(items: list[dict]) -> list[dict]:
+    """把 detail（JSON 文本）解析为因子分项数组，rank 统一为整数。"""
+    out: list[dict] = []
+    for item in items:
+        row = dict(item)
+        raw = row.get("detail")
+        try:
+            row["detail"] = json.loads(raw) if raw else []
+        except (TypeError, ValueError):
+            row["detail"] = []
+        try:
+            row["rank"] = int(row.get("rank") or 0)
+        except (TypeError, ValueError):
+            row["rank"] = 0
+        out.append(row)
+    return out
 
 
 def _batch_of(items: list[dict]) -> str | None:

@@ -9,6 +9,7 @@ import {
   ArrowDownCircle,
   ArrowUpCircle,
   CalendarClock,
+  ChevronDown,
   Lightbulb,
   Star,
 } from 'lucide-vue-next'
@@ -60,6 +61,26 @@ function scoreClass(score: number): string {
   return 'text-content'
 }
 
+/** 总分展示（±100 分制，取整避免列表太密） */
+function scoreText(score: number): string {
+  return `${score > 0 ? '+' : ''}${score.toFixed(0)}`
+}
+
+function contribClass(contrib: number): string {
+  if (contrib > 0) return 'text-up'
+  if (contrib < 0) return 'text-down'
+  return 'text-content-faint'
+}
+
+/** 展开的因子分项（按股票代码记录） */
+const expanded = ref<Set<string>>(new Set())
+function toggleDetail(code: string): void {
+  const next = new Set(expanded.value)
+  if (next.has(code)) next.delete(code)
+  else next.add(code)
+  expanded.value = next
+}
+
 /** 当前价：优先实时快照，缺失时退回建议生成价。 */
 function currentPrice(item: RecommendationItem): number {
   return item.realtime?.price ?? item.price
@@ -96,8 +117,9 @@ onUnmounted(() => {
         <div>
           <h2 class="text-[17px] font-semibold text-content">智能盯盘建议</h2>
           <p class="mt-0.5 text-[11px] leading-relaxed text-content-faint">
-            开盘 9:20 / 盘中每分钟分析自选股，建议产生后由模拟盘实时撮合（5 秒内成交）；盘后 15:35
-            生成次日关注，收盘选股评分 Top {{ summary?.auto_watch_top_n ?? 10 }} 自动加入自选
+            第 2 次排序：自选股按 14 因子加权评分（±100 分）排名，总分 ≥ +15 买入、≤ -15 卖出；
+            建议产生后由模拟盘按评分加权仓位实时撮合。盘后 15:35 生成次日关注，收盘评分 Top
+            {{ summary?.auto_watch_top_n ?? 10 }} 自动加入自选
           </p>
         </div>
       </div>
@@ -143,11 +165,22 @@ onUnmounted(() => {
           >
             <div class="flex items-center justify-between">
               <div class="flex items-center gap-2">
+                <span
+                  v-if="item.rank"
+                  class="rounded border border-up/40 bg-up/10 px-1.5 py-0.5 font-num text-[10px] font-semibold text-up"
+                  title="第 2 次排序名次"
+                >
+                  #{{ item.rank }}
+                </span>
                 <span class="text-[14px] font-semibold text-content">{{ item.name }}</span>
                 <span class="font-num text-[11px] text-content-faint">{{ item.code }}</span>
               </div>
-              <span class="font-num text-[15px] font-bold" :class="scoreClass(item.score)">
-                {{ item.score > 0 ? '+' : '' }}{{ item.score.toFixed(1) }}
+              <span
+                class="font-num text-[15px] font-bold"
+                :class="scoreClass(item.score)"
+                :title="`综合评分 ${item.score.toFixed(2)}（买卖阈值 ±15）`"
+              >
+                {{ scoreText(item.score) }}
               </span>
             </div>
             <p class="mt-1.5 text-[11px] leading-relaxed text-content-muted">{{ item.reason }}</p>
@@ -161,6 +194,39 @@ onUnmounted(() => {
               <span class="text-down">止损 {{ item.stop_loss?.toFixed(2) ?? '--' }}</span>
               <span class="text-warn">目标 {{ item.target_price?.toFixed(2) ?? '--' }}</span>
               <span v-if="item.sentiment" class="ml-auto text-content-faint">{{ item.sentiment }}</span>
+            </div>
+            <div v-if="item.detail && item.detail.length > 0" class="mt-2">
+              <button
+                class="flex items-center gap-1 text-[11px] text-content-faint transition-colors hover:text-content"
+                @click.stop="toggleDetail(item.code)"
+              >
+                <ChevronDown
+                  class="h-3 w-3 transition-transform"
+                  :class="expanded.has(item.code) ? 'rotate-180' : ''"
+                />
+                因子分项 {{ item.detail.length }} 项
+              </button>
+              <div
+                v-if="expanded.has(item.code)"
+                class="mt-1.5 space-y-1 rounded-lg bg-base-800/70 p-2"
+              >
+                <div
+                  v-for="f in item.detail"
+                  :key="f.key"
+                  class="flex items-center justify-between gap-2 text-[11px]"
+                >
+                  <span class="text-content-muted">
+                    <span class="text-content-faint">{{ f.group }} ·</span> {{ f.label }}
+                    <span class="text-content-faint">（权重 {{ f.weight.toFixed(0) }}）</span>
+                  </span>
+                  <span class="flex items-center gap-2 font-num">
+                    <span class="text-content-faint">{{ f.detail }}</span>
+                    <span class="w-10 text-right" :class="contribClass(f.contrib)">
+                      {{ f.contrib > 0 ? '+' : '' }}{{ f.contrib.toFixed(1) }}
+                    </span>
+                  </span>
+                </div>
+              </div>
             </div>
           </div>
           <div v-if="buys.length === 0" class="flex flex-col items-center gap-2 py-10 text-content-faint">
@@ -189,11 +255,22 @@ onUnmounted(() => {
           >
             <div class="flex items-center justify-between">
               <div class="flex items-center gap-2">
+                <span
+                  v-if="item.rank"
+                  class="rounded border border-down/40 bg-down/10 px-1.5 py-0.5 font-num text-[10px] font-semibold text-down"
+                  title="第 2 次排序名次"
+                >
+                  #{{ item.rank }}
+                </span>
                 <span class="text-[14px] font-semibold text-content">{{ item.name }}</span>
                 <span class="font-num text-[11px] text-content-faint">{{ item.code }}</span>
               </div>
-              <span class="font-num text-[15px] font-bold" :class="scoreClass(item.score)">
-                {{ item.score > 0 ? '+' : '' }}{{ item.score.toFixed(1) }}
+              <span
+                class="font-num text-[15px] font-bold"
+                :class="scoreClass(item.score)"
+                :title="`综合评分 ${item.score.toFixed(2)}（买卖阈值 ±15）`"
+              >
+                {{ scoreText(item.score) }}
               </span>
             </div>
             <p class="mt-1.5 text-[11px] leading-relaxed text-content-muted">{{ item.reason }}</p>
@@ -207,11 +284,44 @@ onUnmounted(() => {
               <span class="text-down">止损 {{ item.stop_loss?.toFixed(2) ?? '--' }}</span>
               <span v-if="item.sentiment" class="ml-auto text-content-faint">{{ item.sentiment }}</span>
             </div>
+            <div v-if="item.detail && item.detail.length > 0" class="mt-2">
+              <button
+                class="flex items-center gap-1 text-[11px] text-content-faint transition-colors hover:text-content"
+                @click.stop="toggleDetail(item.code)"
+              >
+                <ChevronDown
+                  class="h-3 w-3 transition-transform"
+                  :class="expanded.has(item.code) ? 'rotate-180' : ''"
+                />
+                因子分项 {{ item.detail.length }} 项
+              </button>
+              <div
+                v-if="expanded.has(item.code)"
+                class="mt-1.5 space-y-1 rounded-lg bg-base-800/70 p-2"
+              >
+                <div
+                  v-for="f in item.detail"
+                  :key="f.key"
+                  class="flex items-center justify-between gap-2 text-[11px]"
+                >
+                  <span class="text-content-muted">
+                    <span class="text-content-faint">{{ f.group }} ·</span> {{ f.label }}
+                    <span class="text-content-faint">（权重 {{ f.weight.toFixed(0) }}）</span>
+                  </span>
+                  <span class="flex items-center gap-2 font-num">
+                    <span class="text-content-faint">{{ f.detail }}</span>
+                    <span class="w-10 text-right" :class="contribClass(f.contrib)">
+                      {{ f.contrib > 0 ? '+' : '' }}{{ f.contrib.toFixed(1) }}
+                    </span>
+                  </span>
+                </div>
+              </div>
+            </div>
           </div>
           <div v-if="sells.length === 0" class="flex flex-col items-center gap-2 py-10 text-content-faint">
             <ArrowDownCircle class="h-8 w-8 opacity-30" />
             <p class="text-[12px]">暂无卖出建议</p>
-            <p class="text-[11px]">自选股技术面转弱（评分 ≤ -3）时出现在此列表</p>
+            <p class="text-[11px]">自选股综合评分 ≤ -15（趋势/动量转弱）时出现在此列表</p>
           </div>
         </div>
       </section>

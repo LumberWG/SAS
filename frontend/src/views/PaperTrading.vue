@@ -14,6 +14,7 @@ import {
   Zap,
 } from 'lucide-vue-next'
 import VChart from 'vue-echarts'
+import ConfirmDialog from '../components/ConfirmDialog.vue'
 import { use } from 'echarts/core'
 import { CanvasRenderer } from 'echarts/renderers'
 import { LineChart } from 'echarts/charts'
@@ -46,6 +47,7 @@ const live = ref<PaperLiveStatus | null>(null)
 const resetting = ref(false)
 const ticking = ref(false)
 const switching = ref(false)
+const modeError = ref('')
 let timer: number | undefined
 
 // ---- 手动下单 ----
@@ -70,6 +72,8 @@ async function load() {
       total_asset: e.total_asset,
     }))
     live.value = liveData
+    // 状态已与后端同步，此前的切换报错不再有意义
+    if (modeError.value) modeError.value = ''
     // 手动模式下列表里的现价用于下单参考，随轮询一起刷新
     if (!liveData.auto_trade) loadWatchItems()
   } catch {
@@ -90,20 +94,63 @@ async function tickNow() {
   }
 }
 
-/** 切换自动/手动交易模式（持久化到后端） */
-async function toggleMode(auto: boolean) {
+// ---- 确认对话框（替代浏览器原生 confirm） ----
+type PendingAction = { kind: 'mode'; auto: boolean } | { kind: 'reset' }
+const pending = ref<PendingAction | null>(null)
+
+const dialogTitle = computed(() =>
+  pending.value?.kind === 'reset'
+    ? '重置模拟账户'
+    : pending.value?.auto
+      ? '切换到自动交易'
+      : '切换到手动交易'
+)
+const dialogMessage = computed(() => {
+  if (pending.value?.kind === 'reset') {
+    return '将清空全部持仓与交易记录，资金恢复 10 万。'
+  }
+  return pending.value?.auto
+    ? '系统将按建议实时撮合，并执行盘中止盈止损，人工不再干预。'
+    : '自动撮合与止盈止损会暂停，买卖全部由你手动下单。'
+})
+const dialogHint = computed(() => {
+  if (pending.value?.kind === 'reset') return '该操作不可撤销。'
+  return pending.value?.auto
+    ? '已有待执行信号会在下个 tick 按实时价成交。'
+    : '当前待执行队列会被清空，避免切回自动后集中补成交。'
+})
+const dialogConfirmText = computed(() =>
+  pending.value?.kind === 'reset'
+    ? '确认重置'
+    : pending.value?.auto
+      ? '切换为自动'
+      : '切换为手动'
+)
+const dialogTone = computed<'primary' | 'up' | 'down'>(() => {
+  if (pending.value?.kind === 'reset') return 'down'
+  return pending.value?.auto ? 'up' : 'primary'
+})
+
+/** 点「自动/手动交易」：先弹自定义确认框，确认后再请求后端 */
+function toggleMode(auto: boolean) {
   if (switching.value || !live.value || live.value.auto_trade === auto) return
-  const tip = auto
-    ? '切换到自动交易？系统将按建议实时撮合并执行盘中止盈止损，人工不再干预。'
-    : '切换到手动交易？自动撮合与止盈止损会暂停，买卖由你手动下单。'
-  if (!confirm(tip)) return
+  pending.value = { kind: 'mode', auto }
+}
+
+/** 切换自动/手动交易模式（持久化到后端） */
+async function applyMode(auto: boolean) {
   switching.value = true
+  modeError.value = ''
   try {
     live.value = await setPaperMode(auto)
     if (!auto) await loadWatchItems()
     await load()
-  } catch {
-    // 静默：下次轮询会同步真实状态
+    // 以服务端返回为准校验是否真的切换成功
+    if (live.value && live.value.auto_trade !== auto) {
+      modeError.value = `切换未生效（当前仍为${live.value.auto_trade ? '自动' : '手动'}），请重试`
+    }
+  } catch (err) {
+    modeError.value = `切换失败：${(err as Error).message || '后端无响应'}`
   } finally {
     switching.value = false
   }
@@ -178,8 +225,12 @@ async function submitOrder() {
   }
 }
 
-async function reset() {
-  if (!confirm('确定重置模拟账户？将清空全部持仓与交易记录，资金恢复 10 万。')) return
+function reset() {
+  if (resetting.value) return
+  pending.value = { kind: 'reset' }
+}
+
+async function applyReset() {
   resetting.value = true
   try {
     await resetPaperAccount()
@@ -187,6 +238,15 @@ async function reset() {
   } finally {
     resetting.value = false
   }
+}
+
+/** 确认框回调：按待执行动作分发 */
+async function onConfirm() {
+  const action = pending.value
+  pending.value = null
+  if (!action) return
+  if (action.kind === 'mode') await applyMode(action.auto)
+  else await applyReset()
 }
 
 // 净值曲线 option（初始资金基准线）
@@ -327,6 +387,7 @@ onUnmounted(() => {
         信号有效期 {{ live?.signal_ttl_minutes ?? 30 }} 分钟（开盘前信号顺延至 9:30）
       </span>
       <span v-if="live?.last_error" class="text-[11px] text-warn">{{ live.last_error }}</span>
+      <span v-if="modeError" class="text-[11px] text-down">{{ modeError }}</span>
 
       <div class="ml-auto flex items-center gap-2">
         <!-- 自动 / 手动开关 -->
@@ -441,7 +502,9 @@ onUnmounted(() => {
     <div v-if="live && live.pending.length > 0" class="glass-card p-4">
       <div class="mb-2 flex items-center justify-between">
         <h3 class="text-subheading">待执行信号</h3>
-        <span class="text-[11px] text-content-faint">下个 tick 按实时价成交 · 同股以最新信号为准</span>
+        <span class="text-[11px] text-content-faint">
+          下个 tick 按实时价成交 · 评分高者优先 · 仓位按评分加权 · 同股以最新信号为准
+        </span>
       </div>
       <div class="flex flex-wrap gap-2">
         <span
@@ -455,6 +518,7 @@ onUnmounted(() => {
           </span>
           {{ p.name }}
           <span class="font-num text-content-faint">{{ p.code }}</span>
+          <span v-if="p.score" class="font-num text-primary-light">{{ p.score }}分</span>
           <span class="font-num text-content-faint">· {{ p.waiting_seconds }}s</span>
         </span>
       </div>
@@ -615,5 +679,18 @@ onUnmounted(() => {
         <p class="text-[11px]">自动撮合或手动下单成交后在此留下完整流水</p>
       </div>
     </div>
+
+    <!-- 确认对话框（切换模式 / 重置账户） -->
+    <ConfirmDialog
+      :open="pending !== null"
+      :title="dialogTitle"
+      :message="dialogMessage"
+      :hint="dialogHint"
+      :confirm-text="dialogConfirmText"
+      :tone="dialogTone"
+      :loading="switching || resetting"
+      @confirm="onConfirm"
+      @cancel="pending = null"
+    />
   </div>
 </template>

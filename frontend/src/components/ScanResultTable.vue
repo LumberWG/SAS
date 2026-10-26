@@ -16,12 +16,16 @@ const emit = defineEmits<{
   addWatch: [ScanHit]
 }>()
 
-type SortKey = 'price' | 'pct' | 'vol_ratio' | 'amount'
+type SortKey = 'score' | 'price' | 'pct' | 'vol_ratio' | 'amount'
 
 /** 聚合后的一行 = 一只股票；strategies/reasons 保留它命中的所有策略。 */
 type Row = {
   code: string
   name: string
+  /** 技术面评分（第 1 次排序依据） */
+  score: number | null
+  /** 本轮扫描名次（后端按评分降序编号，同股并列） */
+  rank: number | null
   price: number | null
   /** 信号触发时的价格（扫描/记录时刻），与实时价区分 */
   signalPrice: number | null
@@ -36,7 +40,8 @@ type Row = {
   best: ScanHit
 }
 
-const sortKey = ref<SortKey>('pct')
+// 默认按评分降序：与后端「第 1 次排序」一致
+const sortKey = ref<SortKey>('score')
 const sortDir = ref<'asc' | 'desc'>('desc')
 const strategyFilter = ref('')
 
@@ -72,6 +77,8 @@ const grouped = computed<Row[]>(() => {
     rows.push({
       code,
       name: first.name,
+      score: numOf(best.extra?.score) ?? numOf(best.score),
+      rank: typeof best.rank === 'number' ? best.rank : null,
       price: live?.price ?? best.price ?? first.price ?? null,
       signalPrice: best.price ?? first.price ?? null,
       pct: live?.pct_change ?? numOf(best.extra?.pct_change) ?? numOf(first.extra?.pct_change),
@@ -103,6 +110,7 @@ const filtered = computed(() => {
 })
 
 function num(row: Row, key: SortKey): number {
+  if (key === 'score') return row.score ?? -Infinity
   if (key === 'price') return row.price ?? 0
   if (key === 'pct') return row.pct ?? -Infinity
   if (key === 'vol_ratio') return row.volRatio ?? -Infinity
@@ -134,10 +142,12 @@ function pctClass(v: unknown): string {
 
 /** 导出 CSV（带 BOM，Excel 直接打开不乱码）。一只股票一行，策略列用 / 连接。 */
 function exportCsv() {
-  const header = ['代码', '名称', '命中策略', '策略数', '最新价', '触发价', '涨跌幅%', '量比', '成交额(亿)', '止损价', '目标价', '命中原因']
+  const header = ['代码', '名称', '排名', '评分', '命中策略', '策略数', '最新价', '触发价', '涨跌幅%', '量比', '成交额(亿)', '止损价', '目标价', '命中原因']
   const lines = filtered.value.map((r) => [
     r.code,
     r.name,
+    r.rank != null ? String(r.rank) : '',
+    r.score != null ? r.score.toFixed(2) : '',
     r.strategies.join(' / '),
     String(r.strategies.length),
     r.price?.toFixed(2) ?? '',
@@ -186,12 +196,20 @@ function exportCsv() {
 
     <!-- 表格：单元格不换行，列宽不足时横向滚动 -->
     <div class="min-h-0 flex-1 overflow-auto">
-      <table class="w-full min-w-[1080px] whitespace-nowrap text-left text-[13px]">
+      <table class="w-full min-w-[1180px] whitespace-nowrap text-left text-[13px]">
         <thead class="sticky top-0 z-10 bg-base-800/95 text-[11px] text-content-faint backdrop-blur">
           <tr class="border-b border-base-600/60">
             <th class="px-4 py-2.5 font-medium">代码</th>
             <th class="px-4 py-2.5 font-medium">名称</th>
             <th class="px-1 py-2.5 font-medium" title="加入自选股">自选</th>
+            <th
+              class="cursor-pointer px-3 py-2.5 text-right font-medium hover:text-content"
+              title="第 1 次排序：技术面评分降序（同股并列同名次）"
+              @click="toggleSort('score')"
+            >
+              排名/评分
+              <component :is="sortIcon('score')" v-if="sortIcon('score')" class="inline h-3 w-3" />
+            </th>
             <th
               class="cursor-pointer px-4 py-2.5 text-right font-medium hover:text-content"
               title="当前实时价（列表会自动刷新）；单元格悬停可看信号触发价"
@@ -236,6 +254,29 @@ function exportCsv() {
               >
                 <Star class="h-3.5 w-3.5" />
               </button>
+            </td>
+            <td class="px-3 py-2.5 text-right">
+              <span class="inline-flex items-center justify-end gap-1.5">
+                <span
+                  v-if="row.rank"
+                  class="rounded border border-warn/40 bg-warn/10 px-1.5 py-0.5 font-num text-[10px] text-warn"
+                  :title="`本轮第 ${row.rank} 名`"
+                >
+                  #{{ row.rank }}
+                </span>
+                <span
+                  class="font-num"
+                  :class="
+                    row.score == null || row.score === 0
+                      ? 'text-content'
+                      : row.score > 0
+                        ? 'text-up'
+                        : 'text-down'
+                  "
+                >
+                  {{ row.score != null ? (row.score > 0 ? '+' : '') + row.score.toFixed(2) : '--' }}
+                </span>
+              </span>
             </td>
             <td
               class="font-num px-4 py-2.5 text-right text-content"
