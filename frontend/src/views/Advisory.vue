@@ -1,7 +1,7 @@
 <script setup lang="ts">
 /**
  * 智能建议：建议买入 / 建议卖出 / 明日关注。
- * 数据由调度器自动生成：开盘 9:20、盘中每 5 分钟、盘后 15:35。
+ * 数据由调度器自动生成：开盘 9:20、盘中每分钟、盘后 15:35。
  */
 import { onMounted, onUnmounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
@@ -60,6 +60,20 @@ function scoreClass(score: number): string {
   return 'text-content'
 }
 
+/** 当前价：优先实时快照，缺失时退回建议生成价。 */
+function currentPrice(item: RecommendationItem): number {
+  return item.realtime?.price ?? item.price
+}
+
+function fmtPct(v: number | null | undefined): string {
+  return v == null ? '--' : `${v > 0 ? '+' : ''}${v.toFixed(2)}%`
+}
+
+function pctClass(v: number | null | undefined): string {
+  if (v == null || v === 0) return 'text-content-faint'
+  return v > 0 ? 'text-up' : 'text-down'
+}
+
 onMounted(() => {
   load()
   timer = window.setInterval(load, 30000)  // 30s 轮询
@@ -82,8 +96,8 @@ onUnmounted(() => {
         <div>
           <h2 class="text-[17px] font-semibold text-content">智能盯盘建议</h2>
           <p class="mt-0.5 text-[11px] leading-relaxed text-content-faint">
-            开盘 9:20 / 盘中每 5 分钟分析自选股，盘后 15:35 全市场扫描生成次日关注；收盘选股评分 Top
-            {{ summary?.auto_watch_top_n ?? 10 }} 自动加入自选
+            开盘 9:20 / 盘中每分钟分析自选股，建议产生后由模拟盘实时撮合（5 秒内成交）；盘后 15:35
+            生成次日关注，收盘选股评分 Top {{ summary?.auto_watch_top_n ?? 10 }} 自动加入自选
           </p>
         </div>
       </div>
@@ -138,7 +152,12 @@ onUnmounted(() => {
             </div>
             <p class="mt-1.5 text-[11px] leading-relaxed text-content-muted">{{ item.reason }}</p>
             <div class="mt-2 flex items-center gap-4 font-num text-[11px]">
-              <span class="text-content">现价 {{ item.price.toFixed(2) }}</span>
+              <span class="text-content" :title="`建议价 ${item.price.toFixed(2)}`">
+                现价 {{ currentPrice(item).toFixed(2) }}
+                <span v-if="item.realtime" :class="pctClass(item.realtime.pct_change)">
+                  {{ fmtPct(item.realtime.pct_change) }}
+                </span>
+              </span>
               <span class="text-down">止损 {{ item.stop_loss?.toFixed(2) ?? '--' }}</span>
               <span class="text-warn">目标 {{ item.target_price?.toFixed(2) ?? '--' }}</span>
               <span v-if="item.sentiment" class="ml-auto text-content-faint">{{ item.sentiment }}</span>
@@ -147,7 +166,7 @@ onUnmounted(() => {
           <div v-if="buys.length === 0" class="flex flex-col items-center gap-2 py-10 text-content-faint">
             <ArrowUpCircle class="h-8 w-8 opacity-30" />
             <p class="text-[12px]">暂无买入建议</p>
-            <p class="text-[11px]">交易时段每 5 分钟自动分析自选股；未配置自选股时无建议</p>
+            <p class="text-[11px]">交易时段每分钟自动分析自选股，建议产生后即时撮合成交；未配置自选股时无建议</p>
           </div>
         </div>
       </section>
@@ -179,7 +198,12 @@ onUnmounted(() => {
             </div>
             <p class="mt-1.5 text-[11px] leading-relaxed text-content-muted">{{ item.reason }}</p>
             <div class="mt-2 flex items-center gap-4 font-num text-[11px]">
-              <span class="text-content">现价 {{ item.price.toFixed(2) }}</span>
+              <span class="text-content" :title="`建议价 ${item.price.toFixed(2)}`">
+                现价 {{ currentPrice(item).toFixed(2) }}
+                <span v-if="item.realtime" :class="pctClass(item.realtime.pct_change)">
+                  {{ fmtPct(item.realtime.pct_change) }}
+                </span>
+              </span>
               <span class="text-down">止损 {{ item.stop_loss?.toFixed(2) ?? '--' }}</span>
               <span v-if="item.sentiment" class="ml-auto text-content-faint">{{ item.sentiment }}</span>
             </div>
@@ -228,7 +252,12 @@ onUnmounted(() => {
             <div class="font-num text-[14px] font-bold" :class="scoreClass(item.score)">
               {{ item.score > 0 ? '+' : '' }}{{ item.score.toFixed(1) }}
             </div>
-            <div class="font-num text-[11px] text-content-muted">{{ item.price.toFixed(2) }}</div>
+            <div class="font-num text-[11px] text-content-muted" :title="`建议价 ${item.price.toFixed(2)}`">
+              {{ currentPrice(item).toFixed(2) }}
+              <span v-if="item.realtime" class="ml-1" :class="pctClass(item.realtime.pct_change)">
+                {{ fmtPct(item.realtime.pct_change) }}
+              </span>
+            </div>
           </div>
         </div>
         <div

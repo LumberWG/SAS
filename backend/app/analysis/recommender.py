@@ -56,8 +56,21 @@ class Recommender:
     # ------------------------------------------------------------------
     # 单股分析
     # ------------------------------------------------------------------
-    async def analyze_stock(self, code: str, name: str) -> Recommendation | None:
-        """分析单只自选股，返回建议（数据不足返回 None）。"""
+    async def analyze_stock(
+        self,
+        code: str,
+        name: str,
+        current_price: float | None = None,
+        sentiment: dict | None = None,
+    ) -> Recommendation | None:
+        """分析单只自选股，返回建议（数据不足返回 None）。
+
+        Args:
+            current_price: 当前实时价（来自实时快照）。盘中日K缓存最后一根可能
+                还是上一交易日，用它当建议价会记录隔夜价格；缺失时退化为
+                日K最后收盘价。
+            sentiment: 市场情绪（一轮分析内复用同一份，避免逐股重复读快照）
+        """
         try:
             df = await asyncio.to_thread(get_kline_cached, code)
         except Exception as exc:  # noqa: BLE001
@@ -68,20 +81,27 @@ class Recommender:
 
         df = await asyncio.to_thread(add_all_indicators, df)
         result = score_technical(df)
-        price = float(df["close"].iloc[-1])
+        # 建议价：优先当前实时价，缺失才用K线最后收盘
+        price = (
+            float(current_price)
+            if current_price is not None and current_price > 0
+            else float(df["close"].iloc[-1])
+        )
         stop = round(float(df["low"].tail(10).min()), 2)
         target = round(price * 1.15, 2)
 
         # 市场情绪修正：逆环境买入降级为持有
-        sentiment_level = ""
         try:
-            sentiment = await asyncio.to_thread(
-                sentiment_from_snapshot, _safe_snapshot()
+            data = (
+                sentiment
+                if sentiment is not None
+                else await asyncio.to_thread(market_sentiment)
             )
-            sentiment_level = sentiment.get("level", "")
-            weight = float(sentiment.get("weight", 0.0))
+            sentiment_level = data.get("level", "")
+            weight = float(data.get("weight", 0.0))
         except Exception as exc:  # noqa: BLE001
             logger.debug("建议引擎情绪获取失败: %s", exc)
+            sentiment_level = ""
             weight = 0.0
 
         if result.score >= 3:
@@ -120,11 +140,19 @@ class Recommender:
         if not watchlist:
             return []
 
+        # 实时价与市场情绪：一轮只取一次，供全部股票复用
+        quotes, sentiment = await asyncio.gather(
+            asyncio.to_thread(_quote_prices),
+            asyncio.to_thread(market_sentiment),
+        )
         semaphore = asyncio.Semaphore(self.settings.scan_concurrency)
 
         async def one(row) -> Recommendation | None:
             async with semaphore:
-                return await self.analyze_stock(row["code"], row["name"])
+                return await self.analyze_stock(
+                    row["code"], row["name"],
+                    quotes.get(str(row["code"])), sentiment,
+                )
 
         results = await asyncio.gather(
             *(one(r) for r in watchlist), return_exceptions=True
@@ -171,12 +199,42 @@ class Recommender:
         return focus
 
 
+def _quote_prices() -> dict[str, float]:
+    """当前实时价映射（code → price），快照不可用时返回空 dict。"""
+    from app.data.snapshot_store import quote_map
+
+    try:
+        return {code: q["price"] for code, q in quote_map().items()}
+    except Exception as exc:  # noqa: BLE001 - 快照不可用则退回K线收盘价
+        logger.debug("建议引擎实时价获取失败: %s", exc)
+        return {}
+
+
+def market_sentiment() -> dict:
+    """当前市场情绪（level/weight），失败时返回中性默认值。
+
+    一轮分析只调用一次：盘中每分钟一轮时，逐股读快照既慢又无意义。
+    """
+    try:
+        return sentiment_from_snapshot(_safe_snapshot())
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("市场情绪获取失败: %s", exc)
+        return {"level": "", "weight": 0.0}
+
+
 def _safe_snapshot():
-    """获取全市场快照（失败时返回空 DataFrame，情绪退化为默认）。"""
+    """获取全市场快照（失败时返回空 DataFrame，情绪退化为默认）。
+
+    优先读内存缓存（``peek_snapshot`` 不阻塞、不触发刷新）；仅当完全无缓存
+    （冷启动且无持久化文件）时才同步拉取一次。
+    """
     from app.data.snapshot_store import snapshot_store
 
     try:
-        return snapshot_store.get_snapshot()
+        snapshot = snapshot_store.peek_snapshot()
+        if snapshot is None or snapshot.empty:
+            snapshot = snapshot_store.get_snapshot()
+        return snapshot
     except Exception:  # noqa: BLE001
         import pandas as pd
 

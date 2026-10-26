@@ -12,7 +12,9 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import json
 import logging
+import os
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -29,6 +31,17 @@ from app.strategies.base import Signal, Strategy
 logger = logging.getLogger("sas.screener")
 
 
+def _num(value) -> float | None:
+    """数值转 float，NaN/None 返回 None。"""
+    if value is None:
+        return None
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return None
+    return None if result != result else result
+
+
 @dataclass
 class ScanTask:
     """一轮扫描任务的状态（内存中管理，前端轮询）。"""
@@ -43,6 +56,7 @@ class ScanTask:
     started_at: str = ""
     finished_at: str = ""
     scope: str = "all"               # 扫描范围
+    codes: list[str] | None = None   # 指定代码（None=按 scope）；并发复用判断用
     sentiment: dict = field(default_factory=dict)    # 扫描开始时市场情绪快照
     error: str = ""                  # 失败原因（status=error 时供前端展示）
 
@@ -72,10 +86,81 @@ class Scanner:
         return self._tasks.get(task_id)
 
     def latest_task(self) -> ScanTask | None:
-        """最近一轮扫描（供定时任务/前端展示）。"""
+        """最近一轮扫描（供定时任务/前端展示）。
+
+        重启后内存任务为空，此时从 data/last_scan.json 恢复上一轮结果，
+        避免"改完代码重启，选股中心列表变空"。
+        """
         if not self._tasks:
-            return None
+            return self._restore_task()
         return max(self._tasks.values(), key=lambda t: t.started_at or "")
+
+    # ------------------------------------------------------------------
+    # 最近一轮扫描落盘（重启后恢复）
+    # ------------------------------------------------------------------
+    def _state_path(self):
+        return self.settings.db_path.parent / "last_scan.json"
+
+    def _persist_task(self, task: ScanTask) -> None:
+        """把已完成的扫描结果写入磁盘（原子替换，避免半截文件）。"""
+        try:
+            path = self._state_path()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "task_id": task.task_id,
+                "strategies": task.strategies,
+                "scope": task.scope,
+                "codes": task.codes,
+                "total": task.total,
+                "scanned": task.scanned,
+                "skipped": task.skipped,
+                "started_at": task.started_at,
+                "finished_at": task.finished_at,
+                "sentiment": task.sentiment,
+                "hits": task.hits,
+            }
+            tmp = path.with_name(path.name + ".tmp")
+            tmp.write_text(
+                json.dumps(payload, ensure_ascii=False), encoding="utf-8"
+            )
+            os.replace(tmp, path)
+            logger.info("最近一轮扫描已落盘: %s (%d 条命中)", path, len(task.hits))
+        except Exception as exc:  # noqa: BLE001 - 落盘失败不影响扫描结果
+            logger.warning("扫描结果落盘失败: %s", exc)
+
+    def _restore_task(self) -> ScanTask | None:
+        """从磁盘恢复上一轮扫描；无文件或损坏时返回 None。"""
+        try:
+            path = self._state_path()
+            if not path.is_file():
+                return None
+            data = json.loads(path.read_text(encoding="utf-8"))
+            hits = data.get("hits")
+            if not isinstance(hits, list):
+                return None
+            task = ScanTask(
+                task_id=str(data.get("task_id") or "restored"),
+                strategies=list(data.get("strategies") or []),
+                status="done",
+                total=int(data.get("total") or 0),
+                scanned=int(data.get("scanned") or 0),
+                hits=hits,
+                skipped=int(data.get("skipped") or 0),
+                started_at=str(data.get("started_at") or ""),
+                finished_at=str(data.get("finished_at") or ""),
+                scope=str(data.get("scope") or "all"),
+                codes=list(data["codes"]) if data.get("codes") else None,
+                sentiment=dict(data.get("sentiment") or {}),
+            )
+            self._tasks[task.task_id] = task
+            logger.info(
+                "已恢复上一轮扫描结果: %s (%d 条命中, 完成于 %s)",
+                task.task_id, len(task.hits), task.finished_at,
+            )
+            return task
+        except Exception as exc:  # noqa: BLE001 - 恢复失败按无历史处理
+            logger.warning("扫描结果恢复失败: %s", exc)
+            return None
 
     def has_active_scan(self) -> bool:
         """是否有扫描正在运行（后台预热据此让路，优先保证扫描出结果）。"""
@@ -94,11 +179,50 @@ class Scanner:
             codes: 限定扫描的股票代码；None 表示全市场
             scope: 扫描范围（见 SCAN_SCOPES；codes 优先于 scope）
         """
+        # 并发保护：同一策略集 + 同一扫描目标正在跑时直接复用，
+        # 避免「连点两次开始扫描」或「定时任务撞车」并行跑两遍全市场。
+        running = self._find_reusable(strategy_names, codes, scope)
+        if running is not None:
+            logger.info(
+                "复用进行中的扫描任务 %s（策略 %d 个，%s），不再重复启动",
+                running.task_id, len(running.strategies),
+                ("代码 %d 只" % len(running.codes)) if running.codes else running.scope,
+            )
+            return running.task_id
+
         task_id = uuid.uuid4().hex[:12]
-        task = ScanTask(task_id=task_id, strategies=strategy_names, scope=scope)
+        task = ScanTask(
+            task_id=task_id,
+            strategies=list(strategy_names),
+            scope=scope,
+            codes=list(codes) if codes else None,
+        )
         self._tasks[task_id] = task
         asyncio.create_task(self._run(task, codes, scope))
         return task_id
+
+    def _find_reusable(
+        self,
+        strategy_names: list[str],
+        codes: list[str] | None,
+        scope: str,
+    ) -> ScanTask | None:
+        """查找可复用的进行中任务（策略集与扫描目标都一致）。"""
+        wanted_strategies = sorted(strategy_names)
+        wanted_codes = sorted(str(c) for c in codes) if codes else None
+        for task in self._tasks.values():
+            if task.status not in ("pending", "running"):
+                continue
+            if sorted(task.strategies) != wanted_strategies:
+                continue
+            if wanted_codes is not None or task.codes:
+                # 指定代码的扫描只与相同的代码集复用
+                if sorted(task.codes or []) != (wanted_codes or []):
+                    continue
+            elif task.scope != scope:
+                continue
+            return task
+        return None
 
     # ------------------------------------------------------------------
     # 扫描主流程
@@ -135,13 +259,15 @@ class Scanner:
             task.total = len(pool)
 
             strategies = self._resolve_strategies(task.strategies)
+            # 本轮实时快照（盘中用于修正日K滞后的最新价/涨跌幅，见 _scan_stock）
+            quotes = await loop.run_in_executor(self._io, self._realtime_quotes)
             semaphore = asyncio.Semaphore(self.settings.scan_concurrency)
 
             async def scan_one(row) -> None:
                 async with semaphore:
                     try:
                         signals = await self._scan_stock(
-                            row.code, row.name, strategies
+                            row.code, row.name, strategies, quotes.get(str(row.code))
                         )
                         task.hits.extend(s.to_dict() for s in signals)
                     except Exception as exc:  # noqa: BLE001 - 单股失败跳过
@@ -165,6 +291,8 @@ class Scanner:
             # 信号持久化
             scan_date = datetime.now().strftime("%Y-%m-%d")
             db.save_signals(task.hits, scan_date=scan_date)
+            # 整轮结果落盘：后端重启后 latest_scan 仍能恢复列表
+            await loop.run_in_executor(self._io, self._persist_task, task)
             # 命中自动进入「程序自选」（按评分取前 N，配置为 0 时关闭）
             auto_added = await loop.run_in_executor(
                 self._io, self._auto_watch_hits, task.hits
@@ -173,11 +301,77 @@ class Scanner:
                 "扫描完成: %d 只股票, 命中 %d 个信号, 跳过 %d 只, 程序自选新增 %d",
                 task.total, len(task.hits), task.skipped, auto_added,
             )
+            # 选股 → 建议 → 实时交易：盘中命中立即分析并送入实时队列
+            await self._trade_top_hits(task.hits)
         except Exception as exc:  # noqa: BLE001 - 整轮失败记录状态
             task.status = "error"
             task.error = str(exc)
             task.finished_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             logger.exception("扫描任务失败: %s", exc)
+
+    async def _trade_top_hits(self, hits: list[dict]) -> None:
+        """把命中 TopN 立即送入「建议 → 实时交易」队列（打通选股到成交）。
+
+        盘中：分析完立刻入队，下个 tick（≤5s）按实时价成交。
+        盘后：同样入队，由队列的「非交易时段顺延」规则在次日 9:30 开盘后
+        按开盘实时价成交（仍是实时撮合，不是用收盘价直接成交）。
+        盘后联动可用 ``PAPER_SCAN_AUTOTRADE_OVERNIGHT=false`` 关闭。
+
+        注意：本方法在 ``task.status = "done"`` 之后调用，必须自行兜底异常，
+        否则会把已完成的任务改写成 error。
+        """
+        if not hits or not self.settings.paper_scan_autotrade:
+            return
+        from app.market.clock import is_trading_hours
+
+        overnight = not is_trading_hours()
+        if overnight and not self.settings.paper_scan_autotrade_overnight:
+            return
+        from app.analysis.recommender import market_sentiment, recommender
+        from app.paper.live import live_trader
+
+        ranked = sorted(
+            hits, key=lambda h: h.get("extra", {}).get("score", 0), reverse=True
+        )
+        picked: list[dict] = []
+        seen: set[str] = set()
+        for hit in ranked:
+            code = str(hit.get("code", "") or "")
+            if not code or code in seen:
+                continue
+            seen.add(code)
+            picked.append(hit)
+            if len(picked) >= self.settings.paper_scan_autotrade_top_n:
+                break
+
+        sentiment = await asyncio.to_thread(market_sentiment)
+        semaphore = asyncio.Semaphore(5)
+
+        async def analyze(hit: dict):
+            async with semaphore:
+                try:
+                    return await recommender.analyze_stock(
+                        str(hit["code"]), str(hit.get("name") or ""),
+                        hit.get("price"), sentiment,
+                    )
+                except Exception as exc:  # noqa: BLE001 - 单只失败不影响其他
+                    logger.debug("选股命中分析失败 %s: %s", hit.get("code"), exc)
+                    return None
+
+        try:
+            results = await asyncio.gather(*(analyze(h) for h in picked))
+            recommendations = [r for r in results if r is not None]
+            queued = live_trader.submit(
+                recommendations,
+                source="选股命中(盘后顺延开盘)" if overnight else "选股命中",
+            )
+            buys = sum(1 for r in recommendations if r.action == "buy")
+            logger.info(
+                "选股联动%s：分析 %d 只，买入建议 %d 条，实时入队 %d 条",
+                "（盘后，次日开盘成交）" if overnight else "", len(picked), buys, queued,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("选股联动实时交易失败")
 
     def _auto_watch_hits(self, hits: list[dict]) -> int:
         """本轮命中按技术面评分 Top N 写入「程序自选」，返回新增条数。
@@ -216,6 +410,17 @@ class Scanner:
             return {}
 
     @staticmethod
+    def _realtime_quotes() -> dict[str, dict]:
+        """全市场实时快照映射（只读内存缓存，见 ``snapshot_store.quote_map``）。"""
+        from app.data.snapshot_store import quote_map
+
+        try:
+            return quote_map()
+        except Exception as exc:  # noqa: BLE001 - 快照不可用则沿用K线口径
+            logger.debug("实时快照不可用，扫描价格沿用日K口径: %s", exc)
+            return {}
+
+    @staticmethod
     def _top_amount_pool(pool: pd.DataFrame, n: int) -> pd.DataFrame:
         """按实时成交额取前 N 只股票（快照失败时退化为全量前 N 行）。"""
         from app.data.snapshot_store import snapshot_store
@@ -230,9 +435,18 @@ class Scanner:
             return pool.head(n)
 
     async def _scan_stock(
-        self, code: str, name: str, strategies: list[Strategy]
+        self,
+        code: str,
+        name: str,
+        strategies: list[Strategy],
+        quote: dict | None = None,
     ) -> list[Signal]:
-        """扫描单只股票：取K线 → 算指标 → 逐策略评估。"""
+        """扫描单只股票：取K线 → 算指标 → 逐策略评估。
+
+        Args:
+            quote: 该股实时快照（price/pct_change/volume_ratio/amount），
+                用于修正日K缓存滞后的展示口径；缺失时退化为K线收盘价推导。
+        """
         # 网络与计算都是阻塞操作，放到线程池避免卡住事件循环
         loop = asyncio.get_running_loop()
         df = await loop.run_in_executor(self._io, get_kline_cached, code)
@@ -250,11 +464,31 @@ class Scanner:
                 signal.name = name
                 signals.append(signal)
 
-        # 补充当日涨跌幅到 extra（命中表格展示用；K线缓存无该列时由收盘价推导）
-        if signals and len(df) > 1:
-            pct = (df["close"].iloc[-1] / df["close"].iloc[-2] - 1) * 100
-            for s in signals:
-                s.extra.setdefault("pct_change", round(float(pct), 2))
+        # ---- 展示口径：最新价 / 涨跌幅 / 量比 / 成交额 ----
+        # 日K缓存最后一根在盘中仍是上一交易日（盘中接口不返回当日K），直接用它的
+        # 收盘价会把「昨天的价格与涨幅」当成今天的：实测 920207 众诚科技显示
+        # +31.39%（10-23 的涨幅），当日实际只有 +6.95%。因此以实时快照为准；
+        # 只有K线已含当日收盘时，才用收盘价推导涨跌幅。
+        if signals:
+            today = datetime.now().strftime("%Y-%m-%d")
+            last_date = str(df["date"].iloc[-1]) if "date" in df.columns else ""
+            snap_price = _num(quote.get("price")) if quote else None
+            if quote and last_date != today and snap_price and snap_price > 0:
+                pct = _num(quote.get("pct_change"))
+                vol_ratio = _num(quote.get("volume_ratio"))
+                amount = _num(quote.get("amount"))
+                for s in signals:
+                    s.price = float(snap_price)
+                    if pct is not None:
+                        s.extra["pct_change"] = round(pct, 2)
+                    if vol_ratio is not None:
+                        s.extra["vol_ratio"] = round(vol_ratio, 2)
+                    if amount is not None:
+                        s.extra["amount_yi"] = round(amount / 1e8, 2)
+            elif len(df) > 1 and last_date == today:
+                pct = (df["close"].iloc[-1] / df["close"].iloc[-2] - 1) * 100
+                for s in signals:
+                    s.extra["pct_change"] = round(float(pct), 2)
         # 补充技术面评分（盘后 TopN 排序与自动加自选用）
         if signals:
             from app.analysis.scoring import score_technical

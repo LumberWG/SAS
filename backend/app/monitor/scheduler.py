@@ -9,14 +9,16 @@
   4. auto_watch        收盘自动选股完成后，评分 Top N 的命中自动加入自选股
   5. pre_market        每交易日 9:20 集合竞价后分析自选股生成本日建议，
                        并读取昨日「明日关注」
-  6. intraday_monitor  盘中 9:35-15:00 每 5 分钟分析自选股，
-                       生成实时买卖建议（建议买入/建议卖出列表）
+  6. intraday_monitor  盘中每隔 intraday_analysis_interval（默认 1 分钟）
+                       分析自选股，生成实时买卖建议（买入/卖出列表）
   7. post_market       每交易日 15:35 全市场扫描 + 自选股分析，
                        生成次日「明日关注」TopN
-  8. paper_settle      每交易日 15:40 模拟盘收盘结算（止盈止损 + 净值快照）
+  8. paper_settle      每交易日 15:40 模拟盘收盘结算（净值快照 + 兜底止盈止损）
+  9. paper_tick        实时撮合（默认 5s）：信号队列成交 + 盘中止盈止损
 
-模拟交易联动: 开盘/盘中分析产生的买卖建议自动送入模拟盘执行
-（受 PAPER_AUTO_TRADE 开关控制），盘后统一结算。
+模拟交易联动（全链条）: 选股命中/开盘分析/盘中分析产生的买卖建议都进入
+实时队列（LiveTrader），由 paper_tick 在 ≤5 秒内按实时价成交；
+9:20 开盘前的信号顺延到 9:30 开盘执行。
 
 时钟说明: cron 任务使用本地时区（Asia/Shanghai 由 settings 指定）。
 """
@@ -35,6 +37,7 @@ from app.config import get_settings
 from app.data.cache import db
 from app.data.service import get_stock_pool
 from app.data.snapshot_store import snapshot_store
+from app.market.clock import is_trading_day, is_trading_hours
 from app.notify import notifier
 from app.screener.scanner import warmup_klines as screener_warmup
 
@@ -48,22 +51,6 @@ _LIMIT_UP_PCT = 9.8       # 涨停（近似：主板 ±10%，忽略 ST/科创创
 _LIMIT_DOWN_PCT = -9.8    # 跌停
 _VOL_RATIO_ALERT = 3.0    # 量比阈值（放量异动）
 _BIG_MOVE_PCT = 7.0       # 急涨急跌阈值
-
-
-def is_trading_hours(now: datetime | None = None) -> bool:
-    """当前是否处于 A 股交易时段（周一至周五 9:30-11:30 / 13:00-15:00）。"""
-    now = now or datetime.now()
-    if now.weekday() >= 5:  # 周六/周日
-        return False
-    minutes = now.hour * 60 + now.minute
-    return (9 * 60 + 30) <= minutes <= (11 * 60 + 30) or \
-        (13 * 60) <= minutes <= (15 * 60)
-
-
-def is_trading_day(now: datetime | None = None) -> bool:
-    """是否为交易日（周一至周五，不处理法定节假日）。"""
-    now = now or datetime.now()
-    return now.weekday() < 5
 
 
 class MarketScheduler:
@@ -112,11 +99,13 @@ class MarketScheduler:
             CronTrigger(day_of_week="mon-fri", hour=9, minute=20, timezone=tz),
             id="pre_market", replace_existing=True,
         )
-        # 5) 盘中自选股监控（每 N 分钟，任务内判断交易时段）
+        # 5) 盘中自选股监控（默认 1 分钟，任务内判断交易时段；
+        #    单轮超时则跳过下一轮，不会堆积）
         self.scheduler.add_job(
             self.intraday_monitor,
-            IntervalTrigger(minutes=self.settings.intraday_analysis_interval),
+            IntervalTrigger(minutes=max(1, self.settings.intraday_analysis_interval)),
             id="intraday_monitor", replace_existing=True,
+            max_instances=1, coalesce=True,
         )
         # 6) 盘后分析（交易日 15:35，生成次日关注）
         self.scheduler.add_job(
@@ -124,11 +113,18 @@ class MarketScheduler:
             CronTrigger(day_of_week="mon-fri", hour=15, minute=35, timezone=tz),
             id="post_market", replace_existing=True,
         )
-        # 7) 模拟盘收盘结算（交易日 15:40，止盈止损 + 净值快照）
+        # 7) 模拟盘收盘结算（交易日 15:40，净值快照 + 兜底止盈止损）
         self.scheduler.add_job(
             self.paper_settle,
             CronTrigger(day_of_week="mon-fri", hour=15, minute=40, timezone=tz),
             id="paper_settle", replace_existing=True,
+        )
+        # 7b) 实时撮合（默认 5s，任务内判断交易时段；信号入队后下个 tick 成交）
+        self.scheduler.add_job(
+            self.paper_tick,
+            IntervalTrigger(seconds=max(1, self.settings.paper_tick_interval)),
+            id="paper_tick", replace_existing=True,
+            max_instances=1, coalesce=True,
         )
         # 8) K线预热（交易日 16:00，全市场日K增量刷新本地缓存，加速后续扫描）
         self.scheduler.add_job(
@@ -142,8 +138,9 @@ class MarketScheduler:
         asyncio.create_task(self.warmup_klines())
         logger.info(
             "调度器已启动（快照60s / 异动5min / 开盘9:20 / 盘中%dm / "
-            "收盘选股15:30 / 盘后15:35 / 模拟盘结算15:40 / K线预热16:00）",
+            "实时撮合%ds / 收盘选股15:30 / 盘后15:35 / 结算15:40 / K线预热16:00）",
             self.settings.intraday_analysis_interval,
+            self.settings.paper_tick_interval,
         )
 
     def shutdown(self) -> None:
@@ -231,6 +228,60 @@ class MarketScheduler:
             )
         return new_alerts
 
+    async def _wait_scan(self, task_id: str, timeout_s: int | None = None):
+        """轮询等待扫描任务结束，返回 ScanTask（丢失返回 None，超时返回当前 task）。
+
+        注意：scanner.start_scan 返回的是 task_id 字符串，不是任务对象，
+        必须经 get_task 取回任务再判断状态。
+        """
+        from app.screener.scanner import scanner
+
+        limit = timeout_s or self.settings.scan_wait_timeout
+        waited = 0
+        while waited < limit:
+            await asyncio.sleep(2)
+            waited += 2
+            task = scanner.get_task(task_id)
+            if task is None:
+                logger.warning("扫描任务 %s 已不存在", task_id)
+                return None
+            if task.status in ("done", "error"):
+                return task
+        logger.warning("等待扫描任务 %s 超时（%ds）", task_id, limit)
+        return scanner.get_task(task_id)
+
+    async def _scan_for_post_market(self, strategies: list[str]):
+        """盘后取数：优先复用当日扫描结果，避免 5 分钟内重复全市场扫描。
+
+        三种情况：
+          1) 当日已有完成的扫描结果 → 直接复用；
+          2) 当日有扫描正在跑（15:30 那轮还没结束）→ 等它跑完；
+          3) 当天没扫过 → 自己发起一轮。
+        """
+        from app.screener.scanner import scanner
+
+        today = datetime.now().strftime("%Y-%m-%d")
+        latest = scanner.latest_task()
+        if latest is not None and latest.status in ("pending", "running"):
+            logger.info("当日扫描 %s 仍在进行，盘后等待其完成", latest.task_id)
+            return await self._wait_scan(latest.task_id)
+        if (
+            latest is not None
+            and latest.status == "done"
+            and latest.hits
+            and latest.finished_at.startswith(today)
+        ):
+            logger.info(
+                "盘后复用当日扫描结果 %s（完成于 %s，命中 %d 条）",
+                latest.task_id, latest.finished_at, len(latest.hits),
+            )
+            return latest
+        logger.info("当日无可用扫描结果，盘后自行发起一轮扫描")
+        task_id = await scanner.start_scan(
+            strategies, scope=self.settings.auto_scan_scope
+        )
+        return await self._wait_scan(task_id)
+
     async def auto_scan(self) -> dict:
         """收盘后自动选股：全市场扫描 → 信号持久化 → 通知。"""
         from app.screener.scanner import scanner
@@ -239,13 +290,11 @@ class MarketScheduler:
         strategies = self.settings.auto_scan_strategies or registry.names()
         logger.info("收盘自动选股开始，策略: %s", strategies)
         try:
-            task = await scanner.start_scan(strategies)
-            # 等待扫描完成（轮询任务状态，最长约 6 分钟）
-            for _ in range(180):
-                await asyncio.sleep(2)
-                if task.status in ("done", "error"):
-                    break
-            if task.status != "done":
+            task_id = await scanner.start_scan(
+                strategies, scope=self.settings.auto_scan_scope
+            )
+            task = await self._wait_scan(task_id)
+            if task is None or task.status != "done":
                 return {"error": "扫描未完成"}
             hit_count = len(task.hits)
             await notifier.notify(
@@ -307,18 +356,24 @@ class MarketScheduler:
         if not is_trading_day():
             return {"skipped": "非交易日"}
         from app.analysis.recommender import recommender
-        from app.paper.engine import PaperEngine
+        from app.paper.live import live_trader
 
         logger.info("开盘前分析开始（9:20）")
         try:
+            # 持仓股先纳入自选，确保卖出建议能覆盖到持仓
+            await asyncio.to_thread(self._sync_positions_to_watchlist)
             recommendations = await recommender.analyze_watchlist()
             batch = f"premarket_{datetime.now().strftime('%Y-%m-%d')}"
             saved = await asyncio.to_thread(
                 db.save_recommendations,
                 [r.__dict__ for r in recommendations], batch,
             )
-            # 驱动模拟盘（开盘执行昨日分析的结论）
-            trades = await PaperEngine().execute_recommendations(recommendations)
+            # 卖出建议分流：有持仓→入队卖出；无持仓→移出自选
+            actionable, pruned = await asyncio.to_thread(
+                self._route_sell_signals, recommendations
+            )
+            # 送入实时队列：9:20 尚未开盘，队列顺延到 9:30 开盘后按实时价成交
+            queued = live_trader.submit(actionable, source="开盘分析")
             buys = sum(1 for r in recommendations if r.action == "buy")
             sells = sum(1 for r in recommendations if r.action == "sell")
 
@@ -334,7 +389,7 @@ class MarketScheduler:
                 focus_note,
             )
             return {"batch": batch, "saved": saved, "buy": buys, "sell": sells,
-                    "trades": [t.side for t in trades]}
+                    "queued": queued, "pruned": len(pruned)}
         except Exception as exc:  # noqa: BLE001
             logger.exception("开盘前分析失败")
             return {"error": str(exc)}
@@ -360,6 +415,60 @@ class MarketScheduler:
             return {"error": str(exc)}
 
     # ------------------------------------------------------------------
+    # 自选股动态维护（持仓纳入 / 无持仓卖出剔除）
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _sync_positions_to_watchlist() -> int:
+        """持仓股自动纳入自选：保证卖出建议能覆盖到持仓股。"""
+        positions = db.list_paper_positions()
+        if not positions:
+            return 0
+        added = db.add_watch_many(
+            [(p["code"], p.get("name") or p["code"]) for p in positions],
+            source="auto", note="持仓自动加入",
+        )
+        if added:
+            logger.info("持仓自动加入自选 %d 只", added)
+        return added
+
+    @staticmethod
+    def _route_sell_signals(recommendations: list) -> tuple[list, list[str]]:
+        """卖出建议分流：有持仓→交给模拟盘；无持仓→移出自选。
+
+        卖出建议只对「仍在跟踪/持有」的股票有意义：没有持仓时继续留在自选
+        里，只会每个周期重复产出无效卖出建议，因此直接移出自选
+        （自选因此成为动态关注池：持仓自动进来，清仓后转弱自动出去）。
+        """
+        holdings = {p["code"] for p in db.list_paper_positions()}
+        kept: list = []
+        removed: list[str] = []
+        for rec in recommendations:
+            if rec.action != "sell" or rec.code in holdings:
+                kept.append(rec)
+                continue
+            db.remove_watch(rec.code)
+            removed.append(f"{rec.code} {rec.name}")
+        if removed:
+            logger.info(
+                "卖出建议无持仓，移出自选 %d 只: %s",
+                len(removed), ", ".join(removed[:10]),
+            )
+        return kept, removed
+
+    # ------------------------------------------------------------------
+    # 实时撮合（默认每 5s）
+    # ------------------------------------------------------------------
+    async def paper_tick(self) -> dict:
+        """实时撮合一次：信号队列 + 实时止盈止损（非交易时段直接跳过）。"""
+        from app.paper.live import live_trader
+
+        try:
+            return await live_trader.tick()
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("实时撮合失败")
+            return {"error": str(exc)}
+
+    # ------------------------------------------------------------------
     # K线预热（后台，加速扫描）
     # ------------------------------------------------------------------
     async def warmup_klines(self) -> dict:
@@ -382,9 +491,11 @@ class MarketScheduler:
         if not is_trading_hours():
             return {"skipped": "非交易时段"}
         from app.analysis.recommender import recommender
-        from app.paper.engine import PaperEngine
+        from app.paper.live import live_trader
 
         try:
+            # 持仓股先纳入自选，确保卖出建议能覆盖到持仓
+            await asyncio.to_thread(self._sync_positions_to_watchlist)
             recommendations = await recommender.analyze_watchlist()
             if not recommendations:
                 return {"skipped": "自选股为空"}
@@ -393,10 +504,14 @@ class MarketScheduler:
                 db.save_recommendations,
                 [r.__dict__ for r in recommendations], batch,
             )
-            # 驱动模拟盘（自动执行买卖，受 PAPER_AUTO_TRADE 控制）
-            trades = await PaperEngine().execute_recommendations(recommendations)
-            return {"batch": batch, "saved": saved,
-                    "trades": [t.side for t in trades]}
+            # 卖出建议分流：有持仓→入队卖出；无持仓→移出自选
+            actionable, pruned = await asyncio.to_thread(
+                self._route_sell_signals, recommendations
+            )
+            # 入队后由 paper_tick（默认 5s）按实时价成交，不再等下一轮分析
+            queued = live_trader.submit(actionable, source="盘中分析")
+            return {"batch": batch, "saved": saved, "queued": queued,
+                    "pruned": len(pruned)}
         except Exception as exc:  # noqa: BLE001
             logger.exception("盘中监控失败")
             return {"error": str(exc)}
@@ -409,20 +524,14 @@ class MarketScheduler:
         if not is_trading_day():
             return {"skipped": "非交易日"}
         from app.analysis.recommender import recommender
-        from app.screener.scanner import scanner
         from app.strategies import registry
 
         logger.info("盘后分析开始（15:35）")
         try:
-            # 1) 全市场扫描（复用收盘自动选股的策略集）
+            # 1) 取当日扫描结果：优先复用 15:30 收盘选股那一轮，缺失才自己扫
             strategies = self.settings.auto_scan_strategies or registry.names()
-            task = await scanner.start_scan(strategies)
-            # 等待扫描完成（轮询任务状态）
-            for _ in range(180):  # 最长等待约 6 分钟
-                await asyncio.sleep(2)
-                if task.status in ("done", "error"):
-                    break
-            if task.status != "done":
+            task = await self._scan_for_post_market(strategies)
+            if task is None or task.status != "done":
                 return {"error": "盘后扫描未完成"}
 
             # 2) 明日关注（命中评分 TopN，持久化）
@@ -437,11 +546,16 @@ class MarketScheduler:
             )
 
             # 3) 自选股建议（同资金歇后分析，批次跟随明日）
+            await asyncio.to_thread(self._sync_positions_to_watchlist)
             recommendations = await recommender.analyze_watchlist()
             pre_batch = f"premarket_{today}"
             await asyncio.to_thread(
                 db.save_recommendations,
                 [r.__dict__ for r in recommendations], pre_batch,
+            )
+            # 盘后同样执行卖出分流：无持仓的弱势股移出自选，次日不再重复分析
+            _, pruned = await asyncio.to_thread(
+                self._route_sell_signals, recommendations
             )
 
             await notifier.notify(

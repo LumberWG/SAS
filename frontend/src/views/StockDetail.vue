@@ -1,22 +1,25 @@
 <script setup lang="ts">
 /**
- * 个股详情：K线图 + 指标面板 + LLM 决策仪表盘。
+ * 个股详情：分时图 / K线图（可切换）+ 指标面板 + LLM 决策仪表盘。
  */
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { CheckCircle2, AlertTriangle, XCircle, Sparkles, Star } from 'lucide-vue-next'
 
 import {
   addWatch,
   analyzeStock,
+  getStockIntraday,
   getStockKline,
   getStockQuote,
   getWatchlist,
   removeWatch,
   type DecisionDashboard,
+  type IntradayData,
   type StockQuote,
 } from '../api'
 import ConclusionBadge from '../components/ConclusionBadge.vue'
+import IntradayChart from '../components/IntradayChart.vue'
 import KLineChart from '../components/KLineChart.vue'
 
 const route = useRoute()
@@ -25,11 +28,19 @@ const code = computed(() => String(route.params.code ?? '600519'))
 const quote = ref<StockQuote | null>(null)
 const kline = ref<{ dates: string[]; kline: number[][]; volumes: number[] } | null>(null)
 const klineError = ref(false)
+const intraday = ref<IntradayData | null>(null)
+const intradayError = ref(false)
+const chartTab = ref<'intraday' | 'kline'>('intraday')
+const chartTabs = [
+  { key: 'intraday', label: '分时' },
+  { key: 'kline', label: '日K' },
+] as const
 const dashboard = ref<DecisionDashboard | null>(null)
 const analyzing = ref(false)
 const inWatchlist = ref(false)     // 是否已在自选股
 const watchToggling = ref(false)  // 按钮防重复点击
 const watchMsg = ref('')          // 操作反馈
+let pollTimer: number | undefined  // 分时轮询定时器
 
 async function loadKline() {
   klineError.value = false
@@ -39,6 +50,19 @@ async function loadKline() {
   } catch {
     // 数据源降级 / 超时：标记为错误，模板展示统一降级卡片（避免永久 loading）
     klineError.value = true
+  }
+}
+
+async function loadIntraday() {
+  intradayError.value = false
+  try {
+    const data = await getStockIntraday(code.value)
+    // 防御：后端未升级时该路径会落到 SPA 回退返回 index.html（200 + HTML）
+    if (!Array.isArray(data?.times)) throw new Error('invalid intraday payload')
+    intraday.value = data
+  } catch {
+    // 与K线一致：数据源降级/超时时走模板里的统一降级卡片，避免永久 loading
+    intradayError.value = true
   }
 }
 
@@ -99,13 +123,33 @@ async function toggleWatch() {
 }
 
 onMounted(async () => {
-  await Promise.all([loadKline(), loadQuote(), loadAnalysis(), loadWatchStatus()])
+  await Promise.all([loadKline(), loadIntraday(), loadQuote(), loadAnalysis(), loadWatchStatus()])
+  // 分时/报价逐分钟刷新（后端接口与前端 GET 缓存均为 10s 级，60s 足够）
+  pollTimer = window.setInterval(() => {
+    if (chartTab.value !== 'intraday' || document.hidden) return
+    loadIntraday()
+    loadQuote()
+  }, 60_000)
+})
+
+onUnmounted(() => {
+  if (pollTimer) window.clearInterval(pollTimer)
+  pollTimer = undefined
 })
 
 // 同组件内切换股票（路由参数变化）时重新加载全部数据
 watch(code, async () => {
   watchMsg.value = ''
-  await Promise.all([loadKline(), loadQuote(), loadAnalysis(), loadWatchStatus()])
+  await Promise.all([loadKline(), loadIntraday(), loadQuote(), loadAnalysis(), loadWatchStatus()])
+})
+
+/** 分时图副标题：交易日期 + 昨收基准。 */
+const intradayHint = computed(() => {
+  const d = intraday.value
+  if (!d) return '分时走势'
+  const parts = [d.date ?? '最近交易日']
+  if (d.prev_close != null) parts.push(`昨收 ${d.prev_close.toFixed(2)}`)
+  return parts.join(' · ')
 })
 
 const pctTone = computed(() => {
@@ -177,30 +221,74 @@ function statusColor(status: string) {
     </div>
 
     <div class="grid grid-cols-1 gap-5 xl:grid-cols-4">
-      <!-- K线图 -->
+      <!-- 分时 / 日K 走势 -->
       <div class="glass-card p-4 xl:col-span-3">
-        <div class="mb-2 flex items-center justify-between">
-          <h3 class="text-subheading">日K线走势</h3>
-          <span class="text-[11px] text-content-faint">MA5 天蓝 · MA10 黄 · MA20 紫</span>
+        <div class="mb-2 flex flex-wrap items-center justify-between gap-2">
+          <div class="flex items-center gap-1 rounded-lg border border-base-600 bg-base-700/40 p-0.5">
+            <button
+              v-for="tab in chartTabs"
+              :key="tab.key"
+              class="rounded-md px-3 py-1 text-[12px] font-medium transition-colors"
+              :class="
+                chartTab === tab.key
+                  ? 'bg-base-600 text-content'
+                  : 'text-content-muted hover:text-content'
+              "
+              @click="chartTab = tab.key"
+            >
+              {{ tab.label }}
+            </button>
+          </div>
+          <span class="text-[11px] text-content-faint">
+            {{ chartTab === 'intraday' ? intradayHint : 'MA5 天蓝 · MA10 黄 · MA20 紫' }}
+          </span>
         </div>
-        <KLineChart
-          v-if="kline"
-          :dates="kline.dates"
-          :kline="kline.kline"
-          :volumes="kline.volumes"
-          height="440px"
-        />
-        <div
-          v-else-if="klineError"
-          class="flex h-[440px] flex-col items-center justify-center gap-2 text-content-faint"
-        >
-          <AlertTriangle class="h-8 w-8 text-warn" />
-          <span class="text-[13px]">行情数据源暂不可用</span>
-          <span class="text-[11px]">K线加载失败，请稍后重试（已尽量使用本地缓存）</span>
-        </div>
-        <div v-else class="flex h-[440px] items-center justify-center text-content-faint">
-          K线加载中...
-        </div>
+
+        <!-- 分时图 -->
+        <template v-if="chartTab === 'intraday'">
+          <IntradayChart
+            v-if="intraday"
+            :times="intraday.times"
+            :prices="intraday.prices"
+            :avg-prices="intraday.avg_prices"
+            :volumes="intraday.volumes"
+            :prev-close="intraday.prev_close"
+            height="440px"
+          />
+          <div
+            v-else-if="intradayError"
+            class="flex h-[440px] flex-col items-center justify-center gap-2 text-content-faint"
+          >
+            <AlertTriangle class="h-8 w-8 text-warn" />
+            <span class="text-[13px]">行情数据源暂不可用</span>
+            <span class="text-[11px]">分时数据加载失败，可切换「日K」查看历史走势</span>
+          </div>
+          <div v-else class="flex h-[440px] items-center justify-center text-content-faint">
+            分时加载中...
+          </div>
+        </template>
+
+        <!-- 日K线 -->
+        <template v-else>
+          <KLineChart
+            v-if="kline"
+            :dates="kline.dates"
+            :kline="kline.kline"
+            :volumes="kline.volumes"
+            height="440px"
+          />
+          <div
+            v-else-if="klineError"
+            class="flex h-[440px] flex-col items-center justify-center gap-2 text-content-faint"
+          >
+            <AlertTriangle class="h-8 w-8 text-warn" />
+            <span class="text-[13px]">行情数据源暂不可用</span>
+            <span class="text-[11px]">K线加载失败，请稍后重试（已尽量使用本地缓存）</span>
+          </div>
+          <div v-else class="flex h-[440px] items-center justify-center text-content-faint">
+            K线加载中...
+          </div>
+        </template>
       </div>
 
       <!-- LLM 决策仪表盘 -->

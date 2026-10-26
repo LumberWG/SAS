@@ -6,7 +6,7 @@ from datetime import datetime
 
 from fastapi import APIRouter, Query
 
-from app.api.utils import with_disclaimer
+from app.api.utils import with_disclaimer, with_realtime
 from app.config import get_settings
 from app.data.cache import db
 from app.monitor import is_trading_hours, is_trading_day
@@ -17,10 +17,14 @@ router = APIRouter(prefix="/advisory", tags=["智能建议"])
 
 @router.get("/buy")
 def buy_recommendations() -> dict:
-    """建议买入列表（今日最新批次：盘中 > 开盘前）。"""
+    """建议买入列表（今日最新批次：盘中 > 开盘前）。
+
+    ``items[].price`` 是建议生成时的价格；``items[].realtime`` 是当前行情，
+    前端优先展示 realtime，避免看到几分钟（或昨天）的价格。
+    """
     items = _latest_by_action(("intraday", "premarket"), "buy")
     return with_disclaimer({
-        "items": items,
+        "items": with_realtime(items),
         "batch": _batch_of(items),
         "updated_at": _latest_time(items),
     })
@@ -28,10 +32,10 @@ def buy_recommendations() -> dict:
 
 @router.get("/sell")
 def sell_recommendations() -> dict:
-    """建议卖出列表（今日最新批次）。"""
+    """建议卖出列表（今日最新批次，附带当前行情）。"""
     items = _latest_by_action(("intraday", "premarket"), "sell")
     return with_disclaimer({
-        "items": items,
+        "items": with_realtime(items),
         "batch": _batch_of(items),
         "updated_at": _latest_time(items),
     })
@@ -39,11 +43,11 @@ def sell_recommendations() -> dict:
 
 @router.get("/focus")
 def focus_list() -> dict:
-    """明日关注（盘后生成，含生成日期）。"""
+    """明日关注（盘后生成，含生成日期；附带当前行情）。"""
     items = db.list_recommendations("focus", "focus")
     batch = db.latest_batch("focus")
     return with_disclaimer({
-        "items": items,
+        "items": with_realtime(items),
         "batch": batch,
         # focus_2026-10-21 → 对应 2026-10-22 开盘关注
         "for_date": batch.split("_", 1)[1] if batch else None,

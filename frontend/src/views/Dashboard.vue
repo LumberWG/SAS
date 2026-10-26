@@ -294,7 +294,12 @@ const breadthOption = computed(() => {
       <div class="glass-card p-5 xl:col-span-2">
         <div class="mb-3 flex items-center justify-between">
           <h3 class="text-subheading">涨跌家数</h3>
-          <span class="text-[11px] text-content-faint">共 {{ overview?.breadth.total ?? 0 }} 只</span>
+          <span class="text-[11px] text-content-faint">
+            共 {{ overview?.breadth.total ?? 0 }} 只
+            <template v-if="(overview?.breadth.untraded ?? 0) > 0">
+              （未成交 {{ overview?.breadth.untraded }}）
+            </template>
+          </span>
         </div>
         <v-chart v-if="overview" :option="breadthOption" style="height: 200px" autoresize />
       </div>

@@ -17,6 +17,13 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
     exit 1
 }
 
+# ---------- 0b. Transcript ----------
+# 静默部署（计划任务 SASDeploy）没有窗口，输出同时落盘，事后可查
+$Root   = Split-Path -Parent $MyInvocation.MyCommand.Path
+$LogDir = Join-Path $Root 'data\logs'
+if (-not (Test-Path $LogDir)) { New-Item -ItemType Directory -Path $LogDir -Force | Out-Null }
+try { Start-Transcript -Path (Join-Path $LogDir 'deploy.log') -Append -Force | Out-Null } catch { }
+
 # ---------- 1. Build frontend ----------
 # NOTE: do NOT set $ErrorActionPreference='Stop' globally - npm emits build
 # warnings on stderr which PowerShell 5.1 would treat as a terminating
@@ -148,21 +155,21 @@ if (-not $bizOk) {
 # Public URL check (fixed subdomain; change if yours differs)
 # 2026-10-25: mysas tunnel is pinned to region cn_top -> *.cpolar.top
 $PublicUrl = "https://mysas.cpolar.top"
-# PS 5.1 defaults to TLS 1.0/1.1 and the handshake against cpolar fails with
-# "connection closed" - force TLS 1.2 before the request.
-try {
-    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
-} catch {
-    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+# NOTE: Invoke-WebRequest from an *elevated* PS 5.1 session fails the TLS
+# handshake against cpolar ("The underlying connection was closed") even with
+# Tls12 forced and all certs trusted; curl.exe succeeds in both elevated and
+# normal sessions. Use curl.exe here.
+$pubCode = ''
+if (Get-Command curl.exe -ErrorAction SilentlyContinue) {
+    $pubCode = & curl.exe -s -o NUL -w '%{http_code}' --max-time 20 ($PublicUrl + '/api/health')
 }
-# PS 5.1: Invoke-WebRequest has no -SkipCertificateCheck; trust all certs for this check
-[Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
-try {
-    $r2 = Invoke-WebRequest -Uri "$PublicUrl/api/health" -UseBasicParsing -TimeoutSec 20
-    Write-Host ("Public    : HTTP {0} ({1})" -f $r2.StatusCode, $PublicUrl) -ForegroundColor Green
-} catch {
-    Write-Host ("Public    : FAILED - {0}" -f $_.Exception.Message) -ForegroundColor Yellow
+if ($pubCode -eq '200') {
+    Write-Host ("Public    : HTTP 200 ({0})" -f $PublicUrl) -ForegroundColor Green
+} elseif ($pubCode) {
+    Write-Host ("Public    : HTTP {0} ({1})" -f $pubCode, $PublicUrl) -ForegroundColor Yellow
     Write-Host "(cpolar tunnel may be down; check cpolar service)"
+} else {
+    Write-Host ("Public    : SKIPPED ({0}) - curl.exe not found" -f $PublicUrl) -ForegroundColor Yellow
 }
 Write-Host "=========================================="
 Write-Host "Deploy complete. Remember: git commit/push is manual."

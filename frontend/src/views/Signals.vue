@@ -144,15 +144,24 @@ function goDetail(code: string) {
   router.push(`/stock/${code}`)
 }
 
+function fmtPct(v: number | null | undefined): string {
+  return v == null ? '--' : `${v > 0 ? '+' : ''}${v.toFixed(2)}%`
+}
+
+function pctClass(v: number | null | undefined): string {
+  if (v == null || v === 0) return 'text-content-faint'
+  return v > 0 ? 'text-up' : 'text-down'
+}
+
 onMounted(async () => {
   loaded = true
   await Promise.all([loadWatchlist(), loadSignals()])
 })
 
-// keep-alive 缓存下再次进入时刷新（扫描可能刚写了新的程序自选）
+// keep-alive 缓存下再次进入时刷新（扫描可能刚写了新的程序自选 / 行情已变化）
 onActivated(async () => {
   if (!loaded) return
-  await loadWatchlist()
+  await Promise.all([loadWatchlist(), loadSignals()])
 })
 </script>
 
@@ -343,8 +352,15 @@ onActivated(async () => {
           </div>
           <div class="mt-2 flex items-center justify-between">
             <span class="text-[11px] leading-relaxed text-content-muted">{{ sig.reason }}</span>
-            <span class="font-num shrink-0 text-[12px] text-content">
-              {{ sig.price.toFixed(2) }}
+            <span
+              class="font-num shrink-0 text-[12px] text-content"
+              :title="`信号触发价 ${sig.price.toFixed(2)}`"
+            >
+              <!-- 现价（后端按实时快照附带），无快照时显示触发价 -->
+              <span v-if="sig.realtime" :class="pctClass(sig.realtime.pct_change)">
+                {{ sig.realtime.price.toFixed(2) }} {{ fmtPct(sig.realtime.pct_change) }}
+              </span>
+              <span v-else>{{ sig.price.toFixed(2) }}</span>
               <span class="ml-2 text-down">止损 {{ sig.stop_loss?.toFixed(2) ?? '--' }}</span>
               <span class="ml-2 text-up">目标 {{ sig.target_price?.toFixed(2) ?? '--' }}</span>
             </span>

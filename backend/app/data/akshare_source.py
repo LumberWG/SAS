@@ -25,6 +25,7 @@ from app.data.fallback import (
     sina_kline,
     sina_quotes,
     tencent_kline,
+    tencent_minute,
     xueqiu_kline,
 )
 from app.net import apply_data_network_settings
@@ -127,6 +128,52 @@ def _normalize_date(value: str) -> str:
     """日期归一化为 YYYY-MM-DD（兼容 YYYYMMDD 输入）。"""
     value = str(value).replace("-", "").replace("/", "")
     return f"{value[:4]}-{value[4:6]}-{value[6:8]}" if len(value) == 8 else value
+
+
+#: 分时数据统一字段
+_INTRADAY_COLUMNS = ["date", "time", "price", "avg_price", "volume", "amount"]
+
+
+def _ticks_to_minutes(df: pd.DataFrame) -> pd.DataFrame:
+    """东财逐笔成交 → 分钟聚合（价格取该分钟最后成交价）。
+
+    ``stock_intraday_em`` 只给逐笔价格与手数（无交易日、无成交额），
+    这里按分钟聚合，并用累计成交额推算当日均价。
+    集合竞价（09:15-09:25）的挂撤单价格会污染分时曲线，统一从 09:30 起。
+    """
+    if df is None or df.empty:
+        return pd.DataFrame(columns=_INTRADAY_COLUMNS)
+    df = df.rename(columns={"时间": "time", "成交价": "price", "手数": "volume"})
+    if not {"time", "price", "volume"} <= set(df.columns):
+        return pd.DataFrame(columns=_INTRADAY_COLUMNS)
+
+    df = df.copy()
+    df["time"] = df["time"].astype(str).str[-8:]  # 兼容带日期的时间戳
+    df["price"] = pd.to_numeric(df["price"], errors="coerce")
+    df["volume"] = pd.to_numeric(df["volume"], errors="coerce").fillna(0.0)
+    df = df.dropna(subset=["price"])
+    df = df[(df["time"] >= "09:30:00") & (df["price"] > 0)]
+    if df.empty:
+        return pd.DataFrame(columns=_INTRADAY_COLUMNS)
+
+    df["minute"] = df["time"].str[:5]
+    df["amount"] = df["price"] * df["volume"] * 100  # 手 → 股
+    grouped = df.groupby("minute", sort=True).agg(
+        price=("price", "last"),
+        volume=("volume", "sum"),
+        amount=("amount", "sum"),
+    )
+    cum_volume = grouped["volume"].cumsum()
+    cum_amount = grouped["amount"].cumsum()
+    grouped["avg_price"] = (
+        cum_amount / (cum_volume.where(cum_volume > 0) * 100)
+    ).round(3)
+    grouped = grouped.reset_index().rename(columns={"minute": "time"})
+    grouped["date"] = datetime.now().strftime("%Y-%m-%d")
+    grouped["price"] = grouped["price"].round(3)
+    grouped["volume"] = grouped["volume"].round(2)
+    grouped["amount"] = grouped["amount"].round(2)
+    return grouped[_INTRADAY_COLUMNS].reset_index(drop=True)
 
 
 class AkshareDataSource(BaseDataSource):
@@ -338,6 +385,25 @@ class AkshareDataSource(BaseDataSource):
                 df[col] = pd.to_numeric(df[col], errors="coerce")
         df = df.sort_values("date").reset_index(drop=True)
         return df
+
+    # ------------------------------------------------------------------
+    # 分时（当日逐分钟）
+    # ------------------------------------------------------------------
+    def get_intraday(self, code: str) -> pd.DataFrame:
+        """单只股票当日分时（逐分钟价格 / 当日均价 / 成交量）。
+
+        主源东财逐笔成交（聚合为分钟）；失败降级腾讯分时——
+        腾讯源自带累计成交量与成交额，均价口径一致，且收盘后仍返回上一交易日。
+        """
+        try:
+            df = self._call("stock_intraday_em", symbol=code, timeout=8.0, retries=0)
+            minute = _ticks_to_minutes(df)
+            if not minute.empty:
+                return minute
+            raise DataSourceError("akshare.stock_intraday_em 返回空数据")
+        except Exception as exc:  # noqa: BLE001 - 数据源异常统一降级
+            logger.warning("东方财富分时不可用(%s)，降级为腾讯分时 code=%s", exc, code)
+        return tencent_minute(code)
 
     # ------------------------------------------------------------------
     # 降级K线链

@@ -52,6 +52,21 @@ class BaseDataSource(ABC):
         ...
 
     @abstractmethod
+    def get_intraday(self, code: str) -> pd.DataFrame:
+        """获取单只股票当日分时（逐分钟），用于分时图。
+
+        Args:
+            code: 6位股票代码，如 ``"600000"``
+
+        Returns:
+            按时间升序的 DataFrame，列: ``date``(交易日 YYYY-MM-DD),
+            ``time``(HH:MM), ``price``(该分钟最新价),
+            ``avg_price``(当日累计均价), ``volume``(该分钟成交量,手),
+            ``amount``(该分钟成交额,元)
+        """
+        ...
+
+    @abstractmethod
     def get_index_snapshot(self) -> pd.DataFrame:
         """获取主要指数实时快照（上证/深证/创业板/科创50 等）。
 

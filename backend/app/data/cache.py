@@ -168,6 +168,12 @@ CREATE TABLE IF NOT EXISTS backtest_runs (
     equity_curve TEXT,   -- JSON：[{date, equity}, ...]
     created_at   TEXT NOT NULL
 );
+-- 运行时状态（交易模式等少量键值，重启后保留）
+CREATE TABLE IF NOT EXISTS app_state (
+    key        TEXT PRIMARY KEY,
+    value      TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 """
 
 
@@ -195,6 +201,20 @@ class Database:
         with self._lock, self._connect() as conn:
             conn.executescript(_SCHEMA_SQL)
             self._migrate_watchlist_source(conn)
+            self._dedupe_signals(conn)
+
+    @staticmethod
+    def _dedupe_signals(conn: sqlite3.Connection) -> None:
+        """清理信号表里的重复行（同一股票+策略+交易日只保留最新一条）。
+
+        每天多轮扫描会重复命中同一只股票，历史信号流水会被重复行刷屏。
+        写入侧已在 save_signals 里改为「同日覆盖」，这里只清理历史残留。
+        不建唯一索引：滚动升级期间旧进程仍可能重复插入，建索引会让其写入报错。
+        """
+        conn.execute(
+            "DELETE FROM signals WHERE id NOT IN ("
+            "  SELECT MAX(id) FROM signals GROUP BY code, strategy, scan_date)"
+        )
 
     @staticmethod
     def _migrate_watchlist_source(conn: sqlite3.Connection) -> None:
@@ -208,6 +228,26 @@ class Database:
         conn.execute(
             "UPDATE watchlist SET source='auto' WHERE note LIKE '%自动加入%'"
         )
+
+    # ---------------- 运行时状态 ----------------
+
+    def get_state(self, key: str, default: str | None = None) -> str | None:
+        """读取运行时状态（少量键值对，重启后保留）。"""
+        with self._lock, self._connect() as conn:
+            row = conn.execute(
+                "SELECT value FROM app_state WHERE key=?", (key,)
+            ).fetchone()
+        return row["value"] if row else default
+
+    def set_state(self, key: str, value: str) -> None:
+        """写入运行时状态。"""
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                "INSERT INTO app_state(key, value, updated_at) VALUES(?,?,?)"
+                " ON CONFLICT(key) DO UPDATE SET value=excluded.value,"
+                " updated_at=excluded.updated_at",
+                (key, str(value), _now()),
+            )
 
     # ---------------- 自选股 ----------------
 
@@ -290,22 +330,27 @@ class Database:
     # ---------------- 策略信号 ----------------
 
     def save_signals(self, signals: list[dict[str, Any]], scan_date: str) -> None:
-        """批量保存一轮扫描的命中信号。"""
+        """批量保存一轮扫描的命中信号（同日同股同策略覆盖，写入最新触发数据）。"""
         if not signals:
             return
         with self._lock, self._connect() as conn:
-            conn.executemany(
-                "INSERT INTO signals(code, name, strategy, price, reason, stop_loss,"
-                " target_price, scan_date, created_at) VALUES(?,?,?,?,?,?,?,?,?)",
-                [
+            for s in signals:
+                # 先删同日同股同策略的旧记录再插入：等价于覆盖，
+                # 无需唯一索引（滚动升级期间旧进程写入不会因约束报错）
+                conn.execute(
+                    "DELETE FROM signals WHERE code=? AND strategy=? AND scan_date=?",
+                    (s["code"], s["strategy"], scan_date),
+                )
+                conn.execute(
+                    "INSERT INTO signals(code, name, strategy, price, reason,"
+                    " stop_loss, target_price, scan_date, created_at)"
+                    " VALUES(?,?,?,?,?,?,?,?,?)",
                     (
                         s["code"], s.get("name", ""), s["strategy"], s.get("price"),
                         s.get("reason", ""), s.get("stop_loss"), s.get("target_price"),
                         scan_date, _now(),
-                    )
-                    for s in signals
-                ],
-            )
+                    ),
+                )
 
     def list_signals(
         self, code: str | None = None, limit: int = 100

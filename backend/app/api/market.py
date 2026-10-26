@@ -120,11 +120,17 @@ async def market_overview() -> dict:
         and "pct_change" in snapshot.columns and "amount" in snapshot.columns
     )
     if snapshot_usable:
-        pct = snapshot["pct_change"].fillna(0.0)
+        # 未开盘/停牌的行没有有效成交价（pct_change 为 NaN），
+        # 它们不能算进涨跌家数，否则会显示成「全部跌停」。
+        pct_all = snapshot["pct_change"]
+        valid = pct_all.notna()
+        pct = pct_all[valid]
         up = int((pct > 0).sum())
         down = int((pct < 0).sum())
         flat = int((pct == 0).sum())
+        traded = int(valid.sum())
         total = len(snapshot)
+        untraded = total - traded
 
         # 涨停/跌停家数：按各板块涨跌停幅度判断（留 0.1% 误差容忍）
         limit_up = 0
@@ -140,22 +146,34 @@ async def market_overview() -> dict:
 
         total_amount = float(snapshot["amount"].fillna(0).sum())
     else:
-        up = down = flat = total = limit_up = limit_down = 0
+        up = down = flat = untraded = total = limit_up = limit_down = 0
+        traded = 0
         total_amount = 0.0
 
-    temperature = _market_temperature(up, down, flat, limit_up, total)
+    # 温度按「有成交的股票」计算；全部未成交（未开盘）时回落到中性 50
+    temperature = _market_temperature(up, down, flat, limit_up, traded)
     sentiment = classify_sentiment(temperature)
+
+    def _fnum(row, col: str) -> float | None:
+        v = getattr(row, col, float("nan"))
+        return None if pd.isna(v) else float(v)
 
     indices = []
     if indices_df is not None and not indices_df.empty:
         for row in indices_df.itertuples():
+            price = _fnum(row, "price")
+            pct = _fnum(row, "pct_change")
+            change = _fnum(row, "change")
+            # 未开盘时指数最新价为 0，涨跌幅会算成 -100%，这里统一判为无效
+            if price is not None and price <= 0:
+                price = pct = change = None
             indices.append({
                 "symbol": getattr(row, "symbol", None),
                 "name": getattr(row, "name", None),
-                "price": None if pd.isna(getattr(row, "price", float("nan"))) else float(row.price),
-                "pct_change": None if pd.isna(getattr(row, "pct_change", float("nan"))) else float(row.pct_change),
-                "change": None if pd.isna(getattr(row, "change", float("nan"))) else float(row.change),
-                "amount": None if pd.isna(getattr(row, "amount", float("nan"))) else float(row.amount),
+                "price": price,
+                "pct_change": pct,
+                "change": change,
+                "amount": _fnum(row, "amount"),
             })
 
     # 指数或快照任一部分不可用 → 标记部分降级（前端顶部提示）
@@ -167,6 +185,7 @@ async def market_overview() -> dict:
         "indices": indices,
         "breadth": {
             "up": up, "down": down, "flat": flat, "total": total,
+            "untraded": untraded, "traded": traded,
             "limit_up": limit_up, "limit_down": limit_down,
         },
         "total_amount": round(total_amount, 2),  # 单位：元
@@ -243,6 +262,61 @@ def stock_quote(code: str) -> dict:
         "volume_ratio": None if pd.isna(r.get("volume_ratio")) else float(r["volume_ratio"]),
         "total_mv": None if pd.isna(r.get("total_mv")) else float(r["total_mv"]),
         "float_mv": None if pd.isna(r.get("float_mv")) else float(r["float_mv"]),
+    })
+
+
+@router.get("/stocks/{code}/intraday")
+async def stock_intraday(code: str) -> dict:
+    """个股分时（逐分钟价格 / 均价 / 成交量），供详情页分时图使用。
+
+    主源东财逐笔成交聚合，失败降级腾讯分时；非交易时段返回最近交易日数据。
+    """
+    code = code.zfill(6)
+    source = get_data_source()
+    try:
+        # 限时拉取：数据源故障时最多 15s 返回 503，避免前端长时间挂起
+        df = await asyncio.wait_for(
+            asyncio.to_thread(source.get_intraday, code), timeout=15
+        )
+    except asyncio.TimeoutError:
+        raise HTTPException(status_code=503, detail="分时数据源暂时不可用（超时）") from None
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("获取分时失败 code=%s", code)
+        raise HTTPException(status_code=502, detail=f"数据源异常: {exc}") from exc
+
+    if df is None or df.empty:
+        raise HTTPException(status_code=404, detail=f"股票 {code} 暂无分时数据")
+
+    # 昨收（分时图基准线）：只读内存快照，不触发冷启动刷新
+    prev_close: float | None = None
+    try:
+        snapshot = snapshot_store.peek_snapshot()
+        if snapshot is not None and not snapshot.empty and "code" in snapshot.columns:
+            row = snapshot[snapshot["code"] == code]
+            if not row.empty and "prev_close" in snapshot.columns:
+                raw = row.iloc[0]["prev_close"]
+                if raw is not None and not pd.isna(raw) and float(raw) > 0:
+                    prev_close = float(raw)
+    except Exception as exc:  # noqa: BLE001 - 昨收缺失不影响分时曲线
+        logger.warning("分时昨收获取失败 code=%s: %s", code, exc)
+
+    def _num(value, digits: int = 3) -> float | None:
+        return None if value is None or pd.isna(value) else round(float(value), digits)
+
+    date = None
+    if "date" in df.columns:
+        dates = df["date"].dropna()
+        if not dates.empty:
+            date = str(dates.iloc[-1])
+
+    return _with_disclaimer({
+        "code": code,
+        "date": date,
+        "prev_close": prev_close,
+        "times": [str(t) for t in df["time"]],
+        "prices": [_num(v) for v in df["price"]],
+        "avg_prices": [_num(v) for v in df["avg_price"]],
+        "volumes": [0.0 if pd.isna(v) else float(v) for v in df["volume"]],
     })
 
 

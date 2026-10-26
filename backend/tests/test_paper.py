@@ -107,7 +107,10 @@ def engine(tmp_path, monkeypatch):
     # 价格：600000→10元，600001→50元
     prices = {"600000": 10.0, "600001": 50.0}
 
-    async def fake_price(code):
+    async def fake_price(code, quotes=None):
+        # 引擎新增了 prices 参数（实时撮合传入逐股报价），这里兼容两种调用
+        if quotes and quotes.get(code):
+            return quotes[code]
         return prices.get(code)
 
     monkeypatch.setattr(eng, "_latest_price", fake_price)

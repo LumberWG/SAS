@@ -88,14 +88,20 @@ const todayHitTotal = computed(() =>
   Object.values(todayHits.value).reduce((sum, n) => sum + n, 0)
 )
 
-// 本轮命中中收阳的数量
-const upCount = computed(
-  () =>
-    task.value?.hits.filter(
-      (h) =>
-        typeof h.extra?.pct_change === 'number' && (h.extra.pct_change as number) > 0
-    ).length ?? 0
+// 本轮命中的股票只数（一只股票可能命中多个策略，这里按代码去重）
+const hitStockCount = computed(
+  () => new Set((task.value?.hits ?? []).map((h) => h.code)).size
 )
+
+// 本轮命中中收阳的股票只数（按代码去重，与结果表一行一股保持一致）
+const upCount = computed(() => {
+  const upCodes = new Set<string>()
+  for (const h of task.value?.hits ?? []) {
+    const pct = h.realtime?.pct_change ?? h.extra?.pct_change
+    if (typeof pct === 'number' && pct > 0) upCodes.add(h.code)
+  }
+  return upCodes.size
+})
 
 // 当前扫描范围的显示名
 const scopeLabel = computed(
@@ -166,9 +172,34 @@ async function restoreLatest() {
     if (latest.status === 'running' || latest.status === 'pending') {
       startTicker()
       startPolling(latest.task_id)
+    } else if (latest.status === 'done') {
+      startQuoteRefresh(latest.task_id)
     }
   } catch {
     // 恢复失败静默（首次使用无历史任务）
+  }
+}
+
+// 扫描完成后定时重取任务：后端每次请求都会按最新快照富化价格，
+// 页面停留期间价格也保持实时（不改动扫描结果本身）。
+let quotePoller: number | undefined
+
+function startQuoteRefresh(taskId: string) {
+  stopQuoteRefresh()
+  quotePoller = window.setInterval(async () => {
+    if (document.hidden) return
+    try {
+      task.value = await getScanTask(taskId)
+    } catch {
+      // 静默失败：保留当前展示，下次轮询再试
+    }
+  }, 30_000)
+}
+
+function stopQuoteRefresh() {
+  if (quotePoller) {
+    window.clearInterval(quotePoller)
+    quotePoller = undefined
   }
 }
 
@@ -185,6 +216,8 @@ function startPolling(taskId: string) {
         stopPolling()
         stopTicker()
         loadKlineStatus()
+        // 完成后继续低频刷新：价格/涨跌幅随行情更新，不必重新扫描
+        if (t.status === 'done') startQuoteRefresh(taskId)
       }
     } catch {
       misses += 1
@@ -214,6 +247,7 @@ function toggleStrategy(name: string) {
 async function start() {
   if (selected.value.length === 0) return
   try {
+    stopQuoteRefresh()
     const { task_id } = await startScan(selected.value, undefined, scope.value)
     task.value = await getScanTask(task_id)
     startTicker()
@@ -254,6 +288,7 @@ function stopPolling() {
 onUnmounted(() => {
   stopPolling()
   stopStatusPolling()
+  stopQuoteRefresh()
   stopTicker()
 })
 
@@ -432,9 +467,11 @@ onMounted(async () => {
         >
           <div class="rounded-lg bg-base-700/40 p-3 text-center">
             <div class="font-num bg-gradient-to-r from-primary-light to-primary bg-clip-text text-[24px] font-bold leading-none text-transparent">
-              {{ task.hit_count }}
+              {{ hitStockCount }}
             </div>
-            <div class="mt-1 text-[11px] text-content-faint">命中信号</div>
+            <div class="mt-1 text-[11px] text-content-faint">
+              命中股票<span class="text-content-faint/70">（{{ task.hit_count }} 信号）</span>
+            </div>
           </div>
           <div class="rounded-lg bg-base-700/40 p-3 text-center">
             <div class="font-num text-[24px] font-bold leading-none text-up">

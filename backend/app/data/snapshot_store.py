@@ -76,7 +76,7 @@ class SnapshotStore:
         ):
             try:
                 if path.exists():
-                    df = pd.read_parquet(path)
+                    df = self._sanitize(pd.read_parquet(path))
                     if df is not None and not df.empty:
                         setattr(self, attr, df)
                         # 视为已过期 → 首次请求触发 SWR 后台刷新（立即返回旧）
@@ -84,6 +84,31 @@ class SnapshotStore:
                         logger.info("已加载持久化 %s（%d 行）", attr, len(df))
             except Exception:  # noqa: BLE001
                 logger.exception("加载持久化 %s 失败", attr)
+
+    @staticmethod
+    def _sanitize(df: pd.DataFrame | None) -> pd.DataFrame | None:
+        """清洗「无有效成交价」的行。
+
+        未开盘 / 集合竞价前 / 停牌时，数据源可能返回最新价 0，
+        直接用 0/昨收 算涨跌幅会得到 -100%，让全市场看起来像跌停。
+        这里把这类行的 pct_change（及 change）置为 NaN，使其不参与
+        涨跌家数与异动检测统计。
+
+        历史上被污染的持久化缓存也会在加载时被清洗。
+        """
+        if df is None or df.empty:
+            return df
+        if "price" not in df.columns or "pct_change" not in df.columns:
+            return df
+        price = pd.to_numeric(df["price"], errors="coerce")
+        mask = price.fillna(0) <= 0
+        if not bool(mask.any()):
+            return df
+        fixed = df.copy()
+        fixed.loc[mask, "pct_change"] = pd.NA
+        if "change" in fixed.columns:
+            fixed.loc[mask, "change"] = pd.NA
+        return fixed
 
     def _persist(self, path: Path, df: pd.DataFrame) -> None:
         try:
@@ -216,6 +241,7 @@ class SnapshotStore:
         """全市场实时快照（SWR：旧数据立即可用，后台刷新）。"""
 
         def store(df: pd.DataFrame) -> None:
+            df = self._sanitize(df)
             # 降级源（新浪批量）是分批抓取的，部分批次失败会返回大幅缩水的
             # 结果。这里拒绝用这种残缺数据覆盖已有完整快照，否则
             # 「成交额前 N」等依赖快照的功能会突然只覆盖很少的股票。
@@ -249,6 +275,7 @@ class SnapshotStore:
         """主要指数实时快照（SWR：旧数据立即可用，后台刷新）。"""
 
         def store(df: pd.DataFrame) -> None:
+            df = self._sanitize(df)
             self._indices = df
             self._indices_at = time.monotonic()
             self._persist(self._indices_file, df)
@@ -264,3 +291,43 @@ class SnapshotStore:
 
 # 全局单例（TTL 用独立的 snapshot_ttl 配置，与请求超时解耦）
 snapshot_store = SnapshotStore(ttl=get_settings().snapshot_ttl)
+
+
+def _num(value) -> float | None:
+    """数值转 float，NaN/None 返回 None。"""
+    if value is None:
+        return None
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return None
+    return None if result != result else result
+
+
+def quote_map() -> dict[str, dict]:
+    """把内存快照整理为 ``code → 当前行情`` 映射（只读，不触发刷新）。
+
+    用途：数据库 / 扫描结果里存的是**记录时刻**的行情，列表展示时要补一条
+    当前价，否则用户刷新页面看到的还是几分钟前（甚至昨天）的价格。
+
+    Returns:
+        ``{code: {price, pct_change, volume_ratio, amount}}``，
+        仅含有有效成交价（未停牌/未开盘）的股票；无缓存时返回空 dict。
+    """
+    snapshot = snapshot_store.peek_snapshot()
+    if snapshot is None or snapshot.empty or "price" not in snapshot.columns:
+        return {}
+
+    quotes: dict[str, dict] = {}
+    for row in snapshot.itertuples(index=False):
+        code = str(getattr(row, "code", "") or "")
+        price = _num(getattr(row, "price", None))
+        if not code or price is None or price <= 0:
+            continue
+        quotes[code] = {
+            "price": price,
+            "pct_change": _num(getattr(row, "pct_change", None)),
+            "volume_ratio": _num(getattr(row, "volume_ratio", None)),
+            "amount": _num(getattr(row, "amount", None)),
+        }
+    return quotes

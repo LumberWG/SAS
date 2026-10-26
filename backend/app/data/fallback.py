@@ -227,6 +227,93 @@ def sina_kline(symbol: str, datalen: int = 300) -> pd.DataFrame:
 
 
 # ----------------------------------------------------------------------
+# 分时（腾讯逐分钟）
+# ----------------------------------------------------------------------
+#: 腾讯分时可用主机（与日K同源，web 主机在部分网络返回 501）
+_TENCENT_MINUTE_ENDPOINTS = (
+    "https://proxy.finance.qq.com/ifzqgtimg/appstock/app/minute/query",
+    "https://web.ifzq.gtimg.cn/appstock/app/minute/query",
+)
+_INTRADAY_COLUMNS = ["date", "time", "price", "avg_price", "volume", "amount"]
+
+
+def _date_str(raw: str) -> str:
+    """YYYYMMDD → YYYY-MM-DD（无法识别时原样返回）。"""
+    raw = str(raw or "").strip()
+    if len(raw) == 8 and raw.isdigit():
+        return f"{raw[:4]}-{raw[4:6]}-{raw[6:]}"
+    return raw
+
+
+def tencent_minute(code: str) -> pd.DataFrame:
+    """腾讯分时数据（当日逐分钟价格 + 累计量额）。
+
+    接口: .../appstock/app/minute/query?code=sh600519
+    返回 ``data[symbol].data.data`` 为字符串数组，每行:
+        "0930 1325.40 905 119948700.00"
+    即 时间 价格 **累计成交量(手)** **累计成交额(元)**。
+    这里换算为「分钟成交量」与「当日累计均价」，与东财逐笔聚合口径一致。
+
+    收盘后仍返回最近一个交易日的数据，因此非交易时段分时图也能展示。
+    """
+    symbol = code_to_symbol(code)
+    rows: list = []
+    date = ""
+    errors: list[Exception] = []
+    for url in _TENCENT_MINUTE_ENDPOINTS:
+        try:
+            data = _get_json(url, {"code": symbol}, timeout=8.0)
+        except Exception as exc:  # noqa: BLE001 - 换下一个主机
+            errors.append(exc)
+            continue
+        payload = ((data.get("data") or {}).get(symbol) or {}).get("data") or {}
+        rows = payload.get("data") or []
+        date = _date_str(payload.get("date") or "")
+        if rows:
+            break
+    if not rows:
+        if errors:
+            raise errors[0]
+        return pd.DataFrame(columns=_INTRADAY_COLUMNS)
+
+    records: list[dict] = []
+    prev_volume = 0.0    # 上一分钟的累计成交量
+    prev_amount = 0.0    # 上一分钟的累计成交额
+    for item in rows:
+        parts = str(item).split()
+        if len(parts) < 3:
+            continue
+        try:
+            price = float(parts[1])
+            cum_volume = float(parts[2])
+            cum_amount = float(parts[3]) if len(parts) > 3 else None
+        except ValueError:
+            continue
+        volume = max(cum_volume - prev_volume, 0.0)
+        prev_volume = cum_volume
+        if cum_amount is not None:
+            amount = max(cum_amount - prev_amount, 0.0)
+            total_amount = cum_amount
+        else:
+            # 源缺成交额时按成交价估算（只影响均价曲线，不影响价格）
+            amount = price * volume * 100
+            total_amount = prev_amount + amount
+        prev_amount = total_amount
+        hhmm = parts[0]
+        records.append({
+            "date": date,
+            "time": f"{hhmm[:2]}:{hhmm[2:4]}",
+            "price": price,
+            "avg_price": (
+                round(total_amount / (cum_volume * 100), 3) if cum_volume > 0 else None
+            ),
+            "volume": round(volume, 2),
+            "amount": round(amount, 2),
+        })
+    return pd.DataFrame(records, columns=_INTRADAY_COLUMNS)
+
+
+# ----------------------------------------------------------------------
 # 雪球K线（需 cookie 握手，返回真实成交额）
 # ----------------------------------------------------------------------
 _XUEQIU_HOME = "https://xueqiu.com/hq"
@@ -579,13 +666,21 @@ def sina_quotes(symbols: list[str]) -> pd.DataFrame:
                 amount = float(fields[9])
             except (ValueError, IndexError):
                 continue
-            pct_change = (
-                round((price - prev_close) / prev_close * 100, 2)
-                if prev_close else None
-            )
+            # 未开盘/集合竞价前/停牌时新浪返回「最新价 = 0」，
+            # 此时用 0/昨收 会算出 -100%（把全市场误判成跌停），
+            # 因此无有效成交价时涨跌幅与涨跌额一律置 None。
+            if price <= 0:
+                pct_change = None
+                change = None
+            else:
+                pct_change = (
+                    round((price - prev_close) / prev_close * 100, 2)
+                    if prev_close else None
+                )
+                change = round(price - prev_close, 2)
             records.append({
                 "code": symbol[2:], "name": name, "price": price,
-                "pct_change": pct_change, "change": round(price - prev_close, 2),
+                "pct_change": pct_change, "change": change,
                 "open": open_, "high": high, "low": low, "prev_close": prev_close,
                 "volume": volume, "amount": amount,
             })

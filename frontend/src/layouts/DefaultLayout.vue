@@ -34,11 +34,26 @@ const navItems = [
 
 // 顶栏时钟
 const now = ref('')
+// 市场阶段：未开盘 / 集合竞价 / 交易中 / 午间休市 / 已收盘 / 休市
+const phase = ref('')
 let timer: number | undefined
+
+function computePhase(d: Date): string {
+  const wd = d.getDay()
+  if (wd === 0 || wd === 6) return '休市'
+  const m = d.getHours() * 60 + d.getMinutes()
+  if (m < 9 * 60 + 15) return '未开盘'
+  if (m < 9 * 60 + 30) return '集合竞价'
+  if (m <= 11 * 60 + 30) return '交易中'
+  if (m < 13 * 60) return '午间休市'
+  if (m <= 15 * 60) return '交易中'
+  return '已收盘'
+}
 
 function tick() {
   const d = new Date()
   now.value = d.toLocaleTimeString('zh-CN', { hour12: false })
+  phase.value = computePhase(d)
 }
 
 onMounted(() => {
@@ -50,7 +65,7 @@ onUnmounted(() => {
   if (timer) window.clearInterval(timer)
 })
 
-const statusText = computed(() => (market.trading ? '交易中' : '已收盘'))
+const statusText = computed(() => phase.value || (market.trading ? '交易中' : '已收盘'))
 </script>
 
 <template>

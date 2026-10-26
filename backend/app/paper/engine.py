@@ -13,11 +13,11 @@
   6. 成交价：执行时刻的最新价（实时快照），快照不可用时
      退化用最近一根K线收盘价；
   7. 止盈止损：默认止损=成本-8%、止盈=成本+20%（可由调用方覆盖），
-     每日收盘检查触发。
+     盘中由实时撮合逐 tick 检查（收盘结算时再兜底检查一次）。
 
 调度联动（scheduler）:
-  - 开盘分析/盘中分析产生 buy/sell 建议后调用 execute_recommendations；
-  - 每日收盘调用 settle() 记录净值并检查止盈止损。
+  - 建议产生后进入 LiveTrader 队列，由 paper_tick（默认 5s）实时成交；
+  - 每日收盘调用 settle() 记录净值快照。
 """
 from __future__ import annotations
 
@@ -76,8 +76,16 @@ class PaperEngine:
             logger.info("模拟账户初始化：%.0f 元", self.settings.paper_initial_capital)
         return account
 
-    async def _latest_price(self, code: str) -> float | None:
-        """最新价：实时快照优先，失败时退化K线收盘价。"""
+    async def _latest_price(
+        self, code: str, prices: dict[str, float] | None = None
+    ) -> float | None:
+        """最新价：调用方给定报价 > 实时快照 > K线收盘价。
+
+        ``prices`` 供实时撮合使用：一次批量请求拿到的逐股最新价，
+        避免每只股票都去切全市场快照（慢且滞后）。
+        """
+        if prices and code in prices:
+            return float(prices[code])
         try:
             from app.data.snapshot_store import snapshot_store
 
@@ -116,12 +124,13 @@ class PaperEngine:
     # 信号执行（核心）
     # ------------------------------------------------------------------
     async def execute_recommendations(
-        self, recommendations: list
+        self, recommendations: list, prices: dict[str, float] | None = None
     ) -> list[TradeResult]:
         """执行一批买卖建议（智能建议引擎的输出）。
 
         Args:
             recommendations: Recommendation 对象列表（action/price 等字段）
+            prices: 可选的逐股最新价（实时撮合传入），缺省时内部取最新价
 
         Returns:
             执行结果列表（含 skip 的原因）
@@ -134,7 +143,7 @@ class PaperEngine:
         account = db.get_paper_account()
         positions = {p["code"]: p for p in db.list_paper_positions()}
         cash = float(account["cash"])
-        total_asset = await self.total_asset()
+        total_asset = await self.total_asset(prices)
         today = datetime.now().strftime("%Y-%m-%d")
 
         results: list[TradeResult] = []
@@ -154,7 +163,7 @@ class PaperEngine:
                     rec.code, pos["name"], "skip", 0,
                     0.0, 0.0, 0.0, "T+1 当日买入不可卖"))
                 continue
-            price = await self._latest_price(rec.code)
+            price = await self._latest_price(rec.code, prices)
             if price is None:
                 results.append(TradeResult(
                     rec.code, pos["name"], "skip", 0,
@@ -186,7 +195,7 @@ class PaperEngine:
                     rec.code, getattr(rec, "name", ""), "skip", 0,
                     0.0, 0.0, 0.0, f"持仓已满({max_positions}只)"))
                 continue
-            price = await self._latest_price(rec.code)
+            price = await self._latest_price(rec.code, prices)
             if price is None or price <= 0:
                 results.append(TradeResult(
                     rec.code, getattr(rec, "name", ""), "skip", 0,
@@ -226,10 +235,110 @@ class PaperEngine:
         return results
 
     # ------------------------------------------------------------------
+    # 手动下单（模拟盘）
+    # ------------------------------------------------------------------
+    async def place_order(
+        self,
+        code: str,
+        side: str,
+        shares: int | None = None,
+        amount: float | None = None,
+        name: str = "",
+        price: float | None = None,
+        reason: str = "手动下单",
+    ) -> TradeResult:
+        """手动下单：按实时价立即成交（不受自动交易开关影响）。
+
+        Args:
+            side: ``buy`` / ``sell``
+            shares: 指定股数（买入向下取整到手；卖出留空=全部）
+            amount: 买入金额（元），优先于 shares
+            price: 指定成交价，缺省取最新价
+        """
+        self.ensure_account()
+        today = datetime.now().strftime("%Y-%m-%d")
+
+        if not name:
+            name = next(
+                (w["name"] for w in db.list_watchlist() if w["code"] == code), code
+            )
+
+        if price is None or price <= 0:
+            price = await self._latest_price(code)
+        if price is None or price <= 0:
+            return TradeResult(code, name, "skip", 0, 0.0, 0.0, 0.0, "取价失败")
+
+        account = db.get_paper_account()
+        cash = float(account["cash"])
+
+        # ---- 卖出 ----
+        if side == "sell":
+            pos = db.get_paper_position(code)
+            if pos is None:
+                return TradeResult(code, name, "skip", 0, price, 0.0, 0.0, "无持仓可卖")
+            if pos["buy_date"] >= today:
+                return TradeResult(
+                    code, pos["name"], "skip", 0, price, 0.0, 0.0, "T+1 当日买入不可卖"
+                )
+            held = int(pos["shares"])
+            if not shares or int(shares) >= held:
+                qty = held
+            else:
+                qty = int(shares) // LOT_SIZE * LOT_SIZE
+            if qty <= 0:
+                return TradeResult(code, pos["name"], "skip", 0, price, 0.0, 0.0, "股数不足一手")
+            amt = price * qty
+            fee = self.calc_fee("sell", amt)
+            cash += amt - fee
+            db.insert_paper_trade(
+                code, pos["name"], "sell", price, qty, amt, fee, reason, today
+            )
+            if qty >= held:
+                db.remove_paper_position(code)
+            else:
+                # 部分卖出：剩余仓位保持原成本与买入日
+                db.upsert_paper_position(
+                    code, pos["name"], held - qty, float(pos["cost_price"]),
+                    pos["buy_date"], pos.get("strategy", ""),
+                )
+            db.update_paper_cash(round(cash, 2))
+            logger.info("手动卖出 %s %d 股 @ %.2f", code, qty, price)
+            return TradeResult(code, pos["name"], "sell", qty, price, amt, fee, reason)
+
+        # ---- 买入 ----
+        if db.get_paper_position(code) is not None:
+            return TradeResult(code, name, "skip", 0, price, 0.0, 0.0, "已持仓，暂不支持加仓")
+        if amount and amount > 0:
+            qty = int(amount / price / LOT_SIZE) * LOT_SIZE
+        elif shares:
+            qty = int(shares) // LOT_SIZE * LOT_SIZE
+        else:
+            return TradeResult(code, name, "skip", 0, price, 0.0, 0.0, "请指定金额或股数")
+        if qty < LOT_SIZE:
+            return TradeResult(code, name, "skip", 0, price, 0.0, 0.0, "不足一手")
+        amt = price * qty
+        fee = self.calc_fee("buy", amt)
+        if amt + fee > cash:
+            return TradeResult(code, name, "skip", 0, price, 0.0, 0.0, "可用资金不足")
+        cash -= amt + fee
+        db.upsert_paper_position(code, name, qty, (amt + fee) / qty, today, reason)
+        db.insert_paper_trade(code, name, "buy", price, qty, amt, fee, reason, today)
+        db.update_paper_cash(round(cash, 2))
+        # 持仓纳入自选：保证后续卖出建议能覆盖到这只股票
+        db.add_watch(code, name, note="持仓自动加入", source="auto")
+        logger.info("手动买入 %s %d 股 @ %.2f", code, qty, price)
+        return TradeResult(code, name, "buy", qty, price, amt, fee, reason)
+
+    # ------------------------------------------------------------------
     # 止盈止损检查（每日收盘）
     # ------------------------------------------------------------------
-    async def check_stop_loss_target(self) -> list[TradeResult]:
-        """检查全部持仓的止盈止损，触发则按最新价市价卖出。"""
+    async def check_stop_loss_target(
+        self, prices: dict[str, float] | None = None
+    ) -> list[TradeResult]:
+        """检查全部持仓的止盈止损，触发则按最新价市价卖出。
+
+        ``prices`` 供实时撮合传入（逐 tick 检查，而非只在收盘后检查）。
+        """
         positions = db.list_paper_positions()
         if not positions:
             return []
@@ -241,7 +350,7 @@ class PaperEngine:
         for pos in positions:
             if pos["buy_date"] >= today:
                 continue  # T+1 不可卖
-            price = await self._latest_price(pos["code"])
+            price = await self._latest_price(pos["code"], prices)
             if price is None:
                 continue
             cost = float(pos["cost_price"])
@@ -274,13 +383,13 @@ class PaperEngine:
     # ------------------------------------------------------------------
     # 账户查询与结算
     # ------------------------------------------------------------------
-    async def total_asset(self) -> float:
+    async def total_asset(self, prices: dict[str, float] | None = None) -> float:
         """总资产 = 现金 + 持仓市值（按最新价）。"""
         account = self.ensure_account()
         cash = float(account["cash"])
         market_value = 0.0
         for pos in db.list_paper_positions():
-            price = await self._latest_price(pos["code"])
+            price = await self._latest_price(pos["code"], prices)
             if price is not None:
                 market_value += price * int(pos["shares"])
         return cash + market_value

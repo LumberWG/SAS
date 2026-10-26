@@ -7,7 +7,7 @@ from datetime import datetime
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from app.api.utils import with_disclaimer
+from app.api.utils import with_disclaimer, with_realtime
 from app.data.cache import db
 from app.screener.scanner import (
     SCAN_SCOPES,
@@ -116,7 +116,8 @@ def _task_payload(task) -> dict:
         "progress": task.progress(),
         "skipped": task.skipped,
         "hit_count": len(task.hits),
-        "hits": task.hits if task.status == "done" else [],
+        # 命中行附带当前实时行情（realtime），前端优先展示实时价
+        "hits": with_realtime(task.hits) if task.status == "done" else [],
         "started_at": task.started_at,
         "finished_at": task.finished_at,
         "duration": duration,
@@ -130,5 +131,6 @@ def signal_history(
     code: str | None = Query(None, description="按股票代码过滤"),
     limit: int = Query(100, ge=1, le=1000),
 ) -> dict:
-    """历史命中信号（SQLite 持久化）。"""
-    return with_disclaimer({"signals": db.list_signals(code=code, limit=limit)})
+    """历史命中信号（SQLite 持久化，附带当前实时行情）。"""
+    signals = db.list_signals(code=code, limit=limit)
+    return with_disclaimer({"signals": with_realtime(signals)})

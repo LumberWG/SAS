@@ -75,6 +75,9 @@ export interface MarketOverview {
     down: number
     flat: number
     total: number
+    // 未开盘/停牌（无有效成交价）的只数，不计入涨跌家数
+    untraded?: number
+    traded?: number
     limit_up: number
     limit_down: number
   }
@@ -93,6 +96,16 @@ export interface KlineData {
   volumes: number[]
   amounts: (number | null)[]
   pct_changes: (number | null)[]
+}
+
+export interface IntradayData {
+  code: string
+  date: string | null
+  prev_close: number | null
+  times: string[]
+  prices: (number | null)[]
+  avg_prices: (number | null)[]
+  volumes: number[]
 }
 
 export interface StockQuote {
@@ -138,6 +151,11 @@ export function getStockQuote(code: string): Promise<StockQuote> {
   return http.get(`/market/stocks/${code}`).then((r) => r.data)
 }
 
+/** 个股分时（逐分钟价格 / 均价 / 成交量）。 */
+export function getStockIntraday(code: string): Promise<IntradayData> {
+  return http.get(`/market/stocks/${code}/intraday`).then((r) => r.data)
+}
+
 // ==================== 选股 ====================
 
 export interface ParamSpec {
@@ -170,6 +188,17 @@ export interface StrategyDetail {
   parameters: Record<string, ParamSpec>
 }
 
+/**
+ * 命中/信号行的当前实时行情。
+ * 后端在列表接口里附带：DB/任务里存的是「记录时刻」的数据，展示用这一份。
+ */
+export interface HitRealtime {
+  price: number
+  pct_change: number | null
+  volume_ratio: number | null
+  amount_yi: number | null
+}
+
 export interface ScanHit {
   code: string
   name: string
@@ -180,6 +209,8 @@ export interface ScanHit {
   target_price: number | null
   date: string
   extra: Record<string, unknown>
+  /** 当前实时行情（快照不可用时缺省，前端回退到记录值） */
+  realtime?: HitRealtime | null
 }
 
 export interface ScanTask {
@@ -240,6 +271,8 @@ export interface SignalRecord {
   target_price: number | null
   scan_date: string
   created_at: string
+  /** 当前实时行情（后端按快照附带） */
+  realtime?: HitRealtime | null
 }
 
 export function getSignals(code?: string, limit = 100): Promise<SignalRecord[]> {
@@ -353,6 +386,8 @@ export interface RecommendationItem {
   sentiment: string
   batch: string
   created_at: string
+  /** 当前实时行情（price 为建议生成价，展示以本字段为准） */
+  realtime?: HitRealtime | null
 }
 
 export function getBuyRecommendations(): Promise<{
@@ -433,6 +468,92 @@ export interface PaperTrade {
 
 export function getPaperAccount(): Promise<PaperAccount> {
   return http.get('/paper/account').then((r) => r.data)
+}
+
+/** 待执行的实时交易信号（下个 tick 成交） */
+export interface PaperPendingSignal {
+  code: string
+  name: string
+  action: 'buy' | 'sell'
+  reason: string
+  created_at: string
+  expire_at: string
+  waiting_seconds: number
+  price_at_signal: number | null
+}
+
+export interface PaperLiveTrade {
+  code: string
+  name: string
+  side: 'buy' | 'sell'
+  shares: number
+  price: number
+  fee: number
+  reason: string
+  time: string
+}
+
+/** 实时撮合引擎状态 */
+export interface PaperLiveStatus {
+  enabled: boolean
+  engine_enabled: boolean
+  /** true=自动交易（系统撮合，人工不干预）；false=手动交易 */
+  auto_trade: boolean
+  mode: 'auto' | 'manual'
+  trading: boolean
+  tick_interval: number
+  signal_ttl_minutes: number
+  last_tick: string | null
+  last_tick_at: string | null
+  ticks: number
+  executed: number
+  pending: PaperPendingSignal[]
+  recent_trades: PaperLiveTrade[]
+  last_error: string
+  prices: Record<string, number>
+}
+
+export function getPaperLive(): Promise<PaperLiveStatus> {
+  return http.get('/paper/live').then((r) => r.data)
+}
+
+/** 立即撮合一次（不必等定时 tick） */
+export function tickPaper(): Promise<Record<string, unknown>> {
+  return http.post('/paper/tick').then((r) => r.data)
+}
+
+/** 切换自动 / 手动交易模式（持久化） */
+export function setPaperMode(auto: boolean): Promise<PaperLiveStatus> {
+  return http.post('/paper/mode', { auto }).then((r) => r.data)
+}
+
+export interface PaperOrderPayload {
+  code: string
+  side: 'buy' | 'sell'
+  /** 买入/卖出股数（卖出留空=全部） */
+  shares?: number
+  /** 买入金额（元），优先于 shares */
+  amount?: number
+  name?: string
+}
+
+export interface PaperOrderResult {
+  result: {
+    code: string
+    name: string
+    side: string
+    shares: number
+    price: number
+    amount: number
+    fee: number
+    reason: string
+  }
+  account: PaperAccount
+}
+
+/** 手动下单（按实时价立即成交） */
+export function placePaperOrder(payload: PaperOrderPayload): Promise<PaperOrderResult> {
+  return http.post('/paper/order', payload).then((r) => r.data)
 }
 
 export function getPaperTrades(

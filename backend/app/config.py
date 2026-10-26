@@ -69,6 +69,11 @@ class Settings(BaseSettings):
     scheduler_timezone: str = "Asia/Shanghai"
     # 收盘后自动选股使用的策略列表（缺省为全部已注册策略）
     auto_scan_strategies: list[str] = []
+    # 收盘/盘后自动扫描范围（all=全市场约 5500 只，冷缓存下需 15 分钟以上；
+    # top_amount:N=成交额前 N 只，通常 1~2 分钟出结果）
+    auto_scan_scope: str = "all"
+    # 等待一轮扫描完成的最长秒数（全市场扫描必须给足，否则盘后分析会拿不到结果）
+    scan_wait_timeout: int = 1800
 
     # ---------- 智能建议 / 自动盯盘 ----------
     # 收盘自动选股后，将评分 Top N 的命中自动加入自选股
@@ -76,8 +81,10 @@ class Settings(BaseSettings):
     auto_watch_top_n: int = 10
     # 每轮手动扫描后，命中按评分 Top N 写入「程序自选」（0 表示关闭）
     scan_auto_watch_limit: int = 50
-    # 盘中自选股分析间隔（分钟）
-    intraday_analysis_interval: int = 5
+    # 盘中自选股分析间隔（分钟）。1 分钟一轮：分析本身走本地K线缓存，
+    # 单轮耗时约 1~3 秒；「分析 → 成交」由实时撮合（paper_tick）负责，
+    # 超过一轮耗时也不会堆积（max_instances=1 自动跳过）。
+    intraday_analysis_interval: int = 1
     # 盘后「明日关注」数量
     focus_top_n: int = 10
 
@@ -88,6 +95,21 @@ class Settings(BaseSettings):
     paper_max_positions: int = 10
     # 是否自动执行系统建议（false 时仅记录信号不成交）
     paper_auto_trade: bool = True
+    # 实时撮合开关：True=建议进入队列后按 tick 实时成交；
+    # False=退回旧的「分析任务里批量成交」模式
+    paper_live_enabled: bool = True
+    # 实时撮合间隔（秒）：每 tick 拉一次关注标的实时价并撮合
+    paper_tick_interval: int = 5
+    # 信号有效期（分钟）：盘中产生的买卖信号超过该时间未成交即丢弃；
+    # 非交易时段产生的信号自动顺延到下一个开盘后重新计时
+    paper_signal_ttl_minutes: int = 30
+    # 选股完成后是否立即对命中 TopN 分析并送入实时交易队列
+    # （打通「选股 → 建议 → 成交」链路，无需等下一轮盘中分析）
+    paper_scan_autotrade: bool = True
+    paper_scan_autotrade_top_n: int = 10
+    # 盘后（非交易时段）扫描的命中是否也入队：信号顺延到次日 9:30 开盘后
+    # 按实时价成交（仍是实时撮合，不是定时成交价）。设为 false 则只在盘中联动
+    paper_scan_autotrade_overnight: bool = True
 
     # ---------- 通知管道（可选） ----------
     # Webhook 机器人地址（企业微信/飞书/钉钉均兼容，POST JSON）
