@@ -63,6 +63,23 @@ const router = createRouter({
 router.afterEach((to) => {
   const title = to.meta.title as string | undefined
   document.title = title ? `${title} · SAS A股分析` : 'SAS A股分析'
+  // 导航成功说明入口与懒加载 chunk 匹配，解除「已尝试重载」标记
+  sessionStorage.removeItem('sas:chunk-reload')
+})
+
+// 重新部署后旧入口引用的 chunk hash 已不存在，动态 import 会失败（页面点不进去）。
+// 自动整页刷新一次拿到新入口；只尝试一次，避免死循环。
+router.onError((err, to) => {
+  const message = String((err as Error)?.message ?? err)
+  const chunkFailed = /Failed to fetch dynamically imported module|Importing a module script failed|error loading dynamically imported module/i.test(
+    message
+  )
+  if (chunkFailed && !sessionStorage.getItem('sas:chunk-reload')) {
+    sessionStorage.setItem('sas:chunk-reload', '1')
+    window.location.assign(to?.fullPath || '/')
+    return
+  }
+  console.error('[router]', err)
 })
 
 export default router
