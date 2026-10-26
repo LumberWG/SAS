@@ -26,7 +26,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         url = BACKEND + self.path
         req = urllib.request.Request(url, data=body, headers=headers, method=self.command)
         try:
-            with urllib.request.urlopen(req, timeout=60) as resp:
+            # 回测/全市场扫描等长任务可能跑几分钟；超时给足，
+            # 避免反代先把连接断掉（前端拿到的是 502 而不是结果）。
+            with urllib.request.urlopen(req, timeout=600) as resp:
                 data = resp.read()
                 self.send_response(resp.status)
                 for k, v in resp.getheaders():
@@ -54,8 +56,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
             fpath = os.path.join(DIST, "index.html")
         else:
             fpath = os.path.normpath(os.path.join(DIST, path.lstrip("/")))
+            if not os.path.isfile(fpath) and path.startswith("/assets/"):
+                # 已删除的旧 hash 资源必须 404：若回落到 index.html（200 + HTML），
+                # 浏览器动态 import 会解析失败，页面表现为“点了没反应/白屏”。
+                self.send_error(404)
+                return
             if not os.path.isfile(fpath):
-                # SPA history fallback
+                # SPA history fallback（仅用于页面路由，不用于静态资源）
                 fpath = os.path.join(DIST, "index.html")
         if not os.path.isfile(fpath):
             self.send_error(404)

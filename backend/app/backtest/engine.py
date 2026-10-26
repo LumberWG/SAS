@@ -118,16 +118,10 @@ class BacktestEngine:
                     klines[code] = df
                     # 逐日评估：仅对回测区间内的日期发信号
                     start_idx = self._first_index_on_or_after(df, params.start_date)
-                    for i in range(start_idx, len(df)):
-                        signal = strategy.evaluate(df.iloc[: i + 1])
-                        if signal is not None:
-                            events.append({
-                                "code": code, "name": name,
-                                "date": signal.date,
-                                "price": signal.price,
-                                "stop_loss": signal.stop_loss,
-                                "target_price": signal.target_price,
-                            })
+                    found = await asyncio.to_thread(
+                        self._collect_events, strategy, df, start_idx, code, name
+                    )
+                    events.extend(found)
                 except Exception as exc:  # noqa: BLE001 - 单股失败跳过
                     logger.debug("回测取数失败 %s: %s", code, exc)
 
@@ -135,11 +129,15 @@ class BacktestEngine:
         await asyncio.gather(*(fetch_one(r.code, r.name) for r in pool.itertuples()))
         logger.info("回测信号生成完毕: %d 只股票, %d 个信号事件", len(klines), len(events))
 
-        # ---- 模拟交易 ----
-        equity_curve, trades = self._simulate(params, events, klines)
+        # ---- 模拟交易（放线程：逐日撮合是 CPU 密集，不能堵住事件循环） ----
+        equity_curve, trades = await asyncio.to_thread(
+            self._simulate, params, events, klines
+        )
 
         # ---- 绩效指标 ----
-        metrics = self._compute_metrics(equity_curve, trades, params)
+        metrics = await asyncio.to_thread(
+            self._compute_metrics, equity_curve, trades, params
+        )
 
         return {
             "strategy": params.strategy,
@@ -188,6 +186,32 @@ class BacktestEngine:
         if not mask.any():
             return len(df)
         return int(mask.argmax())  # argmax 返回位置而非索引标签
+
+    @staticmethod
+    def _collect_events(
+        strategy: Strategy,
+        df: pd.DataFrame,
+        start_idx: int,
+        code: str,
+        name: str,
+    ) -> list[dict]:
+        """逐日滚动评估单只股票（CPU 密集，由上层丢进线程池执行）。
+
+        只喂 ``df.iloc[: i + 1]`` 前缀切片，保证指标取值与当日实时值一致。
+        """
+        out: list[dict] = []
+        for i in range(start_idx, len(df)):
+            signal = strategy.evaluate(df.iloc[: i + 1])
+            if signal is None:
+                continue
+            out.append({
+                "code": code, "name": name,
+                "date": signal.date,
+                "price": signal.price,
+                "stop_loss": signal.stop_loss,
+                "target_price": signal.target_price,
+            })
+        return out
 
     # ------------------------------------------------------------------
     # 交易模拟
@@ -333,13 +357,14 @@ class BacktestEngine:
         wins = sum(1 for t in trades if t["pnl"] > 0)
         win_rate = wins / len(trades) * 100 if trades else 0.0
 
+        # 全部转成原生 float：np.float64 无法被 json.dumps / 前端 JSON 序列化
         return {
-            "total_return": round(total_return * 100, 2),       # %
-            "annualized_return": round(annualized * 100, 2),    # %
-            "max_drawdown": round(max_drawdown * 100, 2),       # %
-            "sharpe": round(sharpe, 2),
+            "total_return": round(float(total_return) * 100, 2),       # %
+            "annualized_return": round(float(annualized) * 100, 2),    # %
+            "max_drawdown": round(max_drawdown * 100, 2),              # %
+            "sharpe": round(float(sharpe), 2),
             "trade_count": len(trades),
-            "win_rate": round(win_rate, 1),                     # %
+            "win_rate": round(float(win_rate), 1),                     # %
             "final_equity": round(float(equity[-1]), 2),
             "trading_days": n_days,
         }

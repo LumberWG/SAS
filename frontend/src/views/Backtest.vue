@@ -2,7 +2,7 @@
 /**
  * 回测中心：参数表单 → 提交回测 → 净值曲线 + 绩效指标 + 交易明细。
  */
-import { onMounted, ref } from 'vue'
+import { ref } from 'vue'
 import { Play } from 'lucide-vue-next'
 import VChart from 'vue-echarts'
 import { use } from 'echarts/core'
@@ -10,35 +10,17 @@ import { CanvasRenderer } from 'echarts/renderers'
 import { LineChart } from 'echarts/charts'
 import { GridComponent, TooltipComponent } from 'echarts/components'
 
-import {
-  getStrategies,
-  runBacktest,
-  type BacktestResult,
-  type StrategyInfo,
-} from '../api'
+import { runBacktest, type BacktestResult } from '../api'
 
 use([CanvasRenderer, LineChart, GridComponent, TooltipComponent])
 
-const strategies = ref<StrategyInfo[]>([])
 const form = ref({
-  strategy: '',
   start_date: '2025-01-01',
   end_date: '2026-10-20',
-  initial_capital: 1000000,
-  max_positions: 5,
-  universe_size: 300,
 })
 const result = ref<BacktestResult | null>(null)
 const loading = ref(false)
 const error = ref('')
-
-onMounted(async () => {
-  const data = await getStrategies()
-  strategies.value = data.strategies
-  if (strategies.value.length > 0) {
-    form.value.strategy = strategies.value[0].name
-  }
-})
 
 async function submit() {
   loading.value = true
@@ -113,13 +95,7 @@ function metricTone(v: number): string {
     <!-- 参数表单 -->
     <div class="glass-card p-5">
       <h3 class="mb-4 text-subheading">回测参数</h3>
-      <div class="grid grid-cols-1 gap-4 md:grid-cols-3 xl:grid-cols-6">
-        <label class="flex flex-col gap-1.5">
-          <span class="text-[11px] text-content-muted">策略</span>
-          <select v-model="form.strategy" class="rounded-lg border border-base-600 bg-base-700 px-3 py-2 text-[13px] text-content outline-none focus:border-primary">
-            <option v-for="s in strategies" :key="s.name" :value="s.name">{{ s.name }}</option>
-          </select>
-        </label>
+      <div class="grid grid-cols-1 gap-4 md:grid-cols-3">
         <label class="flex flex-col gap-1.5">
           <span class="text-[11px] text-content-muted">开始日期</span>
           <input v-model="form.start_date" type="date" class="rounded-lg border border-base-600 bg-base-700 px-3 py-2 text-[13px] text-content outline-none focus:border-primary" />
@@ -128,18 +104,10 @@ function metricTone(v: number): string {
           <span class="text-[11px] text-content-muted">结束日期</span>
           <input v-model="form.end_date" type="date" class="rounded-lg border border-base-600 bg-base-700 px-3 py-2 text-[13px] text-content outline-none focus:border-primary" />
         </label>
-        <label class="flex flex-col gap-1.5">
-          <span class="text-[11px] text-content-muted">初始资金（元）</span>
-          <input v-model.number="form.initial_capital" type="number" min="10000" step="100000" class="rounded-lg border border-base-600 bg-base-700 px-3 py-2 font-num text-[13px] text-content outline-none focus:border-primary" />
-        </label>
-        <label class="flex flex-col gap-1.5">
-          <span class="text-[11px] text-content-muted">最大持仓数</span>
-          <input v-model.number="form.max_positions" type="number" min="1" max="20" class="rounded-lg border border-base-600 bg-base-700 px-3 py-2 font-num text-[13px] text-content outline-none focus:border-primary" />
-        </label>
-        <label class="flex flex-col gap-1.5">
-          <span class="text-[11px] text-content-muted">股票池（成交额前N）</span>
-          <input v-model.number="form.universe_size" type="number" min="10" max="3000" step="50" class="rounded-lg border border-base-600 bg-base-700 px-3 py-2 font-num text-[13px] text-content outline-none focus:border-primary" />
-        </label>
+        <div class="flex flex-col justify-center gap-1 rounded-lg border border-base-600/60 bg-base-700/40 px-3 py-2">
+          <span class="text-[11px] text-content-muted">自动执行（无需选策略）</span>
+          <span class="text-[12px] text-content">全策略扫描 → 加自选 → 14因子排序 → 评分加权下单</span>
+        </div>
       </div>
       <div class="mt-4 flex items-center gap-4">
         <button
@@ -150,8 +118,9 @@ function metricTone(v: number): string {
           <Play class="h-4 w-4" />
           {{ loading ? '回测运行中...' : '开始回测' }}
         </button>
+        <span v-if="loading" class="text-[12px] text-content-muted">回测在后台运行，约需 1~3 分钟，请勿关闭页面</span>
         <span v-if="error" class="text-[12px] text-up">{{ error }}</span>
-        <span class="text-[11px] text-content-faint">规则：信号日收盘买入，止损/止盈/到期卖出，佣金万2.5+印花税千0.5</span>
+        <span class="text-[11px] text-content-faint">规则：信号日收盘生成委托，次日开盘成交；止损-8%/止盈+20%；总仓位≤80%、单票≤20%；佣金万2.5（最低5元）+印花税千1+过户费万0.1</span>
       </div>
     </div>
 
@@ -164,7 +133,10 @@ function metricTone(v: number): string {
           <div class="font-num mt-1 text-[24px] font-semibold" :class="metricTone(result.metrics.total_return)">
             {{ result.metrics.total_return > 0 ? '+' : '' }}{{ result.metrics.total_return.toFixed(2) }}%
           </div>
-          <div class="mt-1 text-[11px] text-content-faint">年化 {{ result.metrics.annualized_return.toFixed(2) }}%</div>
+          <div class="mt-1 text-[11px] text-content-faint">
+            年化 {{ result.metrics.annualized_return.toFixed(2) }}%
+            <span v-if="result.metrics.benchmark_return !== undefined">· 基准 {{ result.metrics.benchmark_return.toFixed(2) }}%</span>
+          </div>
         </div>
         <div class="glass-card p-4">
           <div class="text-[12px] text-content-muted">最大回撤</div>

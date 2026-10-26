@@ -292,15 +292,15 @@ export function getSignals(code?: string, limit = 100): Promise<SignalRecord[]> 
 
 // ==================== 回测 ====================
 
+/**
+ * 回测请求：固定走「全策略流水线」（扫描 → 加自选 → 14因子排序 → 评分加权下单），
+ * 只有时间段是必填，其余留空即用模拟盘默认配置。
+ */
 export interface BacktestRequest {
-  strategy: string
   start_date: string
   end_date: string
   initial_capital?: number
   max_positions?: number
-  commission?: number
-  stamp_tax?: number
-  codes?: string[]
   universe_size?: number
 }
 
@@ -325,20 +325,57 @@ export interface BacktestResult {
   params: Record<string, unknown>
   metrics: {
     total_return: number
+    benchmark_return?: number
     annualized_return: number
     max_drawdown: number
     sharpe: number
     trade_count: number
     win_rate: number
+    avg_pnl_pct?: number
     final_equity: number
     trading_days: number
+    open_positions?: number
   }
   equity_curve: { date: string; equity: number }[]
   trades: BacktestTrade[]
 }
 
-export function runBacktest(req: BacktestRequest): Promise<BacktestResult> {
-  return http.post('/backtest/run', req).then((r) => r.data)
+/** 后端回测任务状态（提交后轮询，避免长请求撞上 30s 超时）。 */
+interface BacktestJob {
+  job_id?: string
+  status: 'running' | 'done' | 'error'
+  elapsed?: number
+  error?: string
+  result?: BacktestResult
+}
+
+/** 轮询间隔（毫秒）与最长等待（毫秒） */
+const BACKTEST_POLL_MS = 1500
+const BACKTEST_TIMEOUT_MS = 15 * 60 * 1000
+
+/**
+ * 提交回测并轮询结果。
+ *
+ * 回测要逐只股票逐日滚动评估策略，几百只 × 一年常需 1~3 分钟，
+ * 单个长请求会被浏览器/代理超时掐断，所以后端改为任务化。
+ */
+export async function runBacktest(req: BacktestRequest): Promise<BacktestResult> {
+  const { data } = await http.post<BacktestJob>('/backtest/run', req, { timeout: 0 })
+  // 兼容旧后端：仍返回完整结果时直接使用
+  if (!data.job_id) return data as unknown as BacktestResult
+
+  const deadline = Date.now() + BACKTEST_TIMEOUT_MS
+  while (Date.now() < deadline) {
+    await new Promise((resolve) => window.setTimeout(resolve, BACKTEST_POLL_MS))
+    const res = await http.get<BacktestJob>(`/backtest/jobs/${data.job_id}`, {
+      timeout: 0,
+      // refresh 绕过 GET 缓存，否则轮询会一直读到第一次的 running 状态
+      params: { refresh: true },
+    })
+    if (res.data.status === 'done' && res.data.result) return res.data.result
+    if (res.data.status === 'error') throw new Error(res.data.error || '回测失败')
+  }
+  throw new Error('回测超时（15 分钟），请缩小股票池或时间区间后重试')
 }
 
 export function getBacktest(runId: number): Promise<BacktestResult> {
