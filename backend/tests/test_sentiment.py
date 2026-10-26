@@ -76,8 +76,8 @@ class TestFromSnapshot:
         assert result["level"] == "极度亢奋"
 
 
-class TestRuleBasedDowngrade:
-    """规则降级结论的情绪修正: 逆环境买入 → 持有。"""
+class TestRuleBasedSentimentContext:
+    """规则结论的情绪上下文：悲观情绪不再否决买入（别人恐惧时贪婪）。"""
     def _strong_uptrend_df(self):
         """构造技术面强势（评分 >= 3 触发买入）的K线。
 
@@ -98,7 +98,7 @@ class TestRuleBasedDowngrade:
         df.loc[df.index[-1], ["kdj_k", "kdj_d", "kdj_j"]] = [22.0, 19.0, 18.0]
         return df
 
-    def test_bearish_sentiment_downgrades_buy(self):
+    def test_bearish_sentiment_keeps_buy(self):
         from app.llm.analyzer import analyzer
 
         df = self._strong_uptrend_df()
@@ -106,12 +106,13 @@ class TestRuleBasedDowngrade:
         base = analyzer._rule_based_dashboard("600000", "测试", df)
         assert base.conclusion == "买入"
 
-        # 极度悲观情绪 → 降级为持有
+        # 极度悲观情绪：结论仍为买入，仅附带风险提示
         bear = analyzer._rule_based_dashboard("600000", "测试", df, sentiment={
             "level": "极度悲观", "weight": -1.0, "advice": "恐慌", "temperature": 10.0,
         })
-        assert bear.conclusion == "持有"
-        assert "降级为持有" in bear.summary
+        assert bear.conclusion == "买入"
+        assert "市场情绪" in bear.summary
+        assert "弱市博弈" in bear.summary
         assert bear.sentiment is not None
 
     def test_bullish_sentiment_keeps_buy(self):

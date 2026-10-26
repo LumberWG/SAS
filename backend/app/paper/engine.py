@@ -6,8 +6,11 @@
 交易规则（对齐 A 股实盘，简化但透明）:
   1. 初始资金默认 10 万，账户为单账户（个人使用）；
   2. 仓位管理：按建议评分加权（第 3 次排序）——评分高者先买、分到更多资金，
-     预算 = min(可用现金 × 该股评分占比, 总资产×20%)，最多持有
-     max_positions（默认10）只；
+     预算 = min(可投预算 × 加权占比, 总资产×20%)，最多持有 max_positions（默认10）只；
+     评分分档：≥40 全额、25~40 权重打 5 折、<25 只记录不下单；
+     总仓位上限 paper_max_total_exposure（默认 80%，即常留 20% 现金）；
+  2.1 轮动替换：满仓时若新票评分 >= paper_rotation_min_score 且比最弱持仓的建仓
+     评分高出 paper_rotation_gap，则卖出最弱持仓换入（T+1、每日限次由配置控制）；
   3. 整手交易：买入数量向下取整到 100 股；
   4. T+1：当日买入次日才能卖出；
   5. 费用：佣金万2.5（最低5元）+ 卖出印花税千1 + 双边过户费万0.1；
@@ -191,10 +194,73 @@ class PaperEngine:
                 rec.code, pos["name"], "sell", shares, price, amount, fee,
                 getattr(rec, "reason", "卖出信号")))
 
-        # ---- 买入（第 3 次排序：评分加权仓位，受持仓数与单票上限约束） ----
-        # 规则：评分高者先买；可用现金按评分比例分配（分数越高仓位越大），
-        # 单票不超过总资产 20%，整手取整，费用从现金扣除。
+        # ---- 轮动替换：满仓时用显著更高分的新票换掉最弱持仓 ----
+        # 触发条件（全部满足）：开关开启 + 持仓已满 + 存在未持仓的买入候选 +
+        #   新票评分 >= rotation_min_score 且比最弱持仓的建仓评分高出 rotation_gap +
+        #   最弱持仓非当日买入（T+1）+ 当日轮动次数未达上限。
+        if (
+            self.settings.paper_rotation_enabled
+            and len(positions) >= self.settings.paper_max_positions
+        ):
+            fresh = [r for r in buy_candidates if r.code not in positions]
+            if fresh:
+                best = max(fresh, key=_rec_score)
+                best_score = _rec_score(best)
+                weak_code: str | None = None
+                weak_pos: dict | None = None
+                weak_score = 0.0
+                for code, pos in positions.items():
+                    # 手动下单建仓的持仓不打分，也不允许被自动轮动卖出
+                    if "手动" in str(pos.get("strategy") or ""):
+                        continue
+                    score = float(pos.get("score") or 0.0)
+                    if weak_pos is None or score < weak_score:
+                        weak_code, weak_pos, weak_score = code, pos, score
+                used = db.count_paper_trades("轮动替换", today, side="sell")
+                can_rotate = (
+                    weak_code is not None
+                    and best_score >= self.settings.paper_rotation_min_score
+                    and best_score - weak_score >= self.settings.paper_rotation_gap
+                    and str(weak_pos.get("buy_date") or "") < today
+                    and used < self.settings.paper_rotation_max_per_day
+                )
+                if can_rotate:
+                    price = await self._latest_price(weak_code, prices)
+                    if price and price > 0:
+                        shares = int(weak_pos["shares"])
+                        amount = price * shares
+                        fee = self.calc_fee("sell", amount)
+                        cash += amount - fee
+                        reason = (
+                            f"轮动替换(建仓{weak_score:.0f}分→新票{best_score:.0f}分)"
+                        )
+                        db.insert_paper_trade(
+                            weak_code, weak_pos.get("name", ""), "sell", price,
+                            shares, amount, fee, reason, today,
+                        )
+                        db.remove_paper_position(weak_code)
+                        positions.pop(weak_code, None)
+                        results.append(TradeResult(
+                            weak_code, weak_pos.get("name", ""), "sell", shares,
+                            price, amount, fee, reason,
+                        ))
+                        logger.info(
+                            "轮动替换：卖出 %s（建仓 %.0f 分），换入 %s（%.0f 分）",
+                            weak_code, weak_score, best.code, best_score,
+                        )
+
+        # ---- 买入（第 3 次排序：评分加权仓位 + 评分分档 + 总仓位上限） ----
+        # 规则：
+        #   1) 评分 < half_score(25) 只记录不下单；half~full(25~40) 权重打 5 折；
+        #   2) 高分先买，可投预算按「评分×档位系数」比例分配；
+        #   3) 新建仓市值不超过总资产 × paper_max_total_exposure(80%)；
+        #   4) 单票不超过总资产 20%，整手取整，费用从现金扣除。
         max_positions = self.settings.paper_max_positions
+        full_score = self.settings.paper_full_score
+        half_score = self.settings.paper_half_score
+        # 现有持仓市值 = 总资产 - 现金；总仓位上限扣掉已有仓位后才是本轮可投预算
+        exposure_cap = total_asset * self.settings.paper_max_total_exposure
+        available_budget = max(0.0, exposure_cap - max(0.0, total_asset - cash))
         candidates: list[tuple[float, object, float]] = []
         for rec in buy_candidates:
             if rec.code in positions:
@@ -216,22 +282,46 @@ class PaperEngine:
             candidates.append((_rec_score(rec), rec, price))
 
         candidates.sort(key=lambda c: c[0], reverse=True)
-        weights = {rec.code: max(score, 1.0) for score, rec, _ in candidates}
 
-        for _score, rec, price in candidates:
-            weight = weights.pop(rec.code, 1.0)
+        # 评分分档：低于半额分只记录；其余按「评分 × 档位系数」加权
+        eligible: list[tuple[float, object, float, float]] = []
+        for score, rec, price in candidates:
+            if score < half_score:
+                results.append(TradeResult(
+                    rec.code, getattr(rec, "name", ""), "skip", 0, price, 0.0, 0.0,
+                    f"评分{score:.0f}<{half_score:.0f}，仅记录不下单"))
+                continue
+            factor = 1.0 if score >= full_score else 0.5
+            eligible.append((score, rec, price, max(score, 1.0) * factor))
+
+        # 候选多于剩余名额时，只让名额内的高分股参与分钱，
+        # 否则预算会被买不到的候选摊薄（导致只建了两三成仓）
+        slots = max(0, max_positions - len(positions))
+        if len(eligible) > slots:
+            eligible = eligible[:slots]
+
+        weights = {rec.code: weight for _, rec, _, weight in eligible}
+
+        for _score, rec, price, weight in eligible:
+            weights.pop(rec.code, None)
             weight_total = weight + sum(weights.values())
             if len(positions) >= max_positions:
                 results.append(TradeResult(
                     rec.code, getattr(rec, "name", ""), "skip", 0,
                     0.0, 0.0, 0.0, f"持仓已满({max_positions}只)"))
                 continue
-            # 目标金额 = 可用现金 × 评分占比，再受单票上限与剩余现金约束
-            share_of_cash = weight / weight_total if weight_total > 0 else 1.0
+            if available_budget < price * LOT_SIZE:
+                results.append(TradeResult(
+                    rec.code, getattr(rec, "name", ""), "skip", 0, price, 0.0, 0.0,
+                    f"总仓位已达上限({self.settings.paper_max_total_exposure:.0%})"))
+                continue
+            # 目标金额 = 本轮可投预算 × 加权占比，再受单票上限与剩余现金约束
+            share_of_pool = weight / weight_total if weight_total > 0 else 1.0
             budget = min(
-                cash * share_of_cash,
+                available_budget * share_of_pool,
                 total_asset * SINGLE_POSITION_MAX_RATIO,
                 cash,
+                available_budget,
             )
             shares = int(budget / price / LOT_SIZE) * LOT_SIZE
             # 费用可能让「金额+费用」超出可用现金，逐手回退
@@ -248,10 +338,11 @@ class PaperEngine:
             fee = self.calc_fee("buy", amount)
             cost_price = (amount + fee) / shares  # 含费成本价
             cash -= amount + fee
+            available_budget = max(0.0, available_budget - amount)
             name = getattr(rec, "name", "") or rec.code
             db.upsert_paper_position(
                 rec.code, name, shares, cost_price, today,
-                getattr(rec, "reason", "买入信号"),
+                getattr(rec, "reason", "买入信号"), score=_rec_score(rec),
             )
             db.insert_paper_trade(
                 rec.code, name, "buy", price, shares, amount, fee,

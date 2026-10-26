@@ -111,6 +111,7 @@ CREATE TABLE IF NOT EXISTS paper_positions (
     cost_price REAL NOT NULL,        -- 摊薄成本价（含买入手续费）
     buy_date   TEXT NOT NULL,        -- 最近一次买入日期（T+1 可卖判断）
     strategy   TEXT,                 -- 买入来源（策略/建议原因）
+    score      REAL DEFAULT 0,       -- 建仓时的建议评分（轮动替换的比较基准）
     created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS paper_trades (
@@ -207,6 +208,7 @@ class Database:
             self._migrate_watchlist_source(conn)
             self._migrate_recommendation_rank(conn)
             self._migrate_signal_rank(conn)
+            self._migrate_position_score(conn)
             self._dedupe_signals(conn)
 
     @staticmethod
@@ -234,6 +236,15 @@ class Database:
         conn.execute(
             "UPDATE watchlist SET source='auto' WHERE note LIKE '%自动加入%'"
         )
+
+    @staticmethod
+    def _migrate_position_score(conn: sqlite3.Connection) -> None:
+        """老库补 score 列：持仓的建仓评分（轮动替换的比较基准）。"""
+        cols = {row["name"] for row in conn.execute("PRAGMA table_info(paper_positions)")}
+        if "score" not in cols:
+            conn.execute(
+                "ALTER TABLE paper_positions ADD COLUMN score REAL DEFAULT 0"
+            )
 
     @staticmethod
     def _migrate_signal_rank(conn: sqlite3.Connection) -> None:
@@ -457,18 +468,31 @@ class Database:
 
     def upsert_paper_position(
         self, code: str, name: str, shares: int, cost_price: float,
-        buy_date: str, strategy: str,
+        buy_date: str, strategy: str, score: float = 0.0,
     ) -> None:
         """新增/覆盖持仓（同代码重复买入时摊薄成本由调用方算好传入）。"""
         with self._lock, self._connect() as conn:
             conn.execute(
                 "INSERT INTO paper_positions(code, name, shares, cost_price,"
-                " buy_date, strategy, created_at) VALUES(?,?,?,?,?,?,?)"
+                " buy_date, strategy, score, created_at) VALUES(?,?,?,?,?,?,?,?)"
                 " ON CONFLICT(code) DO UPDATE SET name=excluded.name,"
                 " shares=excluded.shares, cost_price=excluded.cost_price,"
-                " buy_date=excluded.buy_date, strategy=excluded.strategy",
-                (code, name, shares, cost_price, buy_date, strategy, _now()),
+                " buy_date=excluded.buy_date, strategy=excluded.strategy,"
+                " score=excluded.score",
+                (code, name, shares, cost_price, buy_date, strategy, score, _now()),
             )
+
+    def count_paper_trades(
+        self, reason_prefix: str, trade_date: str, side: str = "sell"
+    ) -> int:
+        """统计某日某类交易笔数（轮动替换的每日次数限制用）。"""
+        with self._lock, self._connect() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS n FROM paper_trades"
+                " WHERE trade_date=? AND side=? AND reason LIKE ?",
+                (trade_date, side, f"{reason_prefix}%"),
+            ).fetchone()
+        return int(row["n"] if row else 0)
 
     def remove_paper_position(self, code: str) -> None:
         with self._lock, self._connect() as conn:

@@ -538,6 +538,9 @@ export interface PaperLiveStatus {
   ticks: number
   executed: number
   pending: PaperPendingSignal[]
+  /** 候补队列：因满仓/资金不足没买成、等名额释放的高分票（按评分降序，最多 10 条） */
+  backlog?: PaperPendingSignal[]
+  backlog_count?: number
   recent_trades: PaperLiveTrade[]
   last_error: string
   prices: Record<string, number>

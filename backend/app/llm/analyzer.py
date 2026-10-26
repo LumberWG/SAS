@@ -268,10 +268,9 @@ ATR(14)={f(last['atr'], '{:.3f}')}
           乖离 BIAS6<-6% 超跌 +1 / >6% 超涨 -1
         结论: >=3 买入, <=-3 卖出, 否则持有。
 
-        市场情绪修正（权重 -1 ~ +1）:
-          情绪权重 <= -0.5（空头占优/极度悲观）时，
-          即使技术面达标也将「买入」降级为「持有」——逆环境信号失败率高，
-          宁可不赚，不可大亏；情绪权重 >= 0.5 时结论不变。
+        市场情绪（权重 -1 ~ +1）:
+          仅作为上下文写入结论说明，**不再把「买入」降级为「持有」**：
+          弱市常有更好赔率（别人恐惧时贪婪），是否买入交给技术面评分判断。
         """
         last = df.iloc[-1]
         prev = df.iloc[-2] if len(df) > 1 else last
@@ -344,17 +343,14 @@ ATR(14)={f(last['atr'], '{:.3f}')}
         else:
             conclusion = "持有"
 
-        # 市场情绪修正：逆环境时空头信号降级
-        sentiment_weight = 0.0
+        # 市场情绪：只作上下文提示，不否决买入
         sentiment_note = ""
         if sentiment and sentiment.get("level"):
             sentiment_weight = float(sentiment.get("weight", 0.0))
-            if sentiment_weight <= -0.5 and conclusion == "买入":
-                conclusion = "持有"
-                sentiment_note = (
-                    f"；市场情绪{sentiment['level']}（权重{sentiment_weight:+}），"
-                    f"逆环境买入信号降级为持有"
-                )
+            hint = "弱市博弈，控制单笔仓位" if sentiment_weight < 0 else "环境偏暖"
+            sentiment_note = (
+                f"；市场情绪{sentiment['level']}（权重{sentiment_weight:+}），{hint}"
+            )
 
         stop = round(float(df["low"].tail(10).min()), 2)
         target = round(price * 1.15, 2)

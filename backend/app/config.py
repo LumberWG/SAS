@@ -91,8 +91,14 @@ class Settings(BaseSettings):
     # ---------- 模拟交易（验证选股思路） ----------
     # 初始模拟资金
     paper_initial_capital: float = 100000.0
-    # 最大持仓只数（等分资金）
+    # 最大持仓只数（仓位按评分加权分配）
     paper_max_positions: int = 10
+    # 总仓位上限：持仓市值不超过总资产的比例（1.0=允许满仓，0.8=始终留 20% 现金）
+    paper_max_total_exposure: float = 0.80
+    # 评分分档：>= 全额分 给足权重；介于半额分与全额分之间权重打 5 折；
+    # 低于半额分只记录建议、不下单（避免刚过买入线就占用资金）
+    paper_full_score: float = 40.0
+    paper_half_score: float = 25.0
     # 是否自动执行系统建议（false 时仅记录信号不成交）
     paper_auto_trade: bool = True
     # 实时撮合开关：True=建议进入队列后按 tick 实时成交；
@@ -110,6 +116,18 @@ class Settings(BaseSettings):
     # 盘后（非交易时段）扫描的命中是否也入队：信号顺延到次日 9:30 开盘后
     # 按实时价成交（仍是实时撮合，不是定时成交价）。设为 false 则只在盘中联动
     paper_scan_autotrade_overnight: bool = True
+
+    # ---------- 满仓后的处理：轮动替换 + 候补队列 ----------
+    # 轮动替换：满仓时若出现更高分的新票，卖出最弱持仓换入（T+1 与持有满 1 日保护）
+    paper_rotation_enabled: bool = True
+    # 触发条件：新票评分 >= min_score，且比「最弱持仓的建仓评分」高出 gap 分
+    paper_rotation_min_score: float = 40.0
+    paper_rotation_gap: float = 20.0
+    # 每日最多轮动次数（一次 = 卖弱 + 买强）
+    paper_rotation_max_per_day: int = 1
+    # 候补队列：因满仓/资金不足没买成的高分票先存着，有名额时按评分优先买入
+    paper_backlog_enabled: bool = True
+    paper_backlog_max: int = 30
 
     # ---------- 通知管道（可选） ----------
     # Webhook 机器人地址（企业微信/飞书/钉钉均兼容，POST JSON）

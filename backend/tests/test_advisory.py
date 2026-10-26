@@ -100,8 +100,12 @@ class TestRecommender:
         assert rec is not None
         assert rec.action == "sell"
 
-    def test_bearish_sentiment_downgrades_buy(self, patched_engine, monkeypatch):
-        """情绪权重 <= -0.5 时买入降级为持有。"""
+    def test_bearish_sentiment_keeps_buy(self, patched_engine, monkeypatch):
+        """情绪悲观不再一票否决：弱市仍按因子总分给买入，情绪只写入理由。
+
+        设计依据：别人恐惧时贪婪——大落才有机，是否买入交给因子模型判断，
+        而不是宏观情绪直接降级。
+        """
         monkeypatch.setattr(
             "app.analysis.recommender.get_kline_cached",
             lambda code, **kw: bullish_df(),
@@ -111,7 +115,8 @@ class TestRecommender:
             lambda: pd.DataFrame({"pct_change": [-5.0] * 1000}),  # 极度悲观
         )
         rec = asyncio.run(patched_engine.analyze_stock("600000", "测试股"))
-        assert rec.action == "hold"
+        assert rec.action == "buy"
+        assert "市场情绪" in rec.reason
 
     def test_insufficient_data_returns_none(self, patched_engine, monkeypatch):
         monkeypatch.setattr(

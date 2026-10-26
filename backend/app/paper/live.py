@@ -36,6 +36,8 @@ logger = logging.getLogger("sas.paper.live")
 _MAX_RECENT_TRADES = 20
 #: 运行时交易模式的键（auto / manual，持久化在 app_state 表）
 _MODE_KEY = "paper_trade_mode"
+#: 出现这些 skip 原因时说明信号有效、只是当下没名额/没钱，转入候补队列
+_BACKLOG_REASONS = ("持仓已满", "总仓位已达上限", "资金不足一手")
 
 
 @dataclass
@@ -80,6 +82,8 @@ class LiveTrader:
         self.settings = get_settings()
         self.engine = PaperEngine()
         self._pending: dict[str, PendingSignal] = {}
+        # 候补队列：因满仓/资金不足没买成的高分票，等有名额时优先买入
+        self._backlog: dict[str, PendingSignal] = {}
         self._last_tick: datetime | None = None
         self._last_prices: dict[str, float] = {}
         self._last_trades: list[dict] = []
@@ -109,6 +113,7 @@ class LiveTrader:
         db.set_state(_MODE_KEY, "auto" if auto else "manual")
         if not auto:
             self._pending.clear()
+            self._backlog.clear()
         logger.info("模拟交易模式切换为 %s", "自动" if auto else "手动")
         return self.status()
 
@@ -165,8 +170,9 @@ class LiveTrader:
         return now + ttl if is_trading_hours(now) else next_open(now) + ttl
 
     def clear(self) -> None:
-        """清空待执行队列与最近成交（账户重置时调用）。"""
+        """清空待执行队列、候补队列与最近成交（账户重置时调用）。"""
         self._pending.clear()
+        self._backlog.clear()
         self._last_trades.clear()
         self._last_prices.clear()
         self._last_error = ""
@@ -176,6 +182,39 @@ class LiveTrader:
         for code in [c for c, s in self._pending.items() if s.expire_at <= now]:
             signal = self._pending.pop(code)
             logger.info("信号过期丢弃 %s %s（%s）", code, signal.name, signal.action)
+        for code in [c for c, s in self._backlog.items() if s.expire_at <= now]:
+            self._backlog.pop(code, None)
+
+    def _defer_skips(self, results, now: datetime) -> set[str]:
+        """把「名额/资金不足」的买入信号转入候补队列，返回被延后的代码集合。
+
+        只延后信号本身有效、只是当下买不进的场景（满仓/总仓位上限/资金不足一手）；
+        已持仓、评分不足、取价失败、T+1 等不进入候补。
+        """
+        deferred: set[str] = set()
+        if not self.settings.paper_backlog_enabled:
+            return deferred
+        for r in results:
+            if r.side != "skip" or not any(k in r.reason for k in _BACKLOG_REASONS):
+                continue
+            signal = self._pending.get(r.code) or self._backlog.get(r.code)
+            if signal is None or signal.action != "buy":
+                continue
+            if (
+                len(self._backlog) >= self.settings.paper_backlog_max
+                and r.code not in self._backlog
+            ):
+                continue
+            signal.expire_at = self._backlog_expiry(now)
+            self._backlog[r.code] = signal
+            deferred.add(r.code)
+        return deferred
+
+    def _backlog_expiry(self, now: datetime) -> datetime:
+        """候补有效到当日收盘；非交易时段则顺延到下一个交易日收盘。"""
+        if is_trading_hours(now):
+            return now.replace(hour=15, minute=0, second=0, microsecond=0)
+        return next_open(now) + timedelta(hours=5, minutes=30)
 
     # ------------------------------------------------------------------
     # 撮合
@@ -193,7 +232,7 @@ class LiveTrader:
             return {"skipped": "非交易时段", "pending": len(self._pending)}
 
         positions = {p["code"]: p for p in db.list_paper_positions()}
-        watch = set(positions) | set(self._pending)
+        watch = set(positions) | set(self._pending) | set(self._backlog)
         if not watch:
             return {"skipped": "无持仓与信号"}
 
@@ -228,15 +267,40 @@ class LiveTrader:
             )
             for s in ordered
         ]
+        # 候补队列：仅在有剩余名额时补位（按评分从高到低）
+        if self.settings.paper_backlog_enabled and self._backlog:
+            held = {p["code"] for p in db.list_paper_positions()}
+            slots = self.settings.paper_max_positions - len(held)
+            if slots > 0:
+                queued = {r.code for r in recs}
+                for signal in sorted(self._backlog.values(), key=lambda s: -s.score):
+                    if signal.code in held or signal.code in queued:
+                        continue
+                    recs.append(SimpleNamespace(
+                        code=signal.code, name=signal.name, action=signal.action,
+                        reason=signal.reason, score=signal.score,
+                    ))
+
         results = await self.engine.execute_recommendations(recs, prices=prices)
 
         # 未成交出队策略：只有「取价失败」保留重试，其余（已持仓/已满/资金不足/
         # T+1）本轮确定无法成交，直接出队，避免每个 tick 反复尝试。
         retry = {r.code for r in results if r.side == "skip" and r.reason == "取价失败"}
         executed = [r for r in results if r.side != "skip"]
+
+        # 候补：因满仓/总仓位上限/资金不足没买成的高分票，存起来等名额释放
+        deferred = self._defer_skips(results, now)
+
         for code in list(self._pending):
-            if code not in retry:
+            if code not in retry and code not in deferred:
                 self._pending.pop(code, None)
+
+        # 已成交/已持仓的候补出队
+        held = {p["code"] for p in db.list_paper_positions()}
+        traded = {r.code for r in results if r.side != "skip"}
+        for code in list(self._backlog):
+            if code in held or code in traded:
+                self._backlog.pop(code, None)
 
         self._executed += len(executed) + len(stop_trades)
         trades = [
@@ -313,6 +377,11 @@ class LiveTrader:
             "ticks": self._ticks,
             "executed": self._executed,
             "pending": [s.to_dict() for s in self._pending.values()],
+            "backlog": [
+                s.to_dict()
+                for s in sorted(self._backlog.values(), key=lambda s: -s.score)[:10]
+            ],
+            "backlog_count": len(self._backlog),
             "recent_trades": self._last_trades,
             "last_error": self._last_error,
             "prices": {code: round(p, 2) for code, p in self._last_prices.items()},

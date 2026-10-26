@@ -137,14 +137,14 @@ class TestExecute:
         """买入数量向下取整到 100 股。"""
         eng, db, prices = engine
         eng.ensure_account()
-        recs = [FakeRec("600000", "测试A", "buy", 4.0, "金叉突破")]
+        recs = [FakeRec("600000", "测试A", "buy", 45.0, "金叉突破")]
         results = asyncio.run(eng.execute_recommendations(recs))
 
         assert len(results) == 1
         r = results[0]
         assert r.side == "buy"
         assert r.shares % LOT_SIZE == 0
-        # 预算 = 100000/5 = 20000 → 2000股 × 10元 = 20000
+        # 单票上限 = 100000×20% = 20000 → 2000股 × 10元
         assert r.shares == 2000
         assert r.amount == 20000.0
         # 现金扣减 = 金额 + 费用
@@ -154,9 +154,9 @@ class TestExecute:
     def test_buy_single_position_cap(self, engine):
         """单票不超过总资产 20%（大资金场景）。"""
         eng, db, prices = engine
-        # 缩小名额使预算超过单票上限：5 名额 × 20% = 100% > 20%
+        # 单一候选时预算会被单票上限 20% 截住，不会全仓
         eng.ensure_account()
-        recs = [FakeRec("600000", "测试A", "buy", 4.0, "突破")]
+        recs = [FakeRec("600000", "测试A", "buy", 45.0, "突破")]
         asyncio.run(eng.execute_recommendations(recs))
         pos = db.get_paper_position("600000")
         # 上限 20000 → 2000股
@@ -168,7 +168,7 @@ class TestExecute:
         eng, db, prices = engine
         eng.ensure_account()
         asyncio.run(eng.execute_recommendations(
-            [FakeRec("600000", "测试A", "buy", 4.0, "突破")]))
+            [FakeRec("600000", "测试A", "buy", 45.0, "突破")]))
         cash_after_buy = db.get_paper_account()["cash"]
 
         # 次日卖出（绕过 T+1：改买入日期）
@@ -207,7 +207,7 @@ class TestExecute:
             db.upsert_paper_position(
                 f"60001{i}", f"票{i}", 100, 10.0, "2020-01-01", "test")
         results = asyncio.run(eng.execute_recommendations(
-            [FakeRec("600000", "测试A", "buy", 4.0, "突破")]))
+            [FakeRec("600000", "测试A", "buy", 45.0, "突破")]))
         assert results[0].side == "skip"
         assert "持仓已满" in results[0].reason
 
@@ -217,7 +217,7 @@ class TestExecute:
         eng.ensure_account()
         db.upsert_paper_position("600000", "测试A", 100, 10.0, "2020-01-01", "t")
         results = asyncio.run(eng.execute_recommendations(
-            [FakeRec("600000", "测试A", "buy", 4.0, "突破")]))
+            [FakeRec("600000", "测试A", "buy", 45.0, "突破")]))
         assert results[0].side == "skip"
         assert "已持仓" in results[0].reason
 
@@ -227,9 +227,75 @@ class TestExecute:
         eng.settings.paper_auto_trade = False
         eng.ensure_account()
         results = asyncio.run(eng.execute_recommendations(
-            [FakeRec("600000", "测试A", "buy", 4.0, "突破")]))
+            [FakeRec("600000", "测试A", "buy", 45.0, "突破")]))
         assert results == []
         assert db.get_paper_account()["cash"] == 100000.0
+
+    def test_low_score_only_recorded(self, engine):
+        """评分低于半额线（25）只记录建议，不下单。"""
+        eng, db, prices = engine
+        eng.ensure_account()
+        results = asyncio.run(eng.execute_recommendations(
+            [FakeRec("600000", "测试A", "buy", 20.0, "刚过买入线")]))
+        assert results[0].side == "skip"
+        assert "仅记录" in results[0].reason
+        assert db.get_paper_account()["cash"] == 100000.0
+
+    def test_total_exposure_cap(self, engine, monkeypatch):
+        """总仓位不超过 80%：6 只等权候选只能花掉 8 万。"""
+        eng, db, _ = engine
+
+        async def fake_price(code, quotes=None):
+            return 10.0
+
+        monkeypatch.setattr(eng, "_latest_price", fake_price)
+        eng.settings.paper_max_positions = 10
+        eng.ensure_account()
+        codes = [f"6000{i:02d}" for i in range(6)]
+        results = asyncio.run(eng.execute_recommendations(
+            [FakeRec(c, c, "buy", 45.0, "突破") for c in codes]))
+
+        invested = sum(r.amount for r in results if r.side == "buy")
+        assert 75000 <= invested <= 80000 + 1e-6
+        assert db.get_paper_account()["cash"] >= 19000
+
+    def test_pool_split_only_among_available_slots(self, engine, monkeypatch):
+        """候选多于剩余名额时，预算只在高分候选中分配（不被买不到的摊薄）。"""
+        eng, db, _ = engine
+
+        async def fake_price(code, quotes=None):
+            return 10.0
+
+        monkeypatch.setattr(eng, "_latest_price", fake_price)
+        eng.settings.paper_max_positions = 3
+        eng.ensure_account()
+        codes = [f"6000{i:02d}" for i in range(5)]
+        results = asyncio.run(eng.execute_recommendations(
+            [FakeRec(c, c, "buy", 45.0, "突破") for c in codes]))
+
+        bought = [r for r in results if r.side == "buy"]
+        assert len(bought) == 3
+        invested = sum(r.amount for r in bought)
+        # 80% 预算在三只间均分 → 每只 ≈26666 但受单票 20% 上限 → 3×20000
+        assert invested == pytest.approx(60000, abs=1)
+
+    def test_higher_score_gets_bigger_position(self, engine, monkeypatch):
+        """评分加权：45 分的仓位明显大于 30 分（半额档）。"""
+        eng, db, _ = engine
+
+        async def fake_price(code, quotes=None):
+            return 10.0
+
+        monkeypatch.setattr(eng, "_latest_price", fake_price)
+        eng.settings.paper_max_positions = 10
+        eng.ensure_account()
+        recs = [
+            FakeRec("600010", "高分", "buy", 45.0, "突破"),
+            *[FakeRec(f"60001{i}", f"低分{i}", "buy", 30.0, "半额") for i in range(1, 5)],
+        ]
+        results = asyncio.run(eng.execute_recommendations(recs))
+        amounts = {r.code: r.amount for r in results if r.side == "buy"}
+        assert amounts["600010"] > max(v for k, v in amounts.items() if k != "600010")
 
 
 class TestStopLossTarget:
@@ -301,10 +367,181 @@ class TestSettle:
         eng, db, prices = engine
         eng.ensure_account()
         asyncio.run(eng.execute_recommendations(
-            [FakeRec("600000", "测试A", "buy", 4.0, "突破")]))
+            [FakeRec("600000", "测试A", "buy", 45.0, "突破")]))
         assert db.get_paper_account()["cash"] < 100000.0
 
         db.reset_paper_account(100000.0)
         assert db.get_paper_account()["cash"] == 100000.0
         assert db.list_paper_positions() == []
         assert db.list_paper_trades() == []
+
+
+class TestRotation:
+    """满仓后的轮动替换：用显著更高分的新票换掉最弱持仓。"""
+
+    def _seed(self, db, code="600000", score=30.0, buy_date="2026-10-20", shares=1000):
+        db.upsert_paper_position(code, code, shares, 10.0, buy_date, "test", score=score)
+        db.update_paper_cash(90000.0)
+
+    def test_rotation_swaps_weakest(self, engine):
+        eng, db, _ = engine
+        eng.settings.paper_max_positions = 1
+        eng.ensure_account()
+        self._seed(db)
+
+        results = asyncio.run(eng.execute_recommendations(
+            [FakeRec("600001", "新强", "buy", 60.0, "突破")]))
+
+        assert [r.side for r in results] == ["sell", "buy"]
+        assert results[0].code == "600000"
+        assert "轮动替换" in results[0].reason
+        assert db.get_paper_position("600000") is None
+        assert db.get_paper_position("600001") is not None
+
+    def test_no_rotation_when_gap_small(self, engine):
+        eng, db, _ = engine
+        eng.settings.paper_max_positions = 1
+        eng.ensure_account()
+        self._seed(db)
+
+        results = asyncio.run(eng.execute_recommendations(
+            [FakeRec("600001", "新票", "buy", 45.0, "突破")]))  # 差距 15 < 20
+
+        assert results[0].side == "skip"
+        assert "持仓已满" in results[0].reason
+        assert db.get_paper_position("600000") is not None
+
+    def test_no_rotation_on_t1(self, engine):
+        from datetime import datetime
+
+        eng, db, _ = engine
+        eng.settings.paper_max_positions = 1
+        eng.ensure_account()
+        self._seed(db, buy_date=datetime.now().strftime("%Y-%m-%d"))
+
+        results = asyncio.run(eng.execute_recommendations(
+            [FakeRec("600001", "新强", "buy", 60.0, "突破")]))
+
+        assert results[0].side == "skip"
+        assert "持仓已满" in results[0].reason
+
+    def test_rotation_daily_limit(self, engine):
+        from datetime import datetime
+
+        eng, db, _ = engine
+        eng.settings.paper_max_positions = 1
+        eng.ensure_account()
+        self._seed(db)
+        today = datetime.now().strftime("%Y-%m-%d")
+        db.insert_paper_trade(
+            "600002", "已换过", "sell", 10.0, 1000, 10000.0, 5.0,
+            "轮动替换(建仓30分→新票60分)", today,
+        )
+
+        results = asyncio.run(eng.execute_recommendations(
+            [FakeRec("600001", "新强", "buy", 60.0, "突破")]))
+
+        assert results[0].side == "skip"
+        assert "持仓已满" in results[0].reason
+
+    def test_rotation_disabled(self, engine):
+        eng, db, _ = engine
+        eng.settings.paper_max_positions = 1
+        eng.settings.paper_rotation_enabled = False
+        eng.ensure_account()
+        self._seed(db)
+
+        results = asyncio.run(eng.execute_recommendations(
+            [FakeRec("600001", "新强", "buy", 60.0, "突破")]))
+
+        assert results[0].side == "skip"
+        assert "持仓已满" in results[0].reason
+
+
+class TestBacklog:
+    """候补队列：名额/资金不足时先存着，有名额再买。"""
+
+    def _trader(self, monkeypatch, tmp_path):
+        from app.data.cache import Database
+
+        from app.paper import live as live_module
+
+        db = Database(tmp_path / "live.db")
+        monkeypatch.setattr(live_module, "db", db)
+        monkeypatch.setattr("app.data.cache.db", db, raising=False)
+        return live_module.LiveTrader(), live_module
+
+    def _signal(self, live_module, code="600000", score=45.0):
+        from datetime import datetime, timedelta
+
+        now = datetime.now()
+        return live_module.PendingSignal(
+            code=code, name=code, action="buy", reason="突破",
+            created_at=now, expire_at=now + timedelta(minutes=5), score=score,
+        )
+
+    def test_full_slot_goes_to_backlog(self, monkeypatch, tmp_path):
+        from datetime import datetime
+
+        trader, live_module = self._trader(monkeypatch, tmp_path)
+        trader._pending["600000"] = self._signal(live_module)
+
+        deferred = trader._defer_skips(
+            [TradeResult("600000", "600000", "skip", 0, 10.0, 0.0, 0.0,
+                         "持仓已满(10只)")],
+            datetime.now(),
+        )
+
+        assert deferred == {"600000"}
+        assert "600000" in trader._backlog
+        # 候补有效期长于普通信号 TTL
+        assert trader._backlog["600000"].expire_at > datetime.now()
+
+    def test_other_skips_not_deferred(self, monkeypatch, tmp_path):
+        from datetime import datetime
+
+        trader, live_module = self._trader(monkeypatch, tmp_path)
+        trader._pending["600000"] = self._signal(live_module)
+
+        deferred = trader._defer_skips(
+            [TradeResult("600000", "600000", "skip", 0, 0.0, 0.0, 0.0, "已持仓"),
+             TradeResult("600001", "600001", "skip", 0, 0.0, 0.0, 0.0,
+                         "评分20<25，仅记录不下单")],
+            datetime.now(),
+        )
+
+        assert deferred == set()
+        assert trader._backlog == {}
+
+    def test_backlog_capacity(self, monkeypatch, tmp_path):
+        from datetime import datetime
+
+        trader, live_module = self._trader(monkeypatch, tmp_path)
+        monkeypatch.setattr(trader.settings, "paper_backlog_max", 1)
+        trader._pending["600000"] = self._signal(live_module, "600000")
+        trader._pending["600001"] = self._signal(live_module, "600001")
+
+        deferred = trader._defer_skips(
+            [TradeResult("600000", "a", "skip", 0, 10.0, 0.0, 0.0, "持仓已满(10只)"),
+             TradeResult("600001", "b", "skip", 0, 10.0, 0.0, 0.0, "持仓已满(10只)")],
+            datetime.now(),
+        )
+
+        assert len(deferred) == 1
+        assert len(trader._backlog) == 1
+
+    def test_manual_position_not_rotated(self, engine):
+        """手动建仓的持仓不被自动轮动卖出。"""
+        eng, db, _ = engine
+        eng.settings.paper_max_positions = 1
+        eng.ensure_account()
+        db.upsert_paper_position(
+            "600000", "手动票", 1000, 10.0, "2026-10-20", "手动下单", score=0.0)
+        db.update_paper_cash(90000.0)
+
+        results = asyncio.run(eng.execute_recommendations(
+            [FakeRec("600001", "新强", "buy", 60.0, "突破")]))
+
+        assert results[0].side == "skip"
+        assert "持仓已满" in results[0].reason
+        assert db.get_paper_position("600000") is not None

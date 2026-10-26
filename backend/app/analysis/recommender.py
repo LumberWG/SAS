@@ -5,11 +5,14 @@
   - 盘中(每5分钟) intraday : 分析全部自选股 → 实时买卖建议
   - 盘后(15:35) post_market: 全市场扫描 → 明日关注 TopN + 自选股分析
 
-分级规则（多因子总分 ±100 + 市场情绪修正，见 app/analysis/factors.py）:
+分级规则（多因子总分 ±100，见 app/analysis/factors.py）:
   总分 >= +15           → 买入建议
   总分 <= -15           → 卖出建议
   其他                  → 持有观察
-  情绪权重 <= -0.5 时，买入建议降级为持有（逆环境谨慎，宁可错过）
+
+市场情绪只作为上下文写入理由，**不再一票否决买入**：
+弱市往往伴随更好的赔率（别人恐惧时贪婪），「大落大机会」由因子模型里的
+超跌/乖离/KDJ 等分项自行表达，而不是在宏观层面直接禁止买入。
 
 一次分析产出的建议会按总分降序排名（rank 从 1 开始），并把各因子分项写入
 detail（JSON 字符串），供前端展示「为什么排这个位置」。
@@ -110,9 +113,8 @@ class Recommender:
             sentiment_level = ""
             weight = 0.0
 
-        action = result.action  # 已按 ±15 分阈值给出 buy/sell/hold
-        if weight <= -0.5 and action == "buy":
-            action = "hold"
+        # 按 ±15 分阈值给出 buy/sell/hold；情绪不再降级（仅写入理由）
+        action = result.action
 
         # 理由：取贡献最大的正/负因子
         positives = result.top_reasons(positive=True)

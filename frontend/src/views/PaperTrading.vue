@@ -499,11 +499,14 @@ onUnmounted(() => {
     </div>
 
     <!-- 待执行信号 -->
-    <div v-if="live && live.pending.length > 0" class="glass-card p-4">
+    <div
+      v-if="live && (live.pending.length > 0 || (live.backlog?.length ?? 0) > 0)"
+      class="glass-card p-4"
+    >
       <div class="mb-2 flex items-center justify-between">
         <h3 class="text-subheading">待执行信号</h3>
         <span class="text-[11px] text-content-faint">
-          下个 tick 按实时价成交 · 评分高者优先 · 仓位按评分加权 · 同股以最新信号为准
+          下个 tick 按实时价成交 · 评分高者优先 · 满仓时高分票可替换最弱持仓 · 同股以最新信号为准
         </span>
       </div>
       <div class="flex flex-wrap gap-2">
@@ -521,6 +524,31 @@ onUnmounted(() => {
           <span v-if="p.score" class="font-num text-primary-light">{{ p.score }}分</span>
           <span class="font-num text-content-faint">· {{ p.waiting_seconds }}s</span>
         </span>
+      </div>
+
+      <div
+        v-if="live.backlog && live.backlog.length > 0"
+        class="mt-3 border-t border-base-600/50 pt-2.5"
+      >
+        <div class="flex items-center justify-between">
+          <span class="text-[11px] text-content-faint">候补（名额/资金释放后按评分优先买入）</span>
+          <span class="font-num text-[11px] text-content-faint">
+            共 {{ live.backlog_count ?? live.backlog.length }} 只
+          </span>
+        </div>
+        <div class="mt-1.5 flex flex-wrap gap-1.5">
+          <span
+            v-for="b in live.backlog"
+            :key="b.code"
+            class="inline-flex items-center gap-1.5 rounded-md border border-dashed border-base-600 px-2 py-1 text-[11px] text-content-muted"
+            :title="b.reason"
+          >
+            <span class="text-up">候</span>
+            {{ b.name }}
+            <span class="font-num text-content-faint">{{ b.code }}</span>
+            <span v-if="b.score" class="font-num text-primary-light">{{ b.score }}分</span>
+          </span>
+        </div>
       </div>
     </div>
 
