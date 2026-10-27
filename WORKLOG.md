@@ -902,8 +902,9 @@ $$
 | 组成 | 位置 | 说明 |
 | --- | --- | --- |
 | 参数方案 | `app/backtest/profiles.py` | 每个方案是一组 `PipelineParams` 覆盖值；`default` 必须等于线上配置 |
-| 回归入口 | `scripts/regression.py` | 同一区间跑多方案，输出 markdown 对照表 + JSON 落盘 |
+| 回归入口 | `scripts/regression.py` | 同一区间跑多方案，输出 markdown 对照表 + JSON 落盘；`--windows A,D` 一次跑多个命名窗口 |
 | 参数搜索 | `scripts/search.py` | 随机采样/单变量爬山，多窗口 × 多股票池交叉评估，按「最差格子超额」排序，断点续跑（见 `BACKTEST_LOG` 记录 #7） |
+| 窗口子集 | `--windows A,B,C,D` | 日常迭代只跑近端 4 窗口省 1/3 时间；E/F（2024）留给定稿前的稳定性复验（覆盖普跌/普涨两种市况） |
 | 信号预计算 | `pipeline._build_signals()` | 扫描/自选/14因子与交易参数解耦，同一区间只算一次，单组参数 1~2s |
 | 可覆盖字段 | `PipelineParams` | 总仓位、单票比例、评分档（full/half）、轮动门槛/gap、买入阈值、止损止盈、时间止损、持仓数、股票池、E2/E5 过滤（次日开盘涨幅上限、量比、换手率、近 5 日涨幅）、E9 卖出侧（保本止损、移动止损、大盘择时 `regime_ma`）、E10/E11（分段止盈、止损收盘确认）、E13（弱市降仓 `weak_exposure`） |
 | 默认行为 | 全部 `None` | `None` 表示沿用 `settings.paper_*` / `factors.BUY_THRESHOLD`，API 回测行为不变 |

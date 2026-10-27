@@ -112,6 +112,35 @@ def neighbor_configs(tag_path: str, top_n: int) -> list[dict]:
     return dedupe(out)
 
 
+def resolve_windows(spec: str) -> dict[str, tuple[str, str]]:
+    """解析 ``--windows A,B,C`` 为窗口子集；空串表示全部。
+
+    日常迭代只跑近端窗口（A/B/C/D）节省 1/3 时间，E/F（2024）留给定稿前的
+    稳定性复验——它们的作用是覆盖「普跌/普涨」两种市况，不是持仓周期需要。
+    """
+    names = [n.strip().upper() for n in str(spec or "").split(",") if n.strip()]
+    if not names:
+        return dict(WINDOWS)
+    unknown = [n for n in names if n not in WINDOWS]
+    if unknown:
+        raise SystemExit(f"未知窗口 {unknown}，可选 {list(WINDOWS)}")
+    return {n: WINDOWS[n] for n in names}
+
+
+def _window_names(data: dict) -> list[str]:
+    """本次（含历次续跑）跑过的窗口，用于排名时不卡没跑的窗口。
+
+    优先读 ``data["windows"]``（每次 run 都会合并写入）；老结果文件没有这个字段时
+    再从结果键里推断，避免把「老格式/别的批次」的窗口算进来导致排名全被跳过。
+    """
+    saved = data.get("windows") or {}
+    names = [w for w in WINDOWS if w in saved]
+    if names:
+        return names
+    done = {k.split("|", 1)[0] for k in (data.get("results") or {})}
+    return [w for w in WINDOWS if w in done]
+
+
 def cfg_id(idx: int, cfg: dict) -> str:
     parts = [f"c{idx:03d}"]
     for k, v in cfg.items():
@@ -155,23 +184,28 @@ def run(args: argparse.Namespace) -> None:
     # 断点续跑时允许分批传不同股票池：合并而不是覆盖，最后一次性排名
     data["universes"] = sorted(set(data.get("universes") or []) | set(universes))
     universes = data["universes"]
+    windows = resolve_windows(getattr(args, "windows", ""))
+    # 与股票池同理：分批跑不同窗口时合并，最后一次性排名
+    data["windows"] = {
+        **(data.get("windows") or {}), **{k: list(v) for k, v in windows.items()},
+    }
 
-    total_runs = len(WINDOWS) * len(universes) * len(configs)
+    total_runs = len(windows) * len(universes) * len(configs)
     done = sum(
         1
-        for w in WINDOWS
+        for w in windows
         for u in universes
         for cid in data["configs"]
         if f"{w}|u{u}|{cid}" in data["results"]
     )
     print(
-        f"窗口 {list(WINDOWS)} × 股票池 {universes} × 组合 {len(configs)} "
+        f"窗口 {list(windows)} × 股票池 {universes} × 组合 {len(configs)} "
         f"= {total_runs} 次；已完成 {done}",
         flush=True,
     )
 
     for u in universes:
-        for wname, (start, end) in WINDOWS.items():
+        for wname, (start, end) in windows.items():
             # 断点续跑时，若该(股票池,窗口)的所有组合都已完成，直接跳过数据准备
             pending = [
                 cid for cid in data["configs"]
@@ -228,12 +262,13 @@ def _ranking(data: dict) -> list[dict]:
     只在某个股票池上有效的参数属于过拟合（见记录 #7 的 auto_v1）。
     """
     unis = data.get("universes") or [None]  # None = 老格式（单一股票池）
+    windows = _window_names(data) or list(WINDOWS)
     rows = []
     for cid, cfg in data["configs"].items():
         per: dict[str, dict] = {}
         missing = False
         for u in unis:
-            for w in WINDOWS:
+            for w in windows:
                 label = f"{w}/u{u}" if u else w
                 key = f"{w}|u{u}|{cid}" if u else f"{w}|{cid}"
                 r = data["results"].get(key)
@@ -296,6 +331,10 @@ def main() -> None:
     parser.add_argument("--tag", default="s1")
     parser.add_argument("--neighbors", default="", help="从该 tag 的结果生成单变量邻居组合")
     parser.add_argument("--top", type=int, default=3, help="邻居模式取前 N 名")
+    parser.add_argument(
+        "--windows", default="",
+        help="逗号分隔的窗口子集（如 A,B,C,D），缺省=全部 6 个（E/F 为 2024 年）",
+    )
     args = parser.parse_args()
     run(args)
 
