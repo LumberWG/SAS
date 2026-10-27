@@ -338,6 +338,49 @@ export interface BacktestResult {
   }
   equity_curve: { date: string; equity: number }[]
   trades: BacktestTrade[]
+  review?: BacktestReview
+}
+
+/** 归因分组统计（卖出原因 / 评分档 / 持有天数） */
+export interface BacktestGroup {
+  name: string
+  count: number
+  pnl: number
+  avg_pnl_pct: number
+  win_rate: number
+}
+
+/** 复盘用到的精简成交行 */
+export interface BacktestReviewTrade {
+  code: string
+  name: string
+  buy_date: string
+  sell_date: string
+  pnl_pct: number
+  pnl: number
+  reason: string
+  score?: number
+}
+
+/** 参数调整建议 */
+export interface BacktestSuggestion {
+  target: string
+  current: string | number
+  suggest: string | number
+  reason: string
+  priority: string
+}
+
+/** 回测复盘：亏损归因 + 调参建议（由后端 app/backtest/review.py 生成） */
+export interface BacktestReview {
+  summary: string
+  reasons: BacktestGroup[]
+  score_buckets: BacktestGroup[]
+  hold_buckets: BacktestGroup[]
+  avg_hold_days: number
+  cost: { fee_total: number; pnl_total: number; fee_vs_loss_pct: number }
+  extremes: { worst: BacktestReviewTrade[]; best: BacktestReviewTrade[] }
+  suggestions: BacktestSuggestion[]
 }
 
 /** 后端回测任务状态（提交后轮询，避免长请求撞上 30s 超时）。 */

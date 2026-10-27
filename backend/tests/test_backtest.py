@@ -118,3 +118,19 @@ class TestBacktest:
         # 不 patch 时真实取数会失败/无数据, 引擎应容错返回
         result = asyncio.run(BacktestEngine().run(params))
         assert result["metrics"] == {} or "total_return" in result["metrics"]
+
+
+def test_pipeline_load_klines_skips_index_files(tmp_path):
+    """流水线回测：指数缓存（idx_ 前缀）不能被当成个股混进股票池。"""
+    from app.backtest.pipeline import _load_klines
+
+    dates = pd.date_range("2025-01-01", periods=130).strftime("%Y-%m-%d")
+    df = pd.DataFrame({
+        "date": dates, "open": 10.0, "close": 10.0, "high": 10.1,
+        "low": 9.9, "volume": 1e6, "amount": 1e8,
+    })
+    df.to_parquet(tmp_path / "600000.parquet", index=False)
+    df.to_parquet(tmp_path / "idx_sh000001.parquet", index=False)
+
+    data = _load_klines(dates[-1], dates[100], str(tmp_path))
+    assert list(data) == ["600000"]

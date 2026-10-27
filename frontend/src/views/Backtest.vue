@@ -161,6 +161,88 @@ function metricTone(v: number): string {
         </div>
       </div>
 
+      <!-- 亏损归因与调参建议 -->
+      <div v-if="result.review" class="glass-card p-5">
+        <div class="flex flex-wrap items-baseline justify-between gap-2">
+          <h3 class="text-subheading">亏损归因</h3>
+          <span class="text-[11px] text-content-faint">
+            平均持有 {{ result.review.avg_hold_days }} 个交易日 · 费用 {{ result.review.cost.fee_total.toFixed(0) }} 元
+            （占亏损 {{ result.review.cost.fee_vs_loss_pct }}%）
+          </span>
+        </div>
+        <p class="mt-2 text-[12px] text-content-muted">{{ result.review.summary }}</p>
+
+        <div class="mt-4 grid grid-cols-1 gap-5 lg:grid-cols-2">
+          <div>
+            <div class="mb-2 text-[12px] text-content-muted">按卖出原因</div>
+            <table class="w-full text-left text-[12px]">
+              <thead class="text-[11px] text-content-faint">
+                <tr class="border-b border-base-600/60">
+                  <th class="py-1.5 font-medium">原因</th>
+                  <th class="py-1.5 text-right font-medium">笔数</th>
+                  <th class="py-1.5 text-right font-medium">平均</th>
+                  <th class="py-1.5 text-right font-medium">胜率</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="g in result.review.reasons" :key="g.name" class="border-b border-base-600/30">
+                  <td class="py-1.5 text-content">{{ g.name }}</td>
+                  <td class="font-num py-1.5 text-right text-content-muted">{{ g.count }}</td>
+                  <td class="font-num py-1.5 text-right" :class="metricTone(g.avg_pnl_pct)">
+                    {{ g.avg_pnl_pct > 0 ? '+' : '' }}{{ g.avg_pnl_pct.toFixed(2) }}%
+                  </td>
+                  <td class="font-num py-1.5 text-right text-content-muted">{{ g.win_rate.toFixed(0) }}%</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div>
+            <div class="mb-2 text-[12px] text-content-muted">按持有天数</div>
+            <table class="w-full text-left text-[12px]">
+              <thead class="text-[11px] text-content-faint">
+                <tr class="border-b border-base-600/60">
+                  <th class="py-1.5 font-medium">持有</th>
+                  <th class="py-1.5 text-right font-medium">笔数</th>
+                  <th class="py-1.5 text-right font-medium">平均</th>
+                  <th class="py-1.5 text-right font-medium">胜率</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="g in result.review.hold_buckets" :key="g.name" class="border-b border-base-600/30">
+                  <td class="py-1.5 text-content">{{ g.name }}</td>
+                  <td class="font-num py-1.5 text-right text-content-muted">{{ g.count }}</td>
+                  <td class="font-num py-1.5 text-right" :class="metricTone(g.avg_pnl_pct)">
+                    {{ g.avg_pnl_pct > 0 ? '+' : '' }}{{ g.avg_pnl_pct.toFixed(2) }}%
+                  </td>
+                  <td class="font-num py-1.5 text-right text-content-muted">{{ g.win_rate.toFixed(0) }}%</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div class="mt-5">
+          <div class="mb-2 text-[12px] text-content-muted">调参建议（按优先级）</div>
+          <ul class="space-y-2">
+            <li
+              v-for="(s, i) in result.review.suggestions"
+              :key="i"
+              class="rounded-lg border border-base-600/60 bg-base-700/40 px-3 py-2"
+            >
+              <div class="flex flex-wrap items-center gap-2">
+                <span
+                  class="rounded-md px-1.5 py-0.5 text-[10px]"
+                  :class="s.priority === '高' ? 'bg-down/15 text-down' : s.priority === '中' ? 'bg-base-600/50 text-content' : 'bg-base-600/30 text-content-muted'"
+                >{{ s.priority }}</span>
+                <span class="text-[12px] font-medium text-content">{{ s.target }}</span>
+                <span class="font-num text-[11px] text-content-muted">{{ s.current }} → {{ s.suggest }}</span>
+              </div>
+              <p class="mt-1 text-[11px] leading-relaxed text-content-faint">{{ s.reason }}</p>
+            </li>
+          </ul>
+        </div>
+      </div>
+
       <!-- 净值曲线 -->
       <div class="glass-card p-5">
         <h3 class="mb-3 text-subheading">净值曲线</h3>

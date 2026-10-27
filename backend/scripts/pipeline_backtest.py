@@ -41,6 +41,8 @@ def main() -> None:
                         help="止盈比例（相对持仓成本），短线常用 0.08~0.10")
     parser.add_argument("--max-hold-days", type=int, default=0,
                         help="时间止损：持有 N 个交易日后次日开盘卖出（0=不限制）")
+    parser.add_argument("--buy-threshold", type=float, default=None,
+                        help="14因子买入阈值，缺省沿用 factors.BUY_THRESHOLD（15）")
     parser.add_argument("--tag", default="", help="结果文件名后缀，便于多组参数对比")
     args = parser.parse_args()
 
@@ -55,6 +57,7 @@ def main() -> None:
         stop_loss=args.stop_loss,
         take_profit=args.take_profit,
         max_hold_days=args.max_hold_days,
+        buy_threshold=args.buy_threshold,
     ))
 
     metrics = result["metrics"]
