@@ -24,6 +24,73 @@ def _now() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
+# ----------------------------------------------------------------------
+# 换手率补齐（成交量 ÷ 流通股本）
+# ----------------------------------------------------------------------
+#: 反推流通股本时的滚动中位数窗口（按观测数，不是自然日）
+_FLOAT_SHARE_WINDOW = 21
+#: 反推换手率的合理上限（%）：超过说明流通股本取错（新股/退市残留）
+_MAX_TURNOVER = 100.0
+
+
+def float_shares_series(df: pd.DataFrame) -> pd.Series | None:
+    """由「成交量 + 换手率」反推逐日流通股本（股本不变时应近似常数）。
+
+    口径：``换手率(%) = 成交量(手) × 10000 / 流通股本(股)``。
+    同一行同时有成交量与换手率时可直接解出流通股本；两位小数的换手率
+    （0.14% 时 ±0.005 就是 ±3.6%）靠滚动中位数压掉舍入噪声。
+
+    Returns:
+        与 ``df`` 同索引的流通股本（股）；无可用观测（或缺列）时返回 None。
+    """
+    if "volume" not in df.columns or "turnover_rate" not in df.columns:
+        return None
+    volume = pd.to_numeric(df["volume"], errors="coerce")
+    turnover = pd.to_numeric(df["turnover_rate"], errors="coerce")
+    obs = turnover.notna() & (turnover > 0) & volume.notna() & (volume > 0)
+    if not bool(obs.any()):
+        return None
+    shares = volume[obs] * 10000.0 / turnover[obs]
+    shares = shares.rolling(_FLOAT_SHARE_WINDOW, min_periods=1, center=True).median()
+    return shares.reindex(df.index).ffill().bfill()
+
+
+def fill_turnover(
+    df: pd.DataFrame, fallback_shares: float | None = None
+) -> tuple[pd.DataFrame, int, int]:
+    """补齐 ``turnover_rate`` 空值（腾讯/新浪 K 线兜底源不返回换手率）。
+
+    流通股本优先用该股自己历史行情的反推值（真实股本变化时缺口里用的是
+    「最近的已知值」，而不是拿今天的股本回填三年前）；完全没有观测时用
+    ``fallback_shares``（如腾讯实时行情的 ``float_shares``）兜底。
+
+    Args:
+        df: 日线，需含 ``volume`` / ``turnover_rate``
+        fallback_shares: 无历史观测时的流通股本（股）
+
+    Returns:
+        ``(新df, 补齐行数, 越界丢弃行数)``
+    """
+    if "volume" not in df.columns or "turnover_rate" not in df.columns:
+        return df, 0, 0
+    volume = pd.to_numeric(df["volume"], errors="coerce")
+    turnover = pd.to_numeric(df["turnover_rate"], errors="coerce")
+    shares = float_shares_series(df)
+    if shares is None:
+        if not fallback_shares or fallback_shares <= 0:
+            return df, 0, 0
+        shares = pd.Series(float(fallback_shares), index=df.index)
+
+    target = turnover.isna() & volume.notna() & (volume > 0) & shares.notna() & (shares > 0)
+    if not bool(target.any()):
+        return df, 0, 0
+    derived = (volume[target] * 10000.0 / shares[target]).round(4)
+    good = (derived > 0) & (derived <= _MAX_TURNOVER)
+    out = df.copy()
+    out.loc[derived[good].index, "turnover_rate"] = derived[good]
+    return out, int(good.sum()), int((~good).sum())
+
+
 class KlineCache:
     """日K线 Parquet 缓存。
 
@@ -59,7 +126,12 @@ class KlineCache:
         return str(df["date"].iloc[-1])
 
     def save(self, code: str, df: pd.DataFrame) -> None:
-        """保存/更新K线（按日期去重合并后原子写入）。"""
+        """保存/更新K线（按日期去重合并后原子写入）。
+
+        合并后顺手补齐 ``turnover_rate``：腾讯/新浪兜底 K 线不带换手率，
+        不补的话每天新增的行都会是空值（14 因子的换手率分项恒为 0）。
+        用该股历史行情的反推值填充，纯本地计算，不额外请求数据源。
+        """
         if df is None or df.empty:
             return
         existing = self.get(code)
@@ -68,6 +140,7 @@ class KlineCache:
             df = pd.concat([existing, df], ignore_index=True)
             df = df.drop_duplicates(subset=["date"], keep="last")
             df = df.sort_values("date").reset_index(drop=True)
+        df, _, _ = fill_turnover(df)
         df.to_parquet(self._path(code), index=False)
 
 

@@ -11,6 +11,7 @@
 - 腾讯K线备: ifzq.gtimg.cn/appstock/app/kline/kline（不复权）
 - 新浪K线  : money.finance.sina.com.cn/.../CN_MarketData.getKLineData
 - 新浪实时 : hq.sinajs.cn/list=...（支持批量，GBK 编码）
+- 腾讯实时 : qt.gtimg.cn/q=...（支持批量，唯一带换手率/总市值/流通市值/总股本的免费源）
 - 东财列表 : push2.eastmoney.com/api/qt/clist/get（全市场代码表）
 - 新浪列表 : vip.stock.finance.sina.com.cn/.../Market_Center.getHQNodeData（分页全量）
 - 上交所列表: query.sse.com.cn/security/stock/getStockListData2.do（主板+科创板，GBK）
@@ -155,9 +156,13 @@ def tencent_kline(code: str, adjust: str = "qfq", count: int = 300) -> pd.DataFr
     count 默认 300：策略最长需要约 70 根K线 + 指标预热，
     300 根足够且响应体小（800 根会明显拖慢全市场扫描）。
 
-    注意：腾讯接口不返回成交额，这里按
+    注意 1：腾讯接口不返回成交额，这里按
         成交额 ≈ 成交量(手) × 100股 × (最高+最低+收盘)/3
     估算，仅用于指标计算（如"成交额过亿"筛选），与真实值有偏差。
+
+    注意 2：腾讯对**科创板**（688/689）返回的成交量单位是「股」而不是「手」
+    （实测 688351 同一日：腾讯 8594093 ↔ 新浪 85940.93 手），
+    不换算会让科创板成交量与估算成交额整体放大 100 倍并向缓存落盘。
     """
     symbol = code_to_symbol(code)
     key = {"qfq": "qfqday", "hfq": "hfqday"}.get(adjust, "day")
@@ -185,6 +190,8 @@ def tencent_kline(code: str, adjust: str = "qfq", count: int = 300) -> pd.DataFr
     for row in rows:
         date, o, c, h, l, v = row[0], row[1], row[2], row[3], row[4], row[5]
         o, c, h, l, v = map(float, (o, c, h, l, v))
+        if code.startswith(("688", "689")):
+            v /= 100.0  # 科创板：腾讯给的是「股」，统一为「手」
         amount = v * 100 * (h + l + c) / 3  # 估算成交额（元）
         records.append({
             "date": date, "open": o, "close": c, "high": h, "low": l,
@@ -685,3 +692,129 @@ def sina_quotes(symbols: list[str]) -> pd.DataFrame:
                 "volume": volume, "amount": amount,
             })
     return pd.DataFrame(records)
+
+
+# ----------------------------------------------------------------------
+# 实时快照（腾讯批量，含换手率 / 市值 / 股本）
+# ----------------------------------------------------------------------
+#: 腾讯批量行情单批数量（实测 60 只/次稳定，风控比新浪略严）
+_TENCENT_BATCH_SIZE = 60
+#: 解析 'v_sh600519="1~贵州茅台~600519~...";' 行
+_TENCENT_LINE_RE = re.compile(r'v_(\w+)="([^"]*)";')
+
+#: 腾讯行情字段下标（0 起，``~`` 分隔）。原始口径：
+#: 成交量「手」、成交额「万元」、市值「亿元」、股本「股」。
+_TQ_NAME, _TQ_CODE = 1, 2
+_TQ_PRICE, _TQ_PREV, _TQ_OPEN, _TQ_VOLUME = 3, 4, 5, 6
+_TQ_CHANGE, _TQ_PCT, _TQ_HIGH, _TQ_LOW = 31, 32, 33, 34
+_TQ_AMOUNT, _TQ_TURNOVER = 37, 38
+_TQ_FLOAT_MV, _TQ_TOTAL_MV = 44, 45
+_TQ_FLOAT_SHARES, _TQ_TOTAL_SHARES = 72, 73
+
+_QUOTE_COLUMNS = [
+    "code", "name", "price", "pct_change", "change", "open", "high", "low",
+    "prev_close", "volume", "amount", "turnover_rate", "total_mv", "float_mv",
+    "float_shares", "total_shares",
+]
+
+
+def _qnum(fields: list[str], idx: int, scale: float = 1.0) -> float | None:
+    """取第 idx 个字段并转 float（越界 / 空串 / 非数字返回 None）。"""
+    if idx >= len(fields):
+        return None
+    raw = fields[idx].strip()
+    if not raw:
+        return None
+    try:
+        return float(raw) * scale
+    except ValueError:
+        return None
+
+
+def _quote_volume_hand(fields: list[str], price: float | None) -> float | None:
+    """腾讯行情成交量统一换算为「手」。
+
+    腾讯的成交量单位不统一：主板/创业板/北交所给「手」，科创板（688/689）
+    给「股」（实测 688351 行情 3336571 股 ↔ 同日 K 线 8594093 股 ↔ 新浪 85940.93 手）。
+    用「成交额 ÷ 价格 ≈ 成交股数」判断口径：与成交股数同量级即为「股」，
+    否则按「手」处理（成交额单位是「万元」，两家一致）。
+    """
+    raw = _qnum(fields, _TQ_VOLUME)
+    if not raw or raw <= 0:
+        return None
+    amount_yuan = _qnum(fields, _TQ_AMOUNT, 1e4)
+    if not amount_yuan or not price:
+        return raw
+    traded_shares = amount_yuan / price
+    is_shares = abs(raw - traded_shares) < abs(raw * 100 - traded_shares)
+    return raw / 100.0 if is_shares else raw
+
+
+def tencent_quotes(
+    symbols: list[str], batch_size: int = _TENCENT_BATCH_SIZE
+) -> pd.DataFrame:
+    """腾讯批量实时行情（含换手率、总/流通市值、总/流通股本）。
+
+    接口: https://qt.gtimg.cn/q=sh600519,sz000001,...
+    这是目前唯一在**批量**快照里同时给换手率与市值/股本口径的免费源：
+    新浪批量行情（``sina_quotes``）只有价格与量额，东财 push2 在本机不可达时
+    全市场快照的 ``turnover_rate`` / ``total_mv`` / ``float_mv`` 会整列为空。
+    ``float_shares`` 还可用于反推历史换手率（``成交量 ÷ 流通股本``），
+    补齐腾讯/新浪 K 线兜底源不返回换手率的缺口。
+
+    单位统一：成交量「手」、成交额「元」、市值「元」、股本「股」，
+    与 ``sina_quotes`` / 东财快照口径一致（科创板原始量纲是「股」，已换算）。
+
+    Returns:
+        列: ``code``, ``name``, ``price``, ``pct_change``, ``change``,
+        ``open``, ``high``, ``low``, ``prev_close``, ``volume``, ``amount``,
+        ``turnover_rate``, ``total_mv``, ``float_mv``, ``float_shares``,
+        ``total_shares``；无有效成交价（停牌/未开盘）的行被剔除。
+    """
+    records: list[dict] = []
+    for i in range(0, len(symbols), batch_size):
+        batch = symbols[i : i + batch_size]
+        batch_no = i // batch_size
+        text = None
+        # 单批重试一次：缺一批就少 60 只股票，会让快照大幅缩水
+        for attempt in (1, 2):
+            try:
+                text = _get_text("https://qt.gtimg.cn/q=" + ",".join(batch))
+                break
+            except Exception as exc:  # noqa: BLE001 - 单批失败不拖垮整体
+                if attempt == 2:
+                    logger.warning("腾讯实时批次 %d 请求失败: %s", batch_no, exc)
+                else:
+                    time.sleep(0.3)
+        if text is None:
+            continue
+        for match in _TENCENT_LINE_RE.finditer(text):
+            symbol, payload = match.group(1), match.group(2)
+            fields = payload.split("~")
+            if len(fields) < 50:
+                continue  # v_pv_none_match 等无效代码
+            price = _qnum(fields, _TQ_PRICE)
+            if price is None or price <= 0:
+                continue  # 停牌/集合竞价前，涨跌幅会被算成 -100%
+            prev_close = _qnum(fields, _TQ_PREV)
+            records.append({
+                "code": (fields[_TQ_CODE] or symbol[2:]).strip(),
+                "name": fields[_TQ_NAME].strip(),
+                "price": price,
+                "pct_change": _qnum(fields, _TQ_PCT),
+                "change": _qnum(fields, _TQ_CHANGE),
+                "open": _qnum(fields, _TQ_OPEN),
+                "high": _qnum(fields, _TQ_HIGH),
+                "low": _qnum(fields, _TQ_LOW),
+                "prev_close": prev_close,
+                "volume": _quote_volume_hand(fields, price),   # 统一为手
+                "amount": _qnum(fields, _TQ_AMOUNT, 1e4),      # 万元 → 元
+                "turnover_rate": _qnum(fields, _TQ_TURNOVER),  # %
+                "total_mv": _qnum(fields, _TQ_TOTAL_MV, 1e8),  # 亿元 → 元
+                "float_mv": _qnum(fields, _TQ_FLOAT_MV, 1e8),  # 亿元 → 元
+                "float_shares": _qnum(fields, _TQ_FLOAT_SHARES),  # 股
+                "total_shares": _qnum(fields, _TQ_TOTAL_SHARES),  # 股
+            })
+    if not records:
+        return pd.DataFrame(columns=_QUOTE_COLUMNS)
+    return pd.DataFrame(records, columns=_QUOTE_COLUMNS)

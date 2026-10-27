@@ -26,6 +26,7 @@ from app.data.fallback import (
     sina_quotes,
     tencent_kline,
     tencent_minute,
+    tencent_quotes,
     xueqiu_kline,
 )
 from app.net import apply_data_network_settings
@@ -275,12 +276,14 @@ class AkshareDataSource(BaseDataSource):
         """全市场实时快照。
 
         主源：东方财富。若其不可用（部分网络屏蔽 push2 主机），
-        降级为新浪批量实时行情（成交量口径统一为手）。
+        降级为腾讯批量实时行情（带换手率与市值/股本），
+        腾讯也不可用时再降级为新浪批量行情（只有价格与量额）。
+        成交量口径统一为手。
         """
         try:
             df = self._call("stock_zh_a_spot_em")
         except DataSourceError:
-            logger.warning("东方财富快照不可用，降级为新浪批量实时行情")
+            logger.warning("东方财富快照不可用，降级为腾讯批量实时行情")
             # 用服务层股票池（东财列表/新浪列表/快照多级降级 + 缓存）取代码表，
             # 避免这里的 akshare 池接口超时把整次快照刷新拖成分钟级
             from app.data.service import get_stock_pool
@@ -289,13 +292,19 @@ class AkshareDataSource(BaseDataSource):
             symbols = [
                 code_to_symbol(r.code, r.market) for r in pool.itertuples()
             ]
-            df = sina_quotes(symbols)
+            # 腾讯批量行情带 turnover_rate / total_mv / float_mv / float_shares，
+            # 东财不可达时仍能保证这几列不为空（影响 14 因子换手率分项、
+            # 市值分档与个股页展示）；新浪批量行情没有这些字段，退居第二级。
+            df = tencent_quotes(symbols)
+            if df.empty:
+                logger.warning("腾讯批量行情不可用，降级为新浪批量实时行情")
+                df = sina_quotes(symbols)
             if df.empty:
                 raise DataSourceError("所有数据源均不可用（实时快照）") from None
-            # 新浪降级路径偶发返回残缺结构（仅 code 列），判废而非落盘污染缓存
+            # 降级路径偶发返回残缺结构（仅 code 列），判废而非落盘污染缓存
             for col in ("code", "price", "pct_change", "amount"):
                 if col not in df.columns:
-                    raise DataSourceError(f"新浪快照缺失关键列: {col}")
+                    raise DataSourceError(f"腾讯/新浪快照缺失关键列: {col}")
             return df.reset_index(drop=True)
 
         df = df.rename(columns={
