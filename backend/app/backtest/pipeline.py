@@ -96,6 +96,9 @@ class PipelineParams:
     half_score: float | None = None
     rotation_gap: float | None = None
     rotation_min_score: float | None = None
+    # ---- 选股模型实验（None = 线上行为） ----
+    factor_weights: dict[str, float] | None = None  # 14 因子权重覆盖，自动归一化到 100
+    strategies: tuple[str, ...] | None = None       # 只启用指定策略，None = 全部注册策略
 
 
 def calc_fee(side: str, amount: float) -> float:
@@ -216,11 +219,44 @@ def _prepare(params: PipelineParams) -> dict:
     }
 
 
-def _build_signals(prepared: dict, params: PipelineParams) -> dict[str, list[dict]]:
-    """预算每日「扫描 → 加自选 → 14因子排序」的结果（与交易参数无关）。
+def _pick_strategies(all_strategies: list, wanted: tuple[str, ...] | None) -> list:
+    """按参数筛选参与扫描的策略（``None`` = 全部注册策略，即线上行为）。"""
+    if not wanted:
+        return all_strategies
+    known = {s.name for s in all_strategies}
+    unknown = [n for n in wanted if n not in known]
+    if unknown:
+        raise RuntimeError(f"未知策略 {unknown}，可选 {sorted(known)}")
+    keep = set(wanted)
+    return [s for s in all_strategies if s.name in keep]
 
-    这几步只依赖 K 线与指标，不依赖买入阈值/仓位/止损等交易参数，所以
-    参数搜索时可以只算一次；之后每个参数组合只跑交易循环（毫秒级）。
+
+def _signals_key(params: PipelineParams) -> tuple:
+    """影响「选股结果」的参数指纹：变了就必须重算 signals。
+
+    仓位/止损/阈值这类只影响交易循环的参数不在指纹里，所以普通参数搜索仍然是
+    「准备一次、多组复用」；只有动到选股模型（因子权重、策略集）才会重算。
+    """
+    return (tuple(params.strategies or ()),
+            tuple(sorted((params.factor_weights or {}).items())))
+
+
+def _ensure_signals(prepared: dict, params: PipelineParams) -> dict[str, list[dict]]:
+    """取当前参数对应的 signals（指纹变了就重算）。"""
+    key = _signals_key(params)
+    if prepared.get("signals_key") == key:
+        return prepared["signals"]
+    prepared["signals"] = _build_signals(prepared, params)
+    prepared["signals_key"] = key
+    return prepared["signals"]
+
+
+def _build_signals(prepared: dict, params: PipelineParams) -> dict[str, list[dict]]:
+    """预算每日「扫描 → 加自选 → 14因子排序」的结果。
+
+    只依赖 K 线、指标与**选股模型**（策略集、因子权重），不依赖买入阈值/仓位/
+    止损等交易参数，所以普通参数搜索时可以只算一次；动到选股模型时由
+    ``_ensure_signals`` 按指纹重算。
     返回 ``{date: scored}``，``scored`` 已按 14 因子总分降序排列。
     """
     dates: list[str] = prepared["dates"]
@@ -228,7 +264,7 @@ def _build_signals(prepared: dict, params: PipelineParams) -> dict[str, list[dic
     klines: dict[str, pd.DataFrame] = prepared["klines"]
     names: dict[str, str] = prepared["names"]
     pos_index: dict[str, dict[str, int]] = prepared["pos_index"]
-    strategies = prepared["strategies"]
+    strategies = _pick_strategies(prepared["strategies"], params.strategies)
 
     watch: "OrderedDict[str, int]" = OrderedDict()  # code -> 0（FIFO 淘汰）
     signals: dict[str, list[dict]] = {}
@@ -284,7 +320,9 @@ def _build_signals(prepared: dict, params: PipelineParams) -> dict[str, list[dic
             if idx is None:
                 continue
             try:
-                result = compute_factors(klines[code].iloc[: idx + 1])
+                result = compute_factors(
+                    klines[code].iloc[: idx + 1], params.factor_weights
+                )
             except Exception:  # noqa: BLE001
                 continue
             scored.append({
@@ -306,6 +344,7 @@ def _prepare_cached(params: PipelineParams) -> dict:
         return _PREPARED
     prepared = _prepare(params)
     prepared["signals"] = _build_signals(prepared, params)
+    prepared["signals_key"] = _signals_key(params)
     _PREPARED = prepared
     _PREPARED_KEY = key
     return _PREPARED
@@ -319,7 +358,7 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
     klines: dict[str, pd.DataFrame] = prepared["klines"]
     names: dict[str, str] = prepared["names"]
     pos_index: dict[str, dict[str, int]] = prepared["pos_index"]
-    signals: dict[str, list[dict]] = prepared["signals"]
+    signals: dict[str, list[dict]] = _ensure_signals(prepared, params)
 
     # 大盘择时（regime）：用**前一交易日**上证指数收盘 vs MA(N) 判断强弱。
     # 当日盘中只能看到前一日收盘，所以统一 shift(1)，不留未来函数。
@@ -748,7 +787,8 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
             "half_score": half_score,
             "rotation_gap": rotation_gap,
             "rotation_min_score": rotation_min_score,
-            "strategies": registry.names(),
+            "strategies": list(params.strategies or registry.names()),
+            "factor_weights": dict(params.factor_weights or {}),
         },
         "metrics": metrics,
         "equity_curve": equity_curve,

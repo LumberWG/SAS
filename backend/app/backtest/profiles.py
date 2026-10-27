@@ -9,6 +9,20 @@
     并在 ``WORKLOG.md`` 变更记录里登记。
   - 未列出的键沿用 ``PipelineParams`` 默认值（即线上配置）。
 """
+from app.analysis import factors
+
+
+def _w(**group_mult: float) -> dict[str, float]:
+    """按「因子分组」倍数生成 14 因子权重（组内维持原比例）。
+
+    例：``_w(趋势=1.5)`` = 趋势组权重 ×1.5，其余组不变，
+    总和在 ``factors.reweight`` 里再归一化到 100，保证与买入阈值同分制。
+    """
+    return {
+        key: round(weight * group_mult.get(factors.FACTOR_LABELS[key][1], 1.0), 2)
+        for key, weight in factors.FACTOR_WEIGHTS.items()
+    }
+
 
 #: 方案名 -> PipelineParams 字段覆盖
 PROFILES: dict[str, dict] = {
@@ -134,6 +148,15 @@ PROFILES: dict[str, dict] = {
         "regime_ma": 20,
         "weak_exposure": 0.40,
     },
+    # ---- E26 选股模型实验：改「怎么选」，不改「怎么买卖」 ----
+    # 因子权重按分组调整（组内比例不变，总和自动归一化到 100）
+    "w_trend": {"factor_weights": _w(趋势=1.5)},
+    "w_mom": {"factor_weights": _w(动量=1.4)},
+    "w_vol": {"factor_weights": _w(量能=1.75)},
+    "w_risk": {"factor_weights": _w(风险=1.67)},
+    # 策略集 A/B：只看突破类 vs 只看交叉/超卖类
+    "strat_break": {"strategies": ("海龟突破", "平台突破", "动量突破")},
+    "strat_cross": {"strategies": ("均线放量", "MACD金叉", "KDJ超卖金叉")},
 }
 
 

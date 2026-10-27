@@ -134,3 +134,49 @@ def test_pipeline_load_klines_skips_index_files(tmp_path):
 
     data = _load_klines(dates[-1], dates[100], str(tmp_path))
     assert list(data) == ["600000"]
+
+
+class TestSelectionModel:
+    """选股模型实验开关：策略集筛选与 signals 指纹（见 BACKTEST_LOG 记录 #12）。"""
+
+    def _strategies(self):
+        from app.strategies import builtin  # noqa: F401 - 触发内置策略注册
+        from app.strategies import registry
+
+        return [registry.create(n) for n in registry.names()]
+
+    def test_none_keeps_all_strategies(self):
+        from app.backtest.pipeline import _pick_strategies
+
+        strategies = self._strategies()
+        assert _pick_strategies(strategies, None) == strategies
+
+    def test_subset_keeps_only_wanted(self):
+        from app.backtest.pipeline import _pick_strategies
+
+        picked = _pick_strategies(self._strategies(), ("海龟突破", "平台突破"))
+        assert sorted(s.name for s in picked) == ["平台突破", "海龟突破"]
+
+    def test_unknown_strategy_raises(self):
+        from app.backtest.pipeline import _pick_strategies
+
+        with pytest.raises(RuntimeError, match="未知策略"):
+            _pick_strategies(self._strategies(), ("不存在的策略",))
+
+    def test_signals_key_tracks_selection_model(self):
+        from app.backtest.pipeline import PipelineParams, _signals_key
+
+        base = PipelineParams("2026-01-01", "2026-02-01")
+        same = PipelineParams("2026-01-01", "2026-02-01")
+        weights = PipelineParams("2026-01-01", "2026-02-01", factor_weights={"rsi": 20.0})
+        subset = PipelineParams("2026-01-01", "2026-02-01", strategies=("海龟突破",))
+        assert _signals_key(base) == _signals_key(same)
+        assert _signals_key(base) != _signals_key(weights)
+        assert _signals_key(base) != _signals_key(subset)
+
+    def test_ensure_signals_reuses_cache_on_same_key(self):
+        from app.backtest.pipeline import PipelineParams, _ensure_signals, _signals_key
+
+        params = PipelineParams("2026-01-01", "2026-02-01")
+        prepared = {"signals": {"2026-01-05": []}, "signals_key": _signals_key(params)}
+        assert _ensure_signals(prepared, params) is prepared["signals"]

@@ -1,5 +1,6 @@
 """多因子评分测试：权重、分组、阈值分级、明细与脏数据兜底。"""
 import pandas as pd
+import pytest
 
 from app.analysis.factors import (
     BUY_THRESHOLD,
@@ -31,6 +32,35 @@ class TestWeights:
 
     def test_thresholds_symmetric(self):
         assert BUY_THRESHOLD == -SELL_THRESHOLD == 15.0
+
+
+class TestExternalWeights:
+    """回测参数实验用的外部权重（``compute_factors(df, weights)``）。"""
+
+    def test_none_keeps_default(self):
+        df = make_df(80, trend=0.15)
+        assert compute_factors(df).total == compute_factors(df, None).total
+
+    def test_identical_weights_stay_bitwise_equal(self):
+        df = make_df(80, trend=0.15)
+        assert compute_factors(df, dict(FACTOR_WEIGHTS)).total == compute_factors(df).total
+
+    def test_partial_override_normalises_to_100(self):
+        df = make_df(80, trend=0.15)
+        result = compute_factors(df, {"ma_trend": 24.0})  # 只覆盖一个因子
+        assert sum(i.weight for i in result.items) == pytest.approx(100.0, abs=0.1)
+        assert result.items[0].weight > FACTOR_WEIGHTS["ma_trend"]
+
+    def test_sub_scores_unchanged(self):
+        # 只改权重，不改各因子原始得分
+        df = make_df(80, trend=0.15)
+        base = {i.key: i.sub for i in compute_factors(df).items}
+        heavy = {i.key: i.sub for i in compute_factors(df, {"rsi": 30.0}).items}
+        assert base == heavy
+
+    def test_zero_or_negative_weights_fall_back(self):
+        df = make_df(80, trend=0.15)
+        assert compute_factors(df, {}).total == compute_factors(df).total
 
 
 class TestGrading:

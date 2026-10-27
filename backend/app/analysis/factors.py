@@ -129,12 +129,17 @@ class FactorScore:
         return [f"{i.label}: {i.detail}" for i in pool[:limit]]
 
 
-def compute_factors(df: pd.DataFrame) -> FactorScore:
+def compute_factors(
+    df: pd.DataFrame, weights: dict[str, float] | None = None
+) -> FactorScore:
     """对含指标的K线 DataFrame 做多因子加权评分。
 
     Args:
         df: 已按日期升序、已通过 ``add_all_indicators`` 追加指标列，
             且至少 30 根K线。缺失列/NaN 的因子按 0 分处理，不抛异常。
+        weights: 外部权重（回测参数实验用）。缺省因子沿用 ``FACTOR_WEIGHTS``，
+            传入后自动归一化到合计 100，保证与买入阈值同一分制；
+            传 ``None`` 与线上行为逐位一致。
     """
     items = [
         _ma_trend(df),
@@ -152,8 +157,32 @@ def compute_factors(df: pd.DataFrame) -> FactorScore:
         _breakout(df),
         _boll(df),
     ]
-    total = round(sum(i.contrib for i in items), 2)
-    return FactorScore(total=total, items=items)
+    score = FactorScore(total=round(sum(i.contrib for i in items), 2), items=items)
+    return reweight(score, weights) if weights else score
+
+
+def reweight(score: FactorScore, weights: dict[str, float]) -> FactorScore:
+    """按外部权重重建评分（只改权重，不改各因子的原始得分 ``sub``）。
+
+    权重先按「缺省值兜底 → 归一化到 100」处理，因此可以只覆盖少数因子
+    （如 ``{"ma_trend": 20}``），其余自动按比例缩放。
+    """
+    merged = {
+        key: float(weights.get(key, default))
+        for key, default in FACTOR_WEIGHTS.items()
+    }
+    total = sum(merged.values())
+    if total <= 0:
+        return score
+    scaled = {k: v * 100.0 / total for k, v in merged.items()}
+    items = [
+        FactorItem(
+            item.key, item.label, item.group,
+            round(scaled[item.key], 2), item.sub, item.detail,
+        )
+        for item in score.items
+    ]
+    return FactorScore(total=round(sum(i.contrib for i in items), 2), items=items)
 
 
 # ----------------------------------------------------------------------
