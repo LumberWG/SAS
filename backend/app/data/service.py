@@ -9,6 +9,7 @@ import pandas as pd
 
 from app.data.akshare_source import DataSourceError, _market_of, get_data_source
 from app.data.cache import kline_cache
+from app.data.scope import clean_name
 
 logger = logging.getLogger("sas.data.service")
 
@@ -62,6 +63,10 @@ def get_stock_pool() -> pd.DataFrame:
             ttl = _POOL_FALLBACK_TTL
             if pool is None:
                 raise
+    # 清洗名称：消除个别票（多为 688 科创板）的 GBK 误读乱码，避免写进缓存与前端
+    if pool is not None and "name" in pool.columns:
+        pool = pool.copy()
+        pool["name"] = [clean_name(c, n) for c, n in zip(pool["code"], pool["name"])]
     _pool_cache = (now, pool, ttl)
     _save_pool_to_disk(pool)
     return pool

@@ -38,6 +38,7 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.config import get_settings  # noqa: E402
+from app.data.scope import is_tradable  # noqa: E402
 from scripts.amount50_probe import _load_matrix, _calendar  # noqa: E402
 from scripts.accept import verdict  # noqa: E402
 from scripts.random_dist import _segments, _trading_dates, _stats  # noqa: E402
@@ -47,13 +48,16 @@ MIN_POSITIVE_SHARE = 60.0
 WORST_TOLERANCE_PP = 5.0
 
 
-def build(topn: int, lookback: int, rebalance: int, weights: tuple[float, ...], universe: int = 0):
+def build(topn: int, lookback: int, rebalance: int, weights: tuple[float, ...],
+          universe: int = 0, scope: bool = True):
     settings = get_settings()
     kline_dir = str(settings.kline_dir)
     cal = _calendar(kline_dir)
     close, open_, amount, turn, _vol, codes = _load_matrix(kline_dir, cal)
     m, n = close.shape
     cal_a = np.array(cal)
+    # 项目原则：只分析沪深主板 + 创业板，剔除 ST 与巨无霸（见 app/data/scope.py）
+    scope_ok = np.array([is_tradable(c)[0] for c in codes], dtype=bool) if scope else np.ones(m, bool)
 
     R = list(range(lookback, n - rebalance, rebalance))
     if not R:
@@ -76,6 +80,7 @@ def build(topn: int, lookback: int, rebalance: int, weights: tuple[float, ...], 
         tavg = np.nanmean(turn[:, t - lookback + 1:t + 1], axis=1)
         aavg = np.nanmean(amount[:, t - lookback + 1:t + 1], axis=1)
         valid = np.isfinite(retL) & np.isfinite(tavg) & np.isfinite(aavg)
+        valid = valid & scope_ok
         if universe and universe > 0:
             # 对齐 pipeline 的 universe_size：每日成交额 TopN 大票优先池
             order = np.argsort(-np.where(np.isfinite(amount[:, t]), amount[:, t], -np.inf))
@@ -132,8 +137,8 @@ def _nav(ret_close, ret_buy, ret_sell, buy_day, sell_day, H_mat, s: float):
     return nav_s, nav_b
 
 
-def run(topn, lookback, rebalance, weights, seed, draws, span, tag, universe=0):
-    data = build(topn, lookback, rebalance, weights, universe)
+def run(topn, lookback, rebalance, weights, seed, draws, span, tag, universe=0, scope=True):
+    data = build(topn, lookback, rebalance, weights, universe, scope)
     if data is None:
         raise SystemExit("样本不足，无法生成换仓日")
     cal_a = data["cal_a"]
@@ -215,12 +220,14 @@ def main():
     p.add_argument("--draws", type=int, default=30)
     p.add_argument("--span", type=int, default=21)
     p.add_argument("--tag", default="")
+    p.add_argument("--all-market", action="store_true",
+                   help="关闭范围过滤（对照：含科创板/北交所/ST/巨无霸）")
     a = p.parse_args()
     seeds = [int(s) for s in a.seed.split(",") if s.strip()]
     oks = []
     for sd in seeds:
         oks.append(run(a.topn, a.lookback, a.rebalance, (a.w_rev, a.w_turn, a.w_size),
-                        sd, a.draws, a.span, a.tag, a.universe))
+                        sd, a.draws, a.span, a.tag, a.universe, not a.all_market))
     if len(seeds) > 1:
         print(f"\n### 多种子总判定：{'通过（可进入部署讨论）' if all(oks) else '不采纳'} "
               f"（{sum(oks)}/{len(oks)} 种子通过）")

@@ -36,6 +36,7 @@ import numpy as np
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.config import get_settings  # noqa: E402
+from app.data.scope import is_tradable  # noqa: E402
 from scripts.amount50_probe import _load_matrix, _calendar  # noqa: E402
 
 
@@ -59,7 +60,7 @@ def _maxdd(x: np.ndarray) -> float:
     return float((x / peak - 1.0).min())
 
 
-def analyze(start: str, end: str, topn: int, pre: int = 60) -> dict:
+def analyze(start: str, end: str, topn: int, pre: int = 60, all_market: bool = False) -> dict:
     settings = get_settings()
     kline_dir = str(settings.kline_dir)
     cal = _calendar(kline_dir)
@@ -79,13 +80,21 @@ def analyze(start: str, end: str, topn: int, pre: int = 60) -> dict:
     ndays = cl.shape[1]
     first_idx = np.argmax(fin, axis=1)
     last_idx = (ndays - 1) - np.argmax(fin[:, ::-1], axis=1)
-    valid = (
+    data_valid = (
         fin.any(axis=1)
         & (first_idx <= 5)          # 起点不是中途复牌
         & (last_idx >= ndays - 6)   # 末尾有数据
         & (fin.sum(axis=1) >= ndays * 0.8)
         & np.isfinite(close[:, t0])  # 启动前 pre 窗口有数据（排除新股/复牌晚）
     )
+    if all_market:
+        valid = data_valid
+        excluded_by_scope = 0
+    else:
+        # 项目原则：只分析沪深主板 + 创业板，剔除 ST 与巨无霸（见 app/data/scope.py）
+        scope_ok = np.array([is_tradable(c)[0] for c in codes_arr], dtype=bool)
+        valid = data_valid & scope_ok
+        excluded_by_scope = int((data_valid & ~scope_ok).sum())
     idx = np.where(valid)[0]
     p0 = cl[idx, first_idx[idx]]
     p1 = cl[idx, last_idx[idx]]
@@ -138,6 +147,8 @@ def analyze(start: str, end: str, topn: int, pre: int = 60) -> dict:
     return {
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "window": {"start": start, "end": end, "pre": pre, "topn": topn,
+                   "scope_filter": not all_market, "excluded_by_scope": excluded_by_scope,
+                   "actual_winners": int(len(win)),
                    "universe_valid": int(valid.sum()), "total_stocks": int(len(codes_arr))},
         "winners_summary": {
             "ret_med": round(_med(w_ret) * 100, 1), "ret_mean": round(float(np.mean(w_ret)) * 100, 1),
@@ -175,8 +186,11 @@ def analyze(start: str, end: str, topn: int, pre: int = 60) -> dict:
 
 def _print(d: dict) -> None:
     w = d["window"]; s = d["winners_summary"]; f = d["factor_rank_test"]
+    scope_txt = "全市场（含科创板/北交所/ST/巨无霸）" if not w["scope_filter"] else \
+        f"沪深主板+创业板（剔除 ST/巨无霸，排除 {w['excluded_by_scope']} 只范围外）"
     print(f"\n### 近三个月涨幅前 {w['topn']} 启动前特征（{w['start']} ~ {w['end']}，"
           f"pre={w['pre']}日，有效样本 {w['universe_valid']}/{w['total_stocks']}）")
+    print(f"  范围口径：{scope_txt}；实得赢家 {w['actual_winners']} 只")
     print(f"\n【赢家概览】")
     print(f"  区间涨幅：中位 +{s['ret_med']}%（均值 +{s['ret_mean']}%，最小 +{s['ret_min']}%）")
     print(f"  起点价中位 {s['p0_med']} 元 → 终点 {s['p1_med']} 元")
@@ -206,9 +220,11 @@ def main() -> None:
     parser.add_argument("--end", default="2026-10-28")
     parser.add_argument("--topn", type=int, default=100)
     parser.add_argument("--pre", type=int, default=60)
+    parser.add_argument("--all-market", action="store_true",
+                        help="关闭范围过滤（对照：含科创板/北交所/ST/巨无霸）")
     args = parser.parse_args()
 
-    data = analyze(args.start, args.end, args.topn, args.pre)
+    data = analyze(args.start, args.end, args.topn, args.pre, args.all_market)
     _print(data)
 
     log_dir = str(get_settings().kline_dir.parent / "logs")
