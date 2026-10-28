@@ -165,6 +165,25 @@ def test_universe_board_filter_applies_before_top_n():
     assert filtered["d1"] == ["600000", "300001"]
 
 
+def test_slippage_cost_sign_convention():
+    """成交偏离的符号约定：cost_bps > 0 一律表示"比开盘价吃亏"。"""
+    from scripts.slippage_audit import bucket_of, cost_bps
+
+    assert cost_bps("buy", 10.10, 10.00) == pytest.approx(100.0)      # 买贵了
+    assert cost_bps("buy", 9.90, 10.00) == pytest.approx(-100.0)      # 买便宜了
+    assert cost_bps("sell", 9.90, 10.00) == pytest.approx(101.0, rel=1e-3)   # 卖便宜了
+    assert cost_bps("sell", 10.10, 10.00) == pytest.approx(-99.0, rel=1e-3)  # 卖贵了
+    assert cost_bps("buy", 0.0, 10.0) is None
+    assert cost_bps("buy", 10.0, 0.0) is None
+
+    assert bucket_of("09:31") == "开盘30分"
+    assert bucket_of("09:59") == "开盘30分"
+    assert bucket_of("10:00") == "上午盘中"
+    assert bucket_of("13:05") == "下午盘中"
+    assert bucket_of("14:35") == "尾盘"
+    assert bucket_of("") == "其它"
+
+
 def test_random_dist_segments_are_disjoint():
     """随机段必须两两不重叠：否则「60 段」只是十来个独立样本（记录 #26 的教训）。"""
     from scripts.random_dist import _segments
