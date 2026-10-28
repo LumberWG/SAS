@@ -24,6 +24,7 @@ import pandas as pd
 
 from app.config import get_settings
 from app.data.cache import db, kline_cache
+from app.data.scope import is_tradable
 from app.data.service import (
     INDEX_SYMBOL,
     get_index_cached,
@@ -89,6 +90,7 @@ class ScanTask:
     codes: list[str] | None = None   # 指定代码（None=按 scope）；并发复用判断用
     sentiment: dict = field(default_factory=dict)    # 扫描开始时市场情绪快照
     error: str = ""                  # 失败原因（status=error 时供前端展示）
+    excluded_by_scope: int = 0      # 被范围过滤剔除的股票数（科创板/北交所/ST/巨无霸）
 
     def progress(self) -> float:
         return round(self.scanned / self.total * 100, 1) if self.total else 0.0
@@ -286,6 +288,23 @@ class Scanner:
                 pool = await loop.run_in_executor(self._io, self._top_amount_pool, pool, n)
             else:
                 pool = filter_pool_by_scope(pool, scope)
+            # 范围过滤（项目原则：只分析沪深主板+创业板，剔除 ST 与巨无霸）。
+            # 统一作用于所有分支（显式 codes / 成交额 TopN / scope），
+            # 保证选股中心候选池不出科创板/北交所/ST/巨无霸。
+            before = len(pool)
+            if "name" not in pool.columns:
+                pool["name"] = pool["code"]
+            keep = [
+                is_tradable(str(c), str(n))[0]
+                for c, n in zip(pool["code"].astype(str), pool["name"].astype(str))
+            ]
+            pool = pool[pd.Series(keep, index=pool.index)].reset_index(drop=True)
+            task.excluded_by_scope = before - len(pool)
+            if task.excluded_by_scope:
+                logger.info(
+                    "范围过滤：剔除 %d 只范围外股票（科创板/北交所/ST/巨无霸），剩余 %d 只",
+                    task.excluded_by_scope, len(pool),
+                )
             task.total = len(pool)
 
             strategies = self._resolve_strategies(task.strategies)
