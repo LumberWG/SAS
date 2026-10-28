@@ -59,23 +59,33 @@ def _merge_atomic(code: str, new_df: pd.DataFrame) -> None:
     os.replace(tmp, path)
 
 
-def _fetch(code: str, count: int, datalen: int) -> pd.DataFrame:
-    """腾讯优先（一次 800 根），失败退新浪（1023 根）。"""
-    try:
-        df = tencent_kline(code, adjust="qfq", count=count)
-        if df is not None and not df.empty:
-            return df
-    except Exception:  # noqa: BLE001 - 换下一家
-        pass
+def _fetch(code: str, count: int, datalen: int, source: str = "auto") -> pd.DataFrame:
+    """取日线。``source``：auto=腾讯优先（失败退新浪）、tencent、sina。
+
+    需要回溯到 2024-03 以前时必须用 ``sina``：腾讯的 fqkline 接口实测
+    无论 count 传多大都只返回约 641 根（起点固定在 2024-03-06），
+    新浪 datalen=1023 可回到 2022-08。两者价格/成交量口径已实测一致
+    （重叠 801 个交易日比值恒为 1.0），可安全拼接。
+    """
+    if source != "sina":
+        try:
+            df = tencent_kline(code, adjust="qfq", count=count)
+            if df is not None and not df.empty:
+                return df
+        except Exception:  # noqa: BLE001 - 换下一家
+            if source == "tencent":
+                raise
     return sina_kline(code_to_symbol(code), datalen=datalen)
 
 
-def _backfill_one(code: str, start: str, count: int, datalen: int) -> str:
+def _backfill_one(
+    code: str, start: str, count: int, datalen: int, source: str = "auto"
+) -> str:
     try:
         cached = kline_cache.get(code)
         if cached is not None and str(cached["date"].iloc[0]) <= start:
             return "skip"
-        df = _fetch(code, count, datalen)
+        df = _fetch(code, count, datalen, source)
         if df is None or df.empty or "date" not in df:
             return "fail"
         df = df[df["date"] >= start]
@@ -96,6 +106,10 @@ def main() -> None:
     parser.add_argument("--workers", type=int, default=6)
     parser.add_argument("--limit", type=int, default=0)
     parser.add_argument("--codes", default="")
+    parser.add_argument(
+        "--source", default="auto", choices=("auto", "tencent", "sina"),
+        help="auto=腾讯优先；回溯到 2024-03 以前必须用 sina（腾讯只给约 641 根）",
+    )
     args = parser.parse_args()
 
     codes = (
@@ -105,13 +119,18 @@ def main() -> None:
     )
     if args.limit:
         codes = codes[: args.limit]
-    print(f"待补 {len(codes)} 只，起点 {args.start}，并发 {args.workers}", flush=True)
+    print(
+        f"待补 {len(codes)} 只，起点 {args.start}，数据源 {args.source}，并发 {args.workers}",
+        flush=True,
+    )
 
     t0 = time.time()
     done = 0
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
         futures = {
-            pool.submit(_backfill_one, c, args.start, args.count, args.datalen): c
+            pool.submit(
+                _backfill_one, c, args.start, args.count, args.datalen, args.source
+            ): c
             for c in codes
         }
         for fut in as_completed(futures):

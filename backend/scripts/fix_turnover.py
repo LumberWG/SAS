@@ -36,6 +36,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import time
 
 import pandas as pd
 
@@ -70,10 +71,19 @@ def _codes() -> list[str]:
 
 
 def _save_atomic(code: str, df: pd.DataFrame) -> None:
+    """原子替换落盘。Windows 上目标文件被其他进程短暂持有会抛 WinError 5，
+    重试几次即可（实测全量跑时偶发，单只重跑能成功）。"""
     path = kline_cache._path(code)  # noqa: SLF001 - 复用缓存层路径规则
     tmp = path.with_suffix(".parquet.tmp")
     df.to_parquet(tmp, index=False)
-    os.replace(tmp, path)
+    for attempt in range(5):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            if attempt == 4:
+                raise
+            time.sleep(0.2 * (attempt + 1))
 
 
 def _refetch(code: str) -> pd.DataFrame:
@@ -250,7 +260,10 @@ def main() -> None:
             before.append(df[["date", "turnover_rate"]].copy())
             need_fallback.append(code)
             continue
-        _apply(code, df=df)
+        try:
+            _apply(code, df=df)
+        except Exception as exc:  # noqa: BLE001 - 单只落盘失败不中断全量
+            print(f"  补齐失败 {code}: {type(exc).__name__} {exc}", flush=True)
 
     if args.fix_star:
         print(f"科创板量纲修正 {star_fixed} 行（股→手）", flush=True)

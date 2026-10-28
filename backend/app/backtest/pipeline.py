@@ -89,6 +89,16 @@ class PipelineParams:
     stop_confirm_close: bool = False       # 止损改收盘确认：收盘跌破止损线，次日开盘卖出
     # ---- E13：组合层面择时（大盘走弱时降总仓位，而不是砍个股） ----
     weak_exposure: float | None = None     # 弱市总仓位上限（需同时设置 regime_ma）
+    # ---- E32：大盘分档仓位（快慢两条均线把「强弱」拆成 4 档） ----
+    regime_fast_ma: int = 20               # 快速均线周期（与 regime_ma 组成快慢双线）
+    #: 四档总仓位上限，按 state 索引：(0=双线之下, 1=破慢线站上快线, 2=破快线站上慢线, 3=双线之上)
+    regime_tiers: tuple[float, float, float, float] | None = None
+    regime_flat_below: bool = False        # 最弱档(0)是否清仓：次日开盘卖出全部持仓
+    # ---- E30：波动率自适应止损（None=关闭，用固定 stop_loss） ----
+    # 机制参数：止损距离 = N × ATR%（买入日前一日），比单点百分比更可迁移。
+    stop_atr_mult: float | None = None     # ATR 倍数；None 时用 stop_loss
+    stop_atr_min: float = 0.03             # 止损距离下限（相对成本），防止 ATR 过小时过度交易
+    stop_atr_max: float = 0.15             # 止损距离上限，防止 ATR 过大时止损形同虚设
     # ---- 以下默认为 None，表示沿用线上配置（回测参数实验用） ----
     max_total_exposure: float | None = None
     single_position_ratio: float | None = None
@@ -373,6 +383,31 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
         else:
             logger.warning("缺少 idx_sh000001 指数K线，regime_ma 失效并退化为「始终防守」")
 
+    # E32 大盘分档：0=双均线之下（最弱）1=仅破快速线 2=仅破慢速线 3=双均线之上
+    # 同样只用前一交易日收盘，与上面的二值 regime 同一口径，不留未来函数。
+    tiers_state: dict[str, int] = {}
+    if params.regime_tiers is not None:
+        idx_df = prepared.get("index")
+        if idx_df is not None and not idx_df.empty:
+            slow_n = max(2, int(params.regime_ma or 60))
+            fast_n = max(2, int(params.regime_fast_ma))
+            close_prev = idx_df["close"].shift(1)
+            slow = idx_df["close"].rolling(slow_n).mean().shift(1)
+            fast = idx_df["close"].rolling(fast_n).mean().shift(1)
+            for d, c, f, s in zip(idx_df["date"], close_prev, fast, slow):
+                if c != c or f != f or s != s:
+                    tiers_state[str(d)] = 3      # 预热期按满仓处理
+                elif c >= s and c >= f:
+                    tiers_state[str(d)] = 3
+                elif c >= s:
+                    tiers_state[str(d)] = 2      # 仍在慢线上方，只是短期走弱
+                elif c >= f:
+                    tiers_state[str(d)] = 1      # 破慢线但站上快线（反弹）
+                else:
+                    tiers_state[str(d)] = 0      # 双线之下
+        else:
+            logger.warning("缺少 idx_sh000001 指数K线，regime_tiers 失效并按满仓处理")
+
     initial_capital = float(params.initial_capital or settings.paper_initial_capital)
     max_positions = int(params.max_positions or settings.paper_max_positions)
     exposure = float(
@@ -423,6 +458,25 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
             return None
         value = klines[code].iloc[idx - 1]["close"]
         return float(value) if value == value else None
+
+    def stop_distance(code: str, date: str) -> float:
+        """E30：买入时的止损距离。``stop_atr_mult`` 为 None 时即固定 ``stop_loss``。
+
+        ATR 取**前一日**的值：买入按当日开盘价成交，当日 high/low 还不可知，
+        用当日 ATR 等于提前知道当天振幅（未来函数）。缺失时回落到固定止损。
+        """
+        if params.stop_atr_mult is None:
+            return params.stop_loss
+        idx = pos_index.get(code, {}).get(date)
+        dist: float | None = None
+        if idx is not None and idx > 0:
+            row = klines[code].iloc[idx - 1]
+            atr, close = row.get("atr"), row.get("close")
+            if atr == atr and close == close and atr and close > 0:
+                dist = float(params.stop_atr_mult) * float(atr) / float(close)
+        if dist is None:
+            dist = params.stop_loss
+        return max(float(params.stop_atr_min), min(float(params.stop_atr_max), dist))
 
     def pass_filters(code: str, date: str) -> bool:
         """E5：量比 / 换手率 / 近 5 日涨幅过滤（阈值全为 None 时直接放行）。
@@ -526,8 +580,12 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
             pending_sells.pop(code, None)
 
         # E13：大盘走弱时把总仓位上限压低（组合层面防守，不砍个股）
+        # E32：分档优先——按快慢均线给出 4 档总仓位上限
         day_exposure = exposure
-        if params.weak_exposure is not None and params.regime_ma is not None:
+        if params.regime_tiers is not None:
+            state = tiers_state.get(date, 3)
+            day_exposure = exposure * float(params.regime_tiers[min(max(state, 0), 3)])
+        elif params.weak_exposure is not None and params.regime_ma is not None:
             if regime.get(date, True):
                 day_exposure = min(exposure, params.weak_exposure)
         total_asset = cash + market_value(date)
@@ -574,7 +632,7 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
                 "name": b.get("name") or names.get(code, code),
                 "shares": shares, "cost": cost,
                 "buy_date": date, "score": b["score"],
-                "stop": cost * (1 - params.stop_loss),
+                "stop": cost * (1 - stop_distance(code, date)),
                 "target": cost * (1 + params.take_profit),
                 # E9：买入日最高价（当日已知，供次日移动止损使用）
                 "peak": price_on(code, date, "high") or 0.0,
@@ -641,6 +699,14 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
             pos = positions.get(item["code"])
             if pos and pos["buy_date"] < date:
                 pending_sells[item["code"]] = f"卖出信号(评分{item['score']:.0f})"
+
+        # E32：最弱档清仓——收盘确认大盘双线之下，次一交易日开盘卖出全部持仓。
+        # 只用前一交易日指数收盘判定（tiers_state 已 shift(1)），不留未来函数；
+        # 当日买入的仓位受 T+1 限制不动。
+        if params.regime_flat_below and tiers_state.get(date, 3) == 0:
+            for code, p in positions.items():
+                if p["buy_date"] < date:
+                    pending_sells.setdefault(code, "大盘极弱清仓")
 
         # 时间止损：短线不恋战，持有满 N 个交易日即次日开盘离场
         # （N=1 表示买入当日收盘即发委托、次日开盘卖出，恰好满足 T+1）
@@ -781,6 +847,12 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
             "partial_tp_ratio": params.partial_tp_ratio,
             "stop_confirm_close": params.stop_confirm_close,
             "weak_exposure": params.weak_exposure,
+            "regime_fast_ma": params.regime_fast_ma,
+            "regime_tiers": list(params.regime_tiers) if params.regime_tiers else None,
+            "regime_flat_below": params.regime_flat_below,
+            "stop_atr_mult": params.stop_atr_mult,
+            "stop_atr_min": params.stop_atr_min,
+            "stop_atr_max": params.stop_atr_max,
             "max_total_exposure": round(exposure, 2),
             "single_position_ratio": round(single_ratio, 2),
             "full_score": full_score,

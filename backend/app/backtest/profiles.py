@@ -148,6 +148,121 @@ PROFILES: dict[str, dict] = {
         "regime_ma": 20,
         "weak_exposure": 0.40,
     },
+    # ---- E22 推荐组合（记录 #11：4 项改动 + 单票保持线上 20%） ----
+    # 止损 6% + 止盈 30% + 量比≥1 + 弱市 MA60/0.6；跨池 18 格全正的唯一组合
+    "e22": {
+        "stop_loss": 0.06,
+        "take_profit": 0.30,
+        "min_volume_ratio": 1.0,
+        "regime_ma": 60,
+        "weak_exposure": 0.60,
+    },
+    # ---- E27：E22 推荐组合 × E26 动量加权（一个改善均值、一个改善最差，看能否叠加） ----
+    "e27": {
+        "stop_loss": 0.06,
+        "take_profit": 0.30,
+        "min_volume_ratio": 1.0,
+        "regime_ma": 60,
+        "weak_exposure": 0.60,
+        "factor_weights": _w(动量=1.4),
+    },
+    # ---- E24：换手率下限（加在 E22 组合上单测，值敏感性） ----
+    "e22_tr1": {
+        "stop_loss": 0.06,
+        "take_profit": 0.30,
+        "min_volume_ratio": 1.0,
+        "regime_ma": 60,
+        "weak_exposure": 0.60,
+        "min_turnover_rate": 1.0,
+    },
+    "e22_tr3": {
+        "stop_loss": 0.06,
+        "take_profit": 0.30,
+        "min_volume_ratio": 1.0,
+        "regime_ma": 60,
+        "weak_exposure": 0.60,
+        "min_turnover_rate": 3.0,
+    },
+    # ---- E28：e22 邻域敏感性（每侧各 2 点，确认不是孤峰；其余 3 项固定） ----
+    # 止损曲线补点（4%/8%），用来画 4~8% 的完整形状
+    "e22_sl4": {
+        "stop_loss": 0.04,
+        "take_profit": 0.30,
+        "min_volume_ratio": 1.0,
+        "regime_ma": 60,
+        "weak_exposure": 0.60,
+    },
+    "e22_sl8": {
+        "stop_loss": 0.08,
+        "take_profit": 0.30,
+        "min_volume_ratio": 1.0,
+        "regime_ma": 60,
+        "weak_exposure": 0.60,
+    },
+    "e22_tp25": {
+        "stop_loss": 0.06,
+        "take_profit": 0.25,
+        "min_volume_ratio": 1.0,
+        "regime_ma": 60,
+        "weak_exposure": 0.60,
+    },
+    "e22_tp35": {
+        "stop_loss": 0.06,
+        "take_profit": 0.35,
+        "min_volume_ratio": 1.0,
+        "regime_ma": 60,
+        "weak_exposure": 0.60,
+    },
+    "e22_sl5": {
+        "stop_loss": 0.05,
+        "take_profit": 0.30,
+        "min_volume_ratio": 1.0,
+        "regime_ma": 60,
+        "weak_exposure": 0.60,
+    },
+    "e22_sl7": {
+        "stop_loss": 0.07,
+        "take_profit": 0.30,
+        "min_volume_ratio": 1.0,
+        "regime_ma": 60,
+        "weak_exposure": 0.60,
+    },
+    "e22_ma40": {
+        "stop_loss": 0.06,
+        "take_profit": 0.30,
+        "min_volume_ratio": 1.0,
+        "regime_ma": 40,
+        "weak_exposure": 0.60,
+    },
+    "e22_ma80": {
+        "stop_loss": 0.06,
+        "take_profit": 0.30,
+        "min_volume_ratio": 1.0,
+        "regime_ma": 80,
+        "weak_exposure": 0.60,
+    },
+    # ---- E32：大盘分档仓位（组合层择时，唯一能改变收益量级的方向） ----
+    # 用上证 MA20/MA60 把大盘拆成 4 档，档位决定「总仓位上限」= 线上 80% × 系数：
+    #   3=双线之上(满仓) 2=破快线站上慢线 1=破慢线站上快线 0=双线之下
+    # 两个方案都是**先验设计**（不是网格搜出来的），只在 A~F 上看方向，G~J 只用于验收。
+    "e32_a": {
+        "regime_ma": 60,
+        "regime_fast_ma": 20,
+        "regime_tiers": (0.10, 0.40, 0.70, 1.00),
+    },
+    # 更激进：双线之下直接清仓（次日开盘卖，收盘确认）
+    "e32_b": {
+        "regime_ma": 60,
+        "regime_fast_ma": 20,
+        "regime_tiers": (0.00, 0.30, 0.60, 1.00),
+        "regime_flat_below": True,
+    },
+    # ---- E30：波动率自适应止损（机制参数，直接替代固定的 stop_loss 8%） ----
+    # 止损距离 = N × ATR%（前一日），夹在 3%~15% 之间；A 股 ATR% 中位数约 3~4%，
+    # 所以 2×ATR 大致等价于原来的固定 8%，但会随个股波动自动伸缩。
+    "e30_a15": {"stop_atr_mult": 1.5},
+    "e30_a2": {"stop_atr_mult": 2.0},
+    "e30_a25": {"stop_atr_mult": 2.5},
     # ---- E26 选股模型实验：改「怎么选」，不改「怎么买卖」 ----
     # 因子权重按分组调整（组内比例不变，总和自动归一化到 100）
     "w_trend": {"factor_weights": _w(趋势=1.5)},

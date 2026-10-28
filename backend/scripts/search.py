@@ -19,6 +19,7 @@ import os
 import random
 import sys
 import time
+from concurrent.futures import ProcessPoolExecutor
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -33,7 +34,18 @@ WINDOWS: dict[str, tuple[str, str]] = {
     "B": ("2026-06-01", "2026-10-23"),
     "C": ("2025-11-01", "2026-05-31"),
     "D": ("2025-08-01", "2025-10-31"),
+    # G/H：2025 上半年。此前从未进过任何搜索/回归（D 从 2025-08 才开始），
+    # 是唯一干净的样本外区间；连起来可把 2025-01 ~ 2026-10 铺成连续分段。
+    "G": ("2025-01-01", "2025-03-31"),
+    "H": ("2025-04-01", "2025-07-31"),
+    # I/J：2023 年（K 线已回溯到 2022-09，见记录 #17）。同样没进过任何搜索。
+    "I": ("2023-01-01", "2023-04-30"),
+    "J": ("2023-05-01", "2023-08-31"),
 }
+
+#: 样本外检验集：只用来验收，不参与参数搜索。
+#: 依据 BACKTEST_LOG 记录 #15——把检验集也拿去搜参等于没有检验集。
+HOLDOUT: tuple[str, ...] = ("G", "H", "I", "J")
 
 #: 搜索空间（None = 沿用线上值）
 SPACE: dict[str, list] = {
@@ -112,15 +124,22 @@ def neighbor_configs(tag_path: str, top_n: int) -> list[dict]:
     return dedupe(out)
 
 
-def resolve_windows(spec: str) -> dict[str, tuple[str, str]]:
-    """解析 ``--windows A,B,C`` 为窗口子集；空串表示全部。
+def resolve_windows(
+    spec: str, *, allow_holdout: bool = False
+) -> dict[str, tuple[str, str]]:
+    """解析 ``--windows A,B,C`` 为窗口子集；空串=全部（默认排除样本外窗口 G/H）。
 
     日常迭代只跑近端窗口（A/B/C/D）节省 1/3 时间，E/F（2024）留给定稿前的
     稳定性复验——它们的作用是覆盖「普跌/普涨」两种市况，不是持仓周期需要。
+
+    ``G``/``H`` 是样本外检验集（见 ``HOLDOUT``），默认**不参与**任何批量运行；
+    要用必须显式点名（``--windows G,H``）或传 ``allow_holdout=True``。
     """
     names = [n.strip().upper() for n in str(spec or "").split(",") if n.strip()]
     if not names:
-        return dict(WINDOWS)
+        if allow_holdout:
+            return dict(WINDOWS)
+        return {k: v for k, v in WINDOWS.items() if k not in HOLDOUT}
     unknown = [n for n in names if n not in WINDOWS]
     if unknown:
         raise SystemExit(f"未知窗口 {unknown}，可选 {list(WINDOWS)}")
@@ -165,6 +184,58 @@ def save_progress(path: str, data: dict) -> None:
     os.replace(tmp, path)
 
 
+def auto_jobs(count: int) -> int:
+    """默认并行度：任务数、CPU//2、6 三者取小。
+
+    每个进程要常驻一份 K 线+指标（实测 0.5~1GB），所以上限压到 6；
+    16 核 / 32GB 的机器上 6 路正好把 6 个窗口一次跑完。
+    """
+    cpu = os.cpu_count() or 4
+    return max(1, min(count, max(1, cpu // 2), 6))
+
+
+def _run_batch(task: tuple) -> tuple[str, int, dict]:
+    """单个「股票池 × 窗口」任务（可丢进子进程）：跑完该批全部组合。
+
+    数据准备（读 5000+ parquet、算指标、算选股信号）是主要耗时，一个批次做一次；
+    所以并行粒度选「股票池 × 窗口」而不是单个组合。
+
+    Returns:
+        ``(窗口名, 股票池, {结果键: 指标})``
+    """
+    wname, start, end, u, configs = task
+    prepared = _prepare_cached(
+        PipelineParams(start_date=start, end_date=end, universe_size=u)
+    )
+    out: dict[str, dict] = {}
+    for cid, cfg in configs.items():
+        key = f"{wname}|u{u}|{cid}"
+        # None 一律省略：Optional 字段省略即 None，非 Optional 字段（止损/止盈/
+        # 持仓天数）省略才回到 dataclass 默认值，直接传 None 会炸。
+        kwargs = {k: v for k, v in cfg.items() if v is not None}
+        params = PipelineParams(
+            start_date=start, end_date=end, universe_size=u, **kwargs
+        )
+        try:
+            res = _simulate(prepared, params)
+        except Exception as exc:  # noqa: BLE001 - 单组失败不中断搜索
+            out[key] = {"error": str(exc)}
+            continue
+        m = res["metrics"]
+        out[key] = {
+            "return": float(m.get("total_return") or 0),
+            "benchmark": float(m.get("benchmark_return") or 0),
+            "excess": round(
+                float(m.get("total_return") or 0) - float(m.get("benchmark_return") or 0), 2
+            ),
+            "max_drawdown": float(m.get("max_drawdown") or 0),
+            "sharpe": float(m.get("sharpe") or 0),
+            "trades": int(m.get("trade_count") or 0),
+            "win_rate": float(m.get("win_rate") or 0),
+        }
+    return wname, u, out
+
+
 def run(args: argparse.Namespace) -> None:
     settings = get_settings()
     path = str(settings.db_path.parent / "logs" / f"search_{args.tag}.json")
@@ -185,6 +256,13 @@ def run(args: argparse.Namespace) -> None:
     data["universes"] = sorted(set(data.get("universes") or []) | set(universes))
     universes = data["universes"]
     windows = resolve_windows(getattr(args, "windows", ""))
+    leaked = [w for w in windows if w in HOLDOUT]
+    if leaked:
+        print(
+            f"警告：{leaked} 是样本外检验集，一旦拿来做搜索/调参就失去检验意义"
+            f"（BACKTEST_LOG 记录 #15）",
+            flush=True,
+        )
     # 与股票池同理：分批跑不同窗口时合并，最后一次性排名
     data["windows"] = {
         **(data.get("windows") or {}), **{k: list(v) for k, v in windows.items()},
@@ -204,53 +282,39 @@ def run(args: argparse.Namespace) -> None:
         flush=True,
     )
 
+    # 断点续跑：按「股票池 × 窗口」切任务，该批全做完就直接跳过（连数据准备都不做）
+    tasks = []
     for u in universes:
         for wname, (start, end) in windows.items():
-            # 断点续跑时，若该(股票池,窗口)的所有组合都已完成，直接跳过数据准备
-            pending = [
-                cid for cid in data["configs"]
+            pending = {
+                cid: cfg for cid, cfg in data["configs"].items()
                 if not (
                     data["results"].get(f"{wname}|u{u}|{cid}")
                     and "error" not in data["results"][f"{wname}|u{u}|{cid}"]
                 )
-            ]
-            if not pending:
-                continue
-            base = PipelineParams(start_date=start, end_date=end, universe_size=u)
-            t0 = time.time()
-            prepared = _prepare_cached(base)
-            print(f"[{wname}/Top{u}] 数据+信号就绪，用时 {time.time() - t0:.0f}s", flush=True)
-            for cid, cfg in data["configs"].items():
-                key = f"{wname}|u{u}|{cid}"
-                prev = data["results"].get(key)
-                if prev and "error" not in prev:
-                    continue
-                # None 一律省略：Optional 字段省略即 None，非 Optional 字段（止损/止盈/
-                # 持仓天数）省略才回到 dataclass 默认值，直接传 None 会炸。
-                kwargs = {k: v for k, v in cfg.items() if v is not None}
-                params = PipelineParams(
-                    start_date=start, end_date=end, universe_size=u, **kwargs,
-                )
-                try:
-                    res = _simulate(prepared, params)
-                except Exception as exc:  # noqa: BLE001 - 单组失败不中断搜索
-                    print(f"[{wname}/Top{u}] {cid} 失败: {exc}", flush=True)
-                    data["results"][key] = {"error": str(exc)}
-                    continue
-                m = res["metrics"]
-                data["results"][key] = {
-                    "return": float(m.get("total_return") or 0),
-                    "benchmark": float(m.get("benchmark_return") or 0),
-                    "excess": round(
-                        float(m.get("total_return") or 0) - float(m.get("benchmark_return") or 0),
-                        2,
-                    ),
-                    "max_drawdown": float(m.get("max_drawdown") or 0),
-                    "sharpe": float(m.get("sharpe") or 0),
-                    "trades": int(m.get("trade_count") or 0),
-                    "win_rate": float(m.get("win_rate") or 0),
-                }
+            }
+            if pending:
+                tasks.append((wname, start, end, u, pending))
+
+    jobs = getattr(args, "jobs", 0) or auto_jobs(len(tasks))
+    jobs = max(1, min(jobs, len(tasks)))
+    print(f"待跑批次 {len(tasks)}（每批=一个股票池×窗口），并行度 {jobs}", flush=True)
+
+    t_all = time.time()
+    if jobs == 1:
+        for task in tasks:
+            wname, u, batch = _run_batch(task)
+            data["results"].update(batch)
+            save_progress(path, data)
+            print(f"[{wname}/Top{u}] 完成 {len(batch)} 组", flush=True)
+    else:
+        with ProcessPoolExecutor(max_workers=jobs) as pool:
+            for wname, u, batch in pool.map(_run_batch, tasks):
+                data["results"].update(batch)
                 save_progress(path, data)
+                print(f"[{wname}/Top{u}] 完成 {len(batch)} 组", flush=True)
+    if tasks:
+        print(f"全部批次完成，用时 {time.time() - t_all:.0f}s", flush=True)
 
     report(data)
 
@@ -333,7 +397,11 @@ def main() -> None:
     parser.add_argument("--top", type=int, default=3, help="邻居模式取前 N 名")
     parser.add_argument(
         "--windows", default="",
-        help="逗号分隔的窗口子集（如 A,B,C,D），缺省=全部 6 个（E/F 为 2024 年）",
+        help="逗号分隔的窗口子集（如 A,B,C,D），缺省=全部但**排除样本外 G/H**",
+    )
+    parser.add_argument(
+        "--jobs", type=int, default=0,
+        help="并行批次（股票池×窗口）数，0=自动（见 auto_jobs），1=串行",
     )
     args = parser.parse_args()
     run(args)
