@@ -321,6 +321,7 @@ nssm remove SAS confirm                # 卸载服务
 - **K线预热**：
   - 开机后台低并发（默认 10）预热流动性前 1000 只到本地 Parquet
   - 每个交易日 16:00 调度全市场日K增量刷新，保持缓存新鲜
+  - 同一轮预热会顺带刷新上证指数日线（`idx_sh000001`）：`regime_ma` / `regime_tiers` 只认这条序列，指数不跟着日更，最近几天就会静默退化成默认档；预热结果里的 `index` 字段（`ok/last/bars`）可在 `/api/screening/kline-status` 看到
   - 选股中心「预热K线」按钮可手动触发全市场预热（后台执行，不阻塞）
   - 预热完成后扫描直接读本地缓存，消除实时网络拉取与数据源限流等待
 - 配置项：`kline_warmup_concurrency`（预热并发）、`kline_warmup_top_n`（开机预热只数，0=全市场）

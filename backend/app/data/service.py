@@ -12,6 +12,10 @@ from app.data.cache import kline_cache
 
 logger = logging.getLogger("sas.data.service")
 
+#: 大盘择时用的指数（上证综指，新浪代码格式）。回测/影子读的缓存文件名是
+#: ``idx_sh000001.parquet``，与个股共用同一个 Parquet 目录。
+INDEX_SYMBOL = "sh000001"
+
 #: 股票池进程内缓存（秒）。缓存可避免每次扫描/状态查询都走一遍分钟级的
 #: 数据源降级链（东财不可达时会拖慢整个后端）。
 _POOL_TTL = 3600.0        # 主源结果：股票池按日变化，缓存 1 小时
@@ -187,3 +191,51 @@ def get_kline_cached(
         kline_cache.save(code, df)
 
     return df if days is None else df.tail(days)
+
+
+def get_index_cached(
+    symbol: str = INDEX_SYMBOL,
+    refresh: bool = False,
+    timeout: float | None = None,
+    retries: int | None = None,
+) -> pd.DataFrame:
+    """获取指数日线（全历史），写回同一个 Parquet 缓存目录。
+
+    与个股 ``get_kline_cached`` 的两点区别：
+      1. 不做 ``last_date`` 增量——指数一天只有一根 bar，全量也就几千行，
+         而且回源整段能顺带修正历史修订，比增量更省心；
+      2. 回源失败时**不退化成抛错**，有缓存就沿用缓存：择时（regime_ma /
+         regime_tiers）只依赖这一条序列，宁可滞后一天，也不要让整轮预热或
+         回测因为一个指数请求失败而中断。
+
+    Args:
+        symbol: 指数代码（新浪格式，如 ``sh000001``）
+        refresh: 忽略缓存强制回源
+        timeout / retries: 透传给数据源
+
+    Returns:
+        按日期升序的 DataFrame；无缓存且回源失败时返回空表。
+    """
+    key = f"idx_{symbol}"
+    cached = None if refresh else kline_cache.get(key)
+    try:
+        df = get_data_source().get_index_daily(
+            symbol, timeout=timeout, retries=retries
+        )
+    except Exception as exc:  # noqa: BLE001 - 单指数失败不拖垮调用方
+        if cached is not None and not cached.empty:
+            logger.warning("指数日线刷新失败，沿用缓存 %s（最后 %s）: %s",
+                           key, str(cached["date"].iloc[-1]), exc)
+            return cached
+        logger.warning("指数日线获取失败且无缓存 %s: %s", key, exc)
+        return pd.DataFrame()
+
+    if df is None or df.empty:
+        if cached is not None and not cached.empty:
+            logger.warning("指数日线回源为空，沿用缓存 %s", key)
+            return cached
+        return pd.DataFrame()
+
+    kline_cache.save(key, df)
+    merged = kline_cache.get(key)
+    return merged if merged is not None else df

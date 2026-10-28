@@ -24,7 +24,12 @@ import pandas as pd
 
 from app.config import get_settings
 from app.data.cache import db, kline_cache
-from app.data.service import get_kline_cached, get_stock_pool
+from app.data.service import (
+    INDEX_SYMBOL,
+    get_index_cached,
+    get_kline_cached,
+    get_stock_pool,
+)
 from app.indicators import add_all_indicators
 from app.strategies.base import Signal, Strategy
 
@@ -567,15 +572,23 @@ async def run_in_io(fn, /, *args, **kwargs):
 async def warmup_klines(
     codes: list[str] | None = None,
     concurrency: int | None = None,
+    with_index: bool = True,
 ) -> dict:
     """后台批量预热K线：把股票日K增量缓存到本地Parquet，加速扫描。
 
     已有缓存的股票只增量拉取最近几天（很快）；缺失的首次全量拉取
     （较慢但在后台进行，不阻塞服务）。预热完成后扫描直接读本地缓存。
 
+    指数日线（``idx_sh000001``）也在这里刷新：它是大盘择时
+    （``regime_ma`` / ``regime_tiers``）的唯一输入，若只有个股日更，
+    个股已经走到当日、指数还停在前两天，那两天的择时就会静默退化成
+    默认档（不报错，只是回测/影子收益失真）。放在个股循环**之后**，
+    这样个股预热因扫描让路提前 break 时，指数仍会被刷新。
+
     Args:
         codes: 指定代码列表；None 表示全市场
         concurrency: 预热并发（默认取配置 kline_warmup_concurrency）
+        with_index: 是否顺带刷新指数日线（默认刷新）
     """
     settings = get_settings()
     if concurrency is None:
@@ -614,12 +627,44 @@ async def warmup_klines(
             break
         await asyncio.gather(*(one(c) for c in codes_all[start : start + chunk]))
 
+    index_info = await _refresh_index() if with_index else {}
     result = {"ok": ok, "fail": fail, "total": len(pool)}
+    if with_index:
+        result["index"] = index_info
     _last_warmup.update(
         {"result": result, "at": datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
     )
-    logger.info("K线预热完成：成功 %d，失败 %d，共 %d", ok, fail, len(pool))
+    logger.info(
+        "K线预热完成：成功 %d，失败 %d，共 %d；指数最后 %s",
+        ok, fail, len(pool), index_info.get("last") or "未刷新",
+    )
     return result
+
+
+#: 指数日线刷新超时（秒）：单个请求，卡住就跳过，不拖住个股预热的结果返回
+_INDEX_TIMEOUT = 20.0
+
+
+async def _refresh_index() -> dict:
+    """刷新指数日线缓存，返回 ``{ok, last, bars, error?}``（失败不影响个股结果）。"""
+    try:
+        df = await asyncio.wait_for(
+            run_in_io(get_index_cached, INDEX_SYMBOL),
+            timeout=_INDEX_TIMEOUT,
+        )
+    except asyncio.TimeoutError:
+        logger.warning("指数K线刷新超时（%.0fs），择时可能滞后", _INDEX_TIMEOUT)
+        return {"ok": False, "last": None, "bars": 0, "error": "timeout"}
+    except Exception as exc:  # noqa: BLE001 - 指数失败不影响预热主结果
+        logger.warning("指数K线刷新失败: %s", exc)
+        return {"ok": False, "last": None, "bars": 0, "error": str(exc)}
+    if df is None or df.empty:
+        return {"ok": False, "last": None, "bars": 0, "error": "empty"}
+    return {
+        "ok": True,
+        "last": str(df["date"].iloc[-1])[:10],
+        "bars": int(len(df)),
+    }
 
 
 def kline_cache_stats() -> dict:

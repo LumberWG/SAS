@@ -44,12 +44,19 @@ class TestKlineWarmup:
             scanner_module, "get_stock_pool",
             lambda: __import__("pandas").DataFrame({"code": ["600000", "600001", "600002"]}),
         )
+        monkeypatch.setattr(
+            scanner_module, "get_index_cached",
+            lambda symbol: __import__("pandas").DataFrame({"date": ["2026-10-28"]}),
+        )
 
         result = asyncio.run(scanner_module.warmup_klines())
         assert result["total"] == 3
         assert result["ok"] == 3
         assert result["fail"] == 0
         assert calls == ["600000", "600001", "600002"]
+        # 指数日线随个股一起日更（择时依赖它，滞后会静默退化默认档）
+        assert result["index"]["ok"] is True
+        assert result["index"]["last"] == "2026-10-28"
 
     def test_warmup_counts_failures(self, monkeypatch):
         """单股取数异常应计入 fail 而不中断整轮。"""
@@ -65,9 +72,32 @@ class TestKlineWarmup:
             scanner_module, "get_stock_pool",
             lambda: __import__("pandas").DataFrame({"code": ["600000", "600001"]}),
         )
+        monkeypatch.setattr(
+            scanner_module, "get_index_cached",
+            lambda symbol: __import__("pandas").DataFrame({"date": ["2026-10-28"]}),
+        )
         result = asyncio.run(scanner_module.warmup_klines())
         assert result["ok"] == 1
         assert result["fail"] == 1
+
+    def test_warmup_index_failure_keeps_stock_result(self, monkeypatch):
+        """指数刷新失败只记在 index 字段里，不影响个股预热统计。"""
+        from app.screener import scanner as scanner_module
+
+        def boom(symbol):
+            raise RuntimeError("指数数据源不可用")
+
+        monkeypatch.setattr(scanner_module, "get_kline_cached", lambda code: None)
+        monkeypatch.setattr(
+            scanner_module, "get_stock_pool",
+            lambda: __import__("pandas").DataFrame({"code": ["600000"]}),
+        )
+        monkeypatch.setattr(scanner_module, "get_index_cached", boom)
+
+        result = asyncio.run(scanner_module.warmup_klines())
+        assert result["ok"] == 1
+        assert result["index"]["ok"] is False
+        assert "不可用" in result["index"]["error"]
 
     def test_kline_cache_stats_counts_existing(self, monkeypatch, tmp_path):
         """缓存统计应按 Parquet 文件存在计数（含最近预热结果）。"""
@@ -88,6 +118,57 @@ class TestKlineWarmup:
         assert stats["total"] == 3
         assert stats["cached"] == 2
         assert stats["ratio"] == pytest.approx(66.7, abs=0.1)
+
+
+class TestIndexCached:
+    """指数日线缓存：成功写盘合并，失败沿用旧缓存（择时不能因为一次失败断掉）。"""
+
+    @staticmethod
+    def _df(dates: list[str]):
+        import pandas as pd
+
+        return pd.DataFrame({
+            "date": dates,
+            "open": 3000.0, "close": 3010.0, "high": 3020.0,
+            "low": 2990.0, "volume": 1e8, "amount": 1e11,
+        })
+
+    def test_saves_and_merges(self, monkeypatch, tmp_path):
+        from app.data import service as service_module
+        from app.data.cache import KlineCache
+
+        class FakeSource:
+            @staticmethod
+            def get_index_daily(symbol, timeout=None, retries=None):
+                assert symbol == service_module.INDEX_SYMBOL
+                return TestIndexCached._df(["2026-10-27", "2026-10-28"])
+
+        cache = KlineCache(tmp_path)
+        cache.save("idx_sh000001", self._df(["2026-10-24", "2026-10-27"]))
+        monkeypatch.setattr(service_module, "kline_cache", cache)
+        monkeypatch.setattr(service_module, "get_data_source", lambda: FakeSource())
+
+        df = service_module.get_index_cached()
+        # 合并去重：旧的两根 + 新的一天，同一天以新拉取为准
+        assert list(df["date"]) == ["2026-10-24", "2026-10-27", "2026-10-28"]
+        assert cache.last_date("idx_sh000001") == "2026-10-28"
+
+    def test_falls_back_to_cache_on_failure(self, monkeypatch, tmp_path):
+        from app.data import service as service_module
+        from app.data.cache import KlineCache
+
+        class BrokenSource:
+            @staticmethod
+            def get_index_daily(symbol, timeout=None, retries=None):
+                raise RuntimeError("数据源不可用")
+
+        cache = KlineCache(tmp_path)
+        cache.save("idx_sh000001", self._df(["2026-10-27"]))
+        monkeypatch.setattr(service_module, "kline_cache", cache)
+        monkeypatch.setattr(service_module, "get_data_source", lambda: BrokenSource())
+
+        df = service_module.get_index_cached()
+        assert list(df["date"]) == ["2026-10-27"]
 
 
 @dataclass

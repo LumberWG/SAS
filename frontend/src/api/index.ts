@@ -704,7 +704,16 @@ export interface KlineStatus {
   total: number
   cached: number
   ratio: number
-  last_warmup: { result?: { ok: number; fail: number; total: number }; at?: string }
+  last_warmup: {
+    result?: {
+      ok: number
+      fail: number
+      total: number
+      /** 指数日线随预热一起刷新（择时 regime_ma / regime_tiers 的输入） */
+      index?: { ok: boolean; last: string | null; bars: number; error?: string }
+    }
+    at?: string
+  }
 }
 
 export function getKlineStatus(): Promise<KlineStatus> {
