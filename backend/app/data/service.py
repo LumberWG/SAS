@@ -63,10 +63,6 @@ def get_stock_pool() -> pd.DataFrame:
             ttl = _POOL_FALLBACK_TTL
             if pool is None:
                 raise
-    # 清洗名称：消除个别票（多为 688 科创板）的 GBK 误读乱码，避免写进缓存与前端
-    if pool is not None and "name" in pool.columns:
-        pool = pool.copy()
-        pool["name"] = [clean_name(c, n) for c, n in zip(pool["code"], pool["name"])]
     _pool_cache = (now, pool, ttl)
     _save_pool_to_disk(pool)
     return pool
@@ -152,11 +148,14 @@ def _pool_from_snapshot() -> pd.DataFrame | None:
 
 
 def _finalize_pool(pool: pd.DataFrame) -> pd.DataFrame:
-    """统一股票池字段：补零代码 + market 列。"""
+    """统一股票池字段：补零代码 + market 列 + 名称清洗。"""
     pool = pool.copy()
     pool["code"] = pool["code"].astype(str).str.zfill(6)
     if "name" not in pool.columns:
         pool["name"] = pool["code"]
+    # 清洗名称：消除个别票（多为 688 科创板）的 GBK 误读乱码——
+    # 所有路径（磁盘缓存/HTTP/akshare/快照降级）都经此处，乱码进不了缓存与前端
+    pool["name"] = [clean_name(c, n) for c, n in zip(pool["code"], pool["name"])]
     pool["market"] = pool["code"].map(_market_of)
     return pool[["code", "name", "market"]].reset_index(drop=True)
 

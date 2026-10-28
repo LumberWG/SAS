@@ -25,6 +25,7 @@ import pandas as pd
 
 from app.config import get_settings
 from app.data.akshare_source import DataSourceError, get_data_source
+from app.data.scope import clean_name
 
 logger = logging.getLogger("sas.snapshot")
 
@@ -98,6 +99,14 @@ class SnapshotStore:
         """
         if df is None or df.empty:
             return df
+        # 名称清洗：消除个别票（多为 688 科创板）的 GBK 误读乱码——
+        # 磁盘加载 / 后台刷新 / 冷启动所有路径都经此处
+        if "code" in df.columns and "name" in df.columns:
+            df = df.copy()
+            df["name"] = [
+                clean_name(c, n)
+                for c, n in zip(df["code"].astype(str), df["name"])
+            ]
         if "price" not in df.columns or "pct_change" not in df.columns:
             return df
         price = pd.to_numeric(df["price"], errors="coerce")
