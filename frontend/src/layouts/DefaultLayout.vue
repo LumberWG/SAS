@@ -16,10 +16,12 @@ import {
 } from 'lucide-vue-next'
 
 import { useMarketStore } from '../stores/market'
+import { getScopeStats, type ScopeStats } from '../api'
 
 const route = useRoute()
 const router = useRouter()
 const market = useMarketStore()
+const scopeStats = ref<ScopeStats | null>(null)
 
 // 按业务流程排序：概览 → ①扫描选股 → ②加入自选 → ③排序出建议 → ④自动交易/持仓 → 回测
 const navItems = [
@@ -59,6 +61,7 @@ onMounted(() => {
   tick()
   timer = window.setInterval(tick, 1000)
   market.fetchAnalysisStatus()
+  getScopeStats().then((d) => (scopeStats.value = d)).catch(() => {})
 })
 onUnmounted(() => {
   if (timer) window.clearInterval(timer)
@@ -139,6 +142,13 @@ const statusText = computed(() => phase.value || (market.trading ? '交易中' :
         </div>
         <div class="flex items-center gap-4">
           <span class="font-num text-[13px] text-content-muted">{{ now }}</span>
+          <span
+            v-if="scopeStats"
+            class="rounded-full border border-base-600 px-2.5 py-1 text-[11px] text-content-faint"
+            :title="`可交易范围 ${scopeStats.in_scope} 只（主板 ${scopeStats.mainboard} / 创业板 ${scopeStats.cyb}）`"
+          >
+            范围 {{ scopeStats.in_scope }} · 创业板 {{ scopeStats.cyb }}
+          </span>
           <span
             class="rounded-full border border-base-600 px-2.5 py-1 text-[11px] text-content-faint"
           >

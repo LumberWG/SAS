@@ -828,4 +828,19 @@ http.interceptors.response.use(
   },
 )
 
+// ==================== 可交易范围规模 ====================
+
+export interface ScopeStats {
+  source_total: number
+  in_scope: number
+  mainboard: number
+  cyb: number
+  excluded: { board_excluded: number; st: number; giant: number; invalid: number }
+}
+
+/** 当前可交易范围规模（沪深主板+创业板，剔 ST/巨无霸），见后端 /api/scope/stats。 */
+export function getScopeStats(): Promise<ScopeStats> {
+  return http.get('/scope/stats').then((r) => r.data)
+}
+
 export default http
