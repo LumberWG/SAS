@@ -30,7 +30,7 @@ from dataclasses import dataclass
 
 import pandas as pd
 
-from app.analysis.factors import compute_factors
+from app.analysis.factors import BUY_THRESHOLD, SELL_THRESHOLD, compute_factors
 from app.analysis.scoring import score_technical
 from app.backtest.review import analyze
 from app.config import get_settings
@@ -51,6 +51,12 @@ TRANSFER_RATE = 0.00001
 STOP_LOSS_RATIO = 0.08     # 与线上 engine 一致：成本价 -8% 止损
 TAKE_PROFIT_RATIO = 0.20   # 成本价 +20% 止盈
 
+#: 用户实际可交易范围：沪深主板 + 创业板（与 ``scripts/factor_ic.py`` 同一口径）。
+#: 科创板(688)/北交所(920/43/83/87)/B 股不进池——否则结论可能建立在买不到的票上。
+MAIN_BOARD_PREFIXES = (
+    "600", "601", "603", "605", "000", "001", "002", "003", "300", "301",
+)
+
 #: 单组「K线 + 指标 + 每日股票池」缓存。
 #: 回归测试里要跑多组参数，数据准备（读 5000+ parquet、算指标）占大头，
 #: 只缓存最近一组，避免内存无限增长。
@@ -67,12 +73,23 @@ class PipelineParams:
     initial_capital: float | None = None   # 缺省取 settings.paper_initial_capital
     max_positions: int | None = None       # 缺省取 settings.paper_max_positions
     universe_size: int = 500               # 每日成交额 TopN 股票池
+    #: 只在这些代码前缀里选股（None=全市场，即线上行为）。
+    #: 过滤发生在**排序取 TopN 之前**，所以池子容量不会因为剔除板块而缩水。
+    board_prefixes: tuple[str, ...] | None = None
     watch_cap: int = 60                    # 自选股上限（FIFO）
     add_per_day: int = 50                  # 每日扫描后加自选上限
     stop_loss: float = STOP_LOSS_RATIO
     take_profit: float = TAKE_PROFIT_RATIO
     max_hold_days: int = 0                 # 时间止损，0=不限制
+    #: 调仓周期（交易日）：1=每日（线上行为），5≈周频。只在**调仓日收盘后**生成买入委托、
+    #: 次日开盘成交。卖出（止损/止盈/信号/择时清仓）不受限制——风控不能因为没到调仓日而延迟。
+    #: 目的：记录 #29 显示月换手约 2.2 个资本、摩擦是主要漏损，降频是最直接的减法。
+    rebalance_days: int = 1
     buy_threshold: float | None = None     # 14因子买入阈值，None=沿用 factors.BUY_THRESHOLD
+    #: 分位数门槛：当日自选池打分排前 X（0~1）才算买入候选。
+    #: 设了就**替代**上面两个绝对阈值（action=="buy" 与 buy_threshold）——绝对分在
+    #: 权重重标定后不可比（见 BACKTEST_LOG 记录 #24），权重类实验必须用这个口径。
+    buy_top_pct: float | None = None
     # ---- E2/E5：买点与筛选过滤（None=不过滤，即线上当前行为） ----
     max_open_gain: float | None = None     # E2 次日开盘涨幅上限，超过则不买（不追高）
     max_gain_5d: float | None = None       # E5 近 5 日涨幅上限，超过则不进买入池（不追已涨）
@@ -89,6 +106,10 @@ class PipelineParams:
     stop_confirm_close: bool = False       # 止损改收盘确认：收盘跌破止损线，次日开盘卖出
     # ---- E13：组合层面择时（大盘走弱时降总仓位，而不是砍个股） ----
     weak_exposure: float | None = None     # 弱市总仓位上限（需同时设置 regime_ma）
+    # ---- E33：反转版选股（把 14 因子总分的符号翻转） ----
+    #: True 时 score = −score：原来最弱的「空头排列 + 缩量 + 超跌」变成高分买入对象。
+    #: 依据 BACKTEST_LOG 记录 #22：9 个量价因子在 1 个月尺度上 IC 全为负。
+    invert_score: bool = False
     # ---- E32：大盘分档仓位（快慢两条均线把「强弱」拆成 4 档） ----
     regime_fast_ma: int = 20               # 快速均线周期（与 regime_ma 组成快慢双线）
     #: 四档总仓位上限，按 state 索引：(0=双线之下, 1=破慢线站上快线, 2=破快线站上慢线, 3=双线之上)
@@ -109,6 +130,13 @@ class PipelineParams:
     # ---- 选股模型实验（None = 线上行为） ----
     factor_weights: dict[str, float] | None = None  # 14 因子权重覆盖，自动归一化到 100
     strategies: tuple[str, ...] | None = None       # 只启用指定策略，None = 全部注册策略
+    # ---- E39：成交摩擦（0 = 线上当前假设：按开盘价/触发价原价成交） ----
+    #: 单边滑点：买入价 ×(1+s)、卖出价 ×(1−s)。涨跌停判定仍用原始价格（交易所规则），
+    #: 只有「我们的成交价」变差，用于检验正超额是否只是摩擦假设的产物。
+    slippage: float = 0.0
+    #: 满仓轮动开关（None = 沿用 settings.paper_rotation_enabled）。
+    #: 轮动是**强制卖出**，也是换手与摩擦的最大来源（记录 #29：月换手约 2.2 个资本）。
+    rotation_enabled: bool | None = None
 
 
 def calc_fee(side: str, amount: float) -> float:
@@ -166,12 +194,22 @@ def _load_index(kline_dir: str) -> pd.DataFrame:
 
 
 def _build_universe_by_date(
-    raw: dict[str, pd.DataFrame], dates: list[str], top_n: int
+    raw: dict[str, pd.DataFrame],
+    dates: list[str],
+    top_n: int,
+    board_prefixes: tuple[str, ...] | None = None,
 ) -> dict[str, list[str]]:
-    """每日股票池：按**当日**成交额取前 N（仅用当日数据，无未来函数）。"""
+    """每日股票池：按**当日**成交额取前 N（仅用当日数据，无未来函数）。
+
+    ``board_prefixes`` 非空时先按代码前缀排除板块，再排名取 TopN
+    （先剔除再排名，池子容量不变；先排名再剔除会让池子缩水）。
+    """
     amount_by_date: dict[str, list[tuple[str, float]]] = {d: [] for d in dates}
     wanted = set(dates)
+    prefixes = tuple(board_prefixes) if board_prefixes else None
     for code, df in raw.items():
+        if prefixes is not None and not code.startswith(prefixes):
+            continue
         sub = df[df["date"].isin(wanted)]
         for row in sub.itertuples(index=False):
             amount = getattr(row, "amount", None)
@@ -196,7 +234,9 @@ def _prepare(params: PipelineParams) -> dict:
     if len(dates) < 2:
         raise RuntimeError("区间内交易日不足，检查开始/结束日期")
 
-    universe = _build_universe_by_date(raw, dates, params.universe_size)
+    universe = _build_universe_by_date(
+        raw, dates, params.universe_size, params.board_prefixes
+    )
     candidates = sorted({c for codes in universe.values() for c in codes})
     logger.info("流水线回测：%d 个交易日，候选股票 %d 只", len(dates), len(candidates))
 
@@ -241,6 +281,18 @@ def _pick_strategies(all_strategies: list, wanted: tuple[str, ...] | None) -> li
     return [s for s in all_strategies if s.name in keep]
 
 
+def _top_pct(items: list[dict], pct: float) -> list[dict]:
+    """按打分取前 ``pct`` 比例（至少 1 只；``items`` 需已按分数降序）。
+
+    分位数门槛的意义：打分权重一变，绝对分（±15）的分布就变，跨方案不可比；
+    按「当日自选池内部相对排名」选股则与分数分布无关。
+    """
+    if not items:
+        return []
+    ratio = min(1.0, max(0.0, float(pct)))
+    return items[: max(1, math.ceil(len(items) * ratio))]
+
+
 def _signals_key(params: PipelineParams) -> tuple:
     """影响「选股结果」的参数指纹：变了就必须重算 signals。
 
@@ -248,7 +300,8 @@ def _signals_key(params: PipelineParams) -> tuple:
     「准备一次、多组复用」；只有动到选股模型（因子权重、策略集）才会重算。
     """
     return (tuple(params.strategies or ()),
-            tuple(sorted((params.factor_weights or {}).items())))
+            tuple(sorted((params.factor_weights or {}).items())),
+            bool(params.invert_score))
 
 
 def _ensure_signals(prepared: dict, params: PipelineParams) -> dict[str, list[dict]]:
@@ -288,16 +341,18 @@ def _build_signals(prepared: dict, params: PipelineParams) -> dict[str, list[dic
                 continue
             slice_df = klines[code].iloc[: idx + 1]
             best = None
+            sc: float | None = None   # 分数与策略无关，同一 (code, date) 只算一次
             for strategy in strategies:
                 if len(slice_df) < strategy.min_bars:
                     continue
                 sig = strategy.evaluate(slice_df)
                 if sig is None:
                     continue
-                try:
-                    sc = score_technical(slice_df).score
-                except Exception:  # noqa: BLE001
-                    sc = 0.0
+                if sc is None:
+                    try:
+                        sc = float(score_technical(slice_df).score)
+                    except Exception:  # noqa: BLE001
+                        sc = 0.0
                 if best is None or sc > best["extra"]["score"]:
                     best = {
                         "code": code, "name": names.get(code, code),
@@ -335,9 +390,19 @@ def _build_signals(prepared: dict, params: PipelineParams) -> dict[str, list[dic
                 )
             except Exception:  # noqa: BLE001
                 continue
+            total = float(result.total)
+            if params.invert_score:
+                # E33 反转版：翻转总分后重新判级（buy 变成「原来最弱的那批」）
+                total = -total
+                action = (
+                    "buy" if total >= BUY_THRESHOLD
+                    else ("sell" if total <= SELL_THRESHOLD else "hold")
+                )
+            else:
+                action = result.action
             scored.append({
                 "code": code, "name": names.get(code, code),
-                "score": float(result.total), "action": result.action,
+                "score": total, "action": action,
             })
         scored.sort(key=lambda x: -x["score"])
         signals[date] = scored
@@ -348,9 +413,12 @@ def _build_signals(prepared: dict, params: PipelineParams) -> dict[str, list[dic
 def _prepare_cached(params: PipelineParams) -> dict:
     """同一区间/股票池只准备一次（回归测试/参数搜索要跑多组参数）。"""
     global _PREPARED, _PREPARED_KEY
-    key = (params.start_date, params.end_date, params.universe_size)
+    key = (
+        params.start_date, params.end_date, params.universe_size,
+        tuple(params.board_prefixes or ()),
+    )
     if _PREPARED is not None and _PREPARED_KEY == key:
-        logger.info("复用已准备的K线与指标（%s ~ %s，Top%d）", *key)
+        logger.info("复用已准备的K线与指标（%s ~ %s，Top%d）", *key[:3])
         return _PREPARED
     prepared = _prepare(params)
     prepared["signals"] = _build_signals(prepared, params)
@@ -369,6 +437,12 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
     names: dict[str, str] = prepared["names"]
     pos_index: dict[str, dict[str, int]] = prepared["pos_index"]
     signals: dict[str, list[dict]] = _ensure_signals(prepared, params)
+    slippage = max(0.0, float(params.slippage or 0.0))   # E39：单边成交摩擦
+    rotation_on = (
+        settings.paper_rotation_enabled
+        if params.rotation_enabled is None
+        else bool(params.rotation_enabled)
+    )
 
     # 大盘择时（regime）：用**前一交易日**上证指数收盘 vs MA(N) 判断强弱。
     # 当日盘中只能看到前一日收盘，所以统一 shift(1)，不留未来函数。
@@ -386,7 +460,7 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
     # E32 大盘分档：0=双均线之下（最弱）1=仅破快速线 2=仅破慢速线 3=双均线之上
     # 同样只用前一交易日收盘，与上面的二值 regime 同一口径，不留未来函数。
     tiers_state: dict[str, int] = {}
-    if params.regime_tiers is not None:
+    if params.regime_tiers is not None or params.regime_flat_below:
         idx_df = prepared.get("index")
         if idx_df is not None and not idx_df.empty:
             slow_n = max(2, int(params.regime_ma or 60))
@@ -513,16 +587,19 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
                 return False
         return True
 
-    def market_value(date: str) -> float:
+    def market_value(date: str, field: str = "close") -> float:
+        """持仓市值。``field="open"`` 用于开盘下单时的资金测算：
+        当日收盘价要到收盘才知道，开盘按收盘价算仓位=未来函数。"""
         total = 0.0
         for code, p in positions.items():
-            px = price_on(code, date) or p["cost"]
+            px = price_on(code, date, field) or p["cost"]
             total += p["shares"] * px
         return total
 
     def sell(code: str, date: str, price: float, reason: str) -> None:
         nonlocal cash
         p = positions.pop(code)
+        price = price * (1 - slippage)   # E39：卖出按不利方向滑点成交
         amount = p["shares"] * price
         fee = calc_fee("sell", amount)
         cash += amount - fee
@@ -546,6 +623,7 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
         if want < LOT or rest < LOT:
             sell(code, date, price, reason)
             return
+        price = price * (1 - slippage)   # E39：部分卖出同样按不利方向成交
         amount = want * price
         fee = calc_fee("sell", amount)
         cash += amount - fee
@@ -564,8 +642,11 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
 
     day_no = {d: i for i, d in enumerate(dates)}
 
+    rebalance_every = max(1, int(params.rebalance_days or 1))
+
     for day_idx, date in enumerate(dates):
         rotation_used = 0  # 每日轮动次数上限独立计数
+        rebalance = day_idx % rebalance_every == 0  # 交易日序号对齐，避免周末/停牌导致漂移
 
         # ---------- 1) 开盘执行昨日收盘产生的委托 ----------
         for code, reason in list(pending_sells.items()):
@@ -588,8 +669,10 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
         elif params.weak_exposure is not None and params.regime_ma is not None:
             if regime.get(date, True):
                 day_exposure = min(exposure, params.weak_exposure)
-        total_asset = cash + market_value(date)
-        pool_budget = max(0.0, total_asset * day_exposure - market_value(date))
+        # 开盘下单只能用开盘价估值：用当日收盘价算总资产/仓位上限等于提前知道收盘
+        mv_open = market_value(date, "open")
+        total_asset = cash + mv_open
+        pool_budget = max(0.0, total_asset * day_exposure - mv_open)
         slots = max_positions - len(positions)
         ranked = sorted(pending_buys, key=lambda b: -b["score"])
         pending_buys = []
@@ -609,10 +692,11 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
             px = price_on(code, date, "open")
             pc = prev_close(code, date)
             if px is None or (pc and px >= pc * 1.095):
-                continue  # 涨停或停牌买不到
+                continue  # 涨停或停牌买不到（判定用原始开盘价，滑点不影响能否成交）
             # E2：高开太多不追（次日开盘涨幅上限），缺席即沿用线上「照价买入」
             if params.max_open_gain is not None and pc and px / pc - 1 > params.max_open_gain:
                 continue
+            px = px * (1 + slippage)   # E39：买入按不利方向滑点成交（股数按滑点后价格算）
             budget = min(
                 pool_budget * weight / weight_total if weight_total else 0,
                 total_asset * single_ratio, cash, pool_budget,
@@ -692,7 +776,8 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
         scored = signals.get(date, [])
 
         # 卖出委托（评分 ≤ -15，且非当日买入）
-        pending_sells = {}
+        # 注意：不能在这里 `pending_sells = {}`——开盘因跌停没卖掉的委托要顺延到
+        # 下一个交易日，清空会让它永远卖不出去（只剩已成交的被 pop 掉）。
         for item in scored:
             if item["action"] != "sell":
                 continue
@@ -725,15 +810,24 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
                 if close_px is not None and close_px <= p["stop"]:
                     pending_sells.setdefault(code, "止损(收盘确认)")
 
+        # 买入池：分位数门槛优先（权重可比），否则按绝对分档（线上行为）
+        if not rebalance:
+            buys = []   # 非调仓日不生成买入委托（卖出/风控照常）
+        elif params.buy_top_pct is not None:
+            buys = [
+                s for s in _top_pct(scored, params.buy_top_pct)
+                if pass_filters(s["code"], date)
+            ]
+        else:
+            buys = [
+                s for s in scored
+                if s["action"] == "buy"
+                and (params.buy_threshold is None or s["score"] >= params.buy_threshold)
+                and pass_filters(s["code"], date)
+            ]
         # 轮动替换：满仓时用显著更高分的新票换掉最弱持仓（每日 1 次）
-        buys = [
-            s for s in scored
-            if s["action"] == "buy"
-            and (params.buy_threshold is None or s["score"] >= params.buy_threshold)
-            and pass_filters(s["code"], date)
-        ]
         if (
-            settings.paper_rotation_enabled
+            rotation_on
             and len(positions) >= max_positions
             and buys and rotation_used < settings.paper_rotation_max_per_day
         ):
@@ -829,12 +923,17 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
             "initial_capital": round(initial_capital, 2),
             "max_positions": max_positions,
             "universe_size": params.universe_size,
+            "board_prefixes": list(params.board_prefixes) if params.board_prefixes else None,
             "watch_cap": params.watch_cap,
             "add_per_day": params.add_per_day,
             "stop_loss": params.stop_loss,
             "take_profit": params.take_profit,
             "max_hold_days": params.max_hold_days,
             "buy_threshold": params.buy_threshold,
+            "buy_top_pct": params.buy_top_pct,
+            "slippage": params.slippage,
+            "rotation_enabled": rotation_on,
+            "rebalance_days": rebalance_every,
             "max_open_gain": params.max_open_gain,
             "max_gain_5d": params.max_gain_5d,
             "min_volume_ratio": params.min_volume_ratio,

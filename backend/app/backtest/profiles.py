@@ -10,6 +10,7 @@
   - 未列出的键沿用 ``PipelineParams`` 默认值（即线上配置）。
 """
 from app.analysis import factors
+from app.backtest.pipeline import MAIN_BOARD_PREFIXES
 
 
 def _w(**group_mult: float) -> dict[str, float]:
@@ -22,6 +23,23 @@ def _w(**group_mult: float) -> dict[str, float]:
         key: round(weight * group_mult.get(factors.FACTOR_LABELS[key][1], 1.0), 2)
         for key, weight in factors.FACTOR_WEIGHTS.items()
     }
+
+
+#: E34 的「IC 强度」权重（记录 #22 的 20 日 |IC| 分配，合计 100）。
+#: _W_IC1：14 项全保留，实测有 IC 的 8 项加权，其余压到低权重；
+#: _W_IC2：只留实测有 IC 的 8 项，未实测因子显式归零（reweight 不会自动清空）。
+_W_IC1 = {
+    "turnover": 15.0, "long_position": 12.0, "bias": 11.0, "gain20": 10.0,
+    "rsi": 9.0, "atr": 8.0, "macd": 7.0, "vol_ratio": 5.0,
+    "vol_trend": 5.0, "ma_trend": 5.0, "ma_slope": 5.0,
+    "drawdown": 4.0, "breakout": 2.0, "boll": 2.0,
+}
+_W_IC2 = {
+    "turnover": 20.0, "long_position": 16.0, "bias": 14.0, "gain20": 13.0,
+    "rsi": 11.0, "atr": 10.0, "macd": 9.0, "vol_ratio": 7.0,
+    "vol_trend": 0.0, "ma_trend": 0.0, "ma_slope": 0.0,
+    "drawdown": 0.0, "breakout": 0.0, "boll": 0.0,
+}
 
 
 #: 方案名 -> PipelineParams 字段覆盖
@@ -241,6 +259,14 @@ PROFILES: dict[str, dict] = {
         "regime_ma": 80,
         "weak_exposure": 0.60,
     },
+    # ---- E33：反转版选股（2×2 设计，用来定位问题出在「打分方向」还是「门槛」） ----
+    # 依据记录 #22：9 个量价因子在 1 个月尺度上 IC 全为负。
+    #   rev_inv  ：只翻总分号（门槛仍是突破类）
+    #   rev_kdj  ：只换反转门槛（KDJ 超卖金叉），打分方向不变
+    #   rev_both ：两者都翻
+    "rev_inv": {"invert_score": True},
+    "rev_kdj": {"strategies": ["KDJ超卖金叉"]},
+    "rev_both": {"invert_score": True, "strategies": ["KDJ超卖金叉"]},
     # ---- E32：大盘分档仓位（组合层择时，唯一能改变收益量级的方向） ----
     # 用上证 MA20/MA60 把大盘拆成 4 档，档位决定「总仓位上限」= 线上 80% × 系数：
     #   3=双线之上(满仓) 2=破快线站上慢线 1=破慢线站上快线 0=双线之下
@@ -272,6 +298,75 @@ PROFILES: dict[str, dict] = {
     # 策略集 A/B：只看突破类 vs 只看交叉/超卖类
     "strat_break": {"strategies": ("海龟突破", "平台突破", "动量突破")},
     "strat_cross": {"strategies": ("均线放量", "MACD金叉", "KDJ超卖金叉")},
+    # ---- E34：按 IC 强度加权反转（记录 #22/#23 的后续） ----
+    # `rev_inv` 是「14 因子整体取负」，等价于假设全部因子反向且等强；
+    # 但实测 20 日 IC 从 turnover −0.159 到 vol_ratio −0.051 差 3 倍，故按强度分配权重。
+    # rev_ic1：14 项全保留，实测有 IC 的 8 项加权，其余压到低权重。
+    "rev_ic1": {
+        "invert_score": True,
+        "factor_weights": _W_IC1,
+    },
+    # rev_ic2：只留实测有 IC 的 8 项（按 |IC| 归一化到 100），未实测因子权重归零。
+    "rev_ic2": {
+        "invert_score": True,
+        "factor_weights": _W_IC2,
+    },
+    # 阈值扫描：反转后总分号变了，15 分档的口径要重新标定（25 = 更挑，只买最弱那批）。
+    "rev_ic1_t25": {
+        "invert_score": True,
+        "buy_threshold": 25,
+        "factor_weights": _W_IC1,
+    },
+    "rev_ic2_t25": {
+        "invert_score": True,
+        "buy_threshold": 25,
+        "factor_weights": _W_IC2,
+    },
+    # ---- E34b：池子口径对齐（记录 #22 选项 B） ----
+    # 只买沪深主板 + 创业板（用户实际交易范围），过滤在排名取 TopN 之前生效。
+    "mb": {"board_prefixes": MAIN_BOARD_PREFIXES},
+    # 反转 + 板块过滤：看两者是否互相加成，还是只是少买了几只票。
+    "rev_ic2_mb": {
+        "invert_score": True,
+        "board_prefixes": MAIN_BOARD_PREFIXES,
+        "factor_weights": _W_IC2,
+    },
+    # ---- E35：分位数买入门槛（记录 #24 的下一步） ----
+    # 当日自选池（≤watch_cap 只）按打分取前 X% 作为买入池，替代绝对分 ±15。
+    # 动机：权重一变绝对分的分布就变，跨方案不可比（#24 里 `rev_ic1_t25` 与
+    # `rev_ic1` 四窗口结果完全一致，就是绝对阈值失效的直接证据）。
+    # 先不带反转跑 pct20/pct10，用来看「线上绝对分档」在同一口径下相当于多少分位。
+    "pct20": {"buy_top_pct": 0.20},
+    "pct10": {"buy_top_pct": 0.10},
+    "pct20_rev": {"invert_score": True, "buy_top_pct": 0.20},
+    # 权重方案只有在分位数口径下才可比：IC1/IC2 各一格，另加 IC2 的 10% 敏感性。
+    "pct20_ic1": {"invert_score": True, "buy_top_pct": 0.20, "factor_weights": _W_IC1},
+    "pct20_ic2": {"invert_score": True, "buy_top_pct": 0.20, "factor_weights": _W_IC2},
+    "pct10_ic2": {"invert_score": True, "buy_top_pct": 0.10, "factor_weights": _W_IC2},
+    # ---- E39：成交摩擦压力测试（单边滑点 0.1% / 0.3% / 0.5%，其余同线上） ----
+    # 目的：检验「多数月份正超额」是不是只是摩擦假设的产物。
+    # 0.3% 大致相当于「开盘价成交 + 一档冲击 + 小幅延迟」，偏保守但不算苛刻。
+    "slip10": {"slippage": 0.001},
+    "slip30": {"slippage": 0.003},
+    "slip50": {"slippage": 0.005},
+    # ---- E40：关闭满仓轮动（降换手，记录 #29 推断的唯一有证据方向） ----
+    # 轮动是强制卖出，换手与摩擦的最大来源；先看它与滑点的 2×2。
+    "nrot": {"rotation_enabled": False},
+    "nrot_s30": {"rotation_enabled": False, "slippage": 0.003},
+    # ---- E41：集中持仓（1~2 只），总仓位保持线上 80% 不变 ----
+    # 只改「分散度」：单票比例 × 持仓数 = 80%，所以不是加减杠杆，而是把注压到更少的票上。
+    # 动机：记录 #27~#30 显示中位胜率只有 22%、超额集中在少数大赢单 → 集中可能放大右尾，
+    # 也可能放大左尾（最差月 −14%~−17%），这是唯一没被覆盖过的结构性变量。
+    "conc1": {"max_positions": 1, "single_position_ratio": 0.80},
+    "conc2": {"max_positions": 2, "single_position_ratio": 0.40},
+    "conc1_s30": {"max_positions": 1, "single_position_ratio": 0.80, "slippage": 0.003},
+    "conc2_s30": {"max_positions": 2, "single_position_ratio": 0.40, "slippage": 0.003},
+    # ---- E42：降频调仓（周频/双周频），卖出与风控仍每日生效 ----
+    # 记录 #29：月换手约 2.2 个资本，0.3% 单边摩擦就把正超额月份比例从 63% 打到 53%。
+    # 降频是最直接的减法：只减少"新开仓"，不动止损/止盈/信号卖出。
+    "wk": {"rebalance_days": 5},
+    "wk_s30": {"rebalance_days": 5, "slippage": 0.003},
+    "wk10_s30": {"rebalance_days": 10, "slippage": 0.003},
 }
 
 

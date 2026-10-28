@@ -136,6 +136,52 @@ def test_pipeline_load_klines_skips_index_files(tmp_path):
     assert list(data) == ["600000"]
 
 
+def test_top_pct_takes_relative_rank():
+    """分位数门槛：取前 X%，至少 1 只，边界外不越界（记录 #24 的下一步）。"""
+    from app.backtest.pipeline import _top_pct
+
+    items = [{"score": 50 - i} for i in range(10)]
+    assert [x["score"] for x in _top_pct(items, 0.20)] == [50, 49]
+    assert [x["score"] for x in _top_pct(items, 0.10)] == [50]     # ceil(1.0) = 1
+    assert len(_top_pct(items[:3], 0.10)) == 1                     # 至少 1 只
+    assert _top_pct([], 0.20) == []
+    assert len(_top_pct(items, 1.5)) == 10                         # 上限截到全量
+    assert len(_top_pct(items, -1)) == 1                           # 下限截到 1 只
+
+
+def test_universe_board_filter_applies_before_top_n():
+    """板块过滤必须先剔除再排名，否则池子容量会缩水。"""
+    from app.backtest.pipeline import MAIN_BOARD_PREFIXES, _build_universe_by_date
+
+    raw = {
+        "600000": pd.DataFrame({"date": ["d1"], "amount": [10.0]}),
+        "688001": pd.DataFrame({"date": ["d1"], "amount": [99.0]}),
+        "300001": pd.DataFrame({"date": ["d1"], "amount": [5.0]}),
+        "920001": pd.DataFrame({"date": ["d1"], "amount": [50.0]}),
+    }
+    unfiltered = _build_universe_by_date(raw, ["d1"], 2)
+    assert unfiltered["d1"] == ["688001", "920001"]
+    filtered = _build_universe_by_date(raw, ["d1"], 2, MAIN_BOARD_PREFIXES)
+    assert filtered["d1"] == ["600000", "300001"]
+
+
+def test_random_dist_segments_are_disjoint():
+    """随机段必须两两不重叠：否则「60 段」只是十来个独立样本（记录 #26 的教训）。"""
+    from scripts.random_dist import _segments
+
+    dates = list(pd.bdate_range("2023-01-02", periods=200).strftime("%Y-%m-%d"))
+    segs = _segments(dates, span=10, draws=8, seed=7)
+    assert len(segs) == 8
+    pos = {d: i for i, d in enumerate(dates)}
+    spans = [(pos[s], pos[e]) for s, e in segs]
+    for i, (a, b) in enumerate(spans):
+        for j, (c, d) in enumerate(spans):
+            if i != j:
+                assert b <= c or a >= d, f"第 {i} 段与第 {j} 段重叠：{(a, b)} {(c, d)}"
+    # 同种子必须可复现（冻结协议的前提）
+    assert _segments(dates, span=10, draws=8, seed=7) == segs
+
+
 class TestSelectionModel:
     """选股模型实验开关：策略集筛选与 signals 指纹（见 BACKTEST_LOG 记录 #12）。"""
 

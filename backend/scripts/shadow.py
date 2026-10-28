@@ -36,10 +36,11 @@ from app.backtest.pipeline import PipelineParams, _run_sync  # noqa: E402
 from app.backtest.profiles import PROFILES  # noqa: E402
 from app.config import get_settings  # noqa: E402
 
-#: 默认对照：线上参数 vs 两个候选
+#: 默认对照：线上参数 vs 三个候选
 #: - e30_a15：1.5×ATR 止损（4 段样本外全正，无衰减）
 #: - e32_b  ：大盘分档 + 双线之下清仓（8 窗口绝对收益与超额同时改善，但 t≈1.5 不显著）
-DEFAULT_PROFILES = "default,e30_a15,e32_b"
+#: - rev_inv：翻转 14 因子打分（胜率 8%~37% → 35%~63%，8 窗口超额 10.89 → 12.33）
+DEFAULT_PROFILES = "default,e30_a15,e32_b,rev_inv"
 
 
 def _shadow_path(tag: str) -> str:
