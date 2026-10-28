@@ -12,8 +12,8 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.api import (
-    advisory, analysis, backtest, market, monitor, paper, screening, strategies,
-    watchlist,
+    advisory, analysis, backtest, market, monitor, paper, scope, screening,
+    strategies, watchlist,
 )
 from app.config import BASE_DIR, get_settings
 
@@ -96,6 +96,7 @@ def create_app() -> FastAPI:
     app.include_router(strategies.router, prefix="/api")
     app.include_router(advisory.router, prefix="/api")
     app.include_router(paper.router, prefix="/api")
+    app.include_router(scope.router, prefix="/api")
 
     @app.get("/api/health")
     def health() -> dict:

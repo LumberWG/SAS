@@ -239,6 +239,14 @@ def _prepare(params: PipelineParams) -> dict:
     )
     candidates = sorted({c for codes in universe.values() for c in codes})
     logger.info("流水线回测：%d 个交易日，候选股票 %d 只", len(dates), len(candidates))
+    try:
+        from app.data.scope import get_universe_stats
+        _s = get_universe_stats()
+        logger.info("可交易范围口径（沪深主板+创业板/剔ST/巨无霸）：%d 只（主板%d/创业板%d）；"
+                    "实际候选受 board_prefixes/universe_size 约束",
+                    _s["in_scope"], _s["mainboard"], _s["cyb"])
+    except Exception:  # noqa: BLE001 - 规模日志不影响回测
+        pass
 
     # 只对候选股票计算指标（KDJ 有 Python 循环，全量算太慢）
     klines: dict[str, pd.DataFrame] = {}

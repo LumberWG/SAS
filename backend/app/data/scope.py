@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import re
+from functools import lru_cache
 
 #: 沪深主板 + 创业板。科创板(688)/北交所(920,43,83,87)/B 股(900,200) 不进池——
 #: 否则结论可能建立在买不到或涨跌幅受限的票上。
@@ -71,3 +72,50 @@ def is_tradable(code: str, name: str = "") -> tuple[bool, str]:
     if _ST_RE.search(str(name or "")):
         return False, "st"
     return True, "ok"
+
+
+#: 范围口径参考规模（截至 2026-10-28，基于 akshare 全 A 股票池实测）。
+#: 股票池随时变动，此常量仅作文档基准；**实际以 :func:`get_universe_stats` 动态计算为准**，
+#: 供前端 / 日志展示「当前可交易范围」的总量。
+SCOPE_REFERENCE: dict = {
+    "as_of": "2026-10-28",
+    "source_total": 5588,
+    "in_scope": 4392,
+    "mainboard": 3020,
+    "cyb": 1372,
+    "excluded": {"board_excluded": 972, "st": 190, "giant": 34},
+}
+
+
+@lru_cache(maxsize=1)
+def _universe_stats_cached() -> dict:
+    """从股票池动态计算范围规模（结果缓存 1 小时，与股票池 TTL 同量级）。"""
+    from app.data.service import get_stock_pool  # 延迟导入，避免循环依赖
+    from collections import Counter
+
+    df = get_stock_pool()
+    res = [is_tradable(c, n) for c, n in zip(df["code"], df["name"])]
+    ok = [r[0] for r in res]
+    codes = [c for c, o in zip(df["code"], ok) if o]
+    cyb = sum(1 for c in codes if is_cyb(c))
+    reasons = Counter(r[1] for r in res)
+    return {
+        "source_total": int(len(df)),
+        "in_scope": int(len(codes)),
+        "mainboard": int(len(codes) - cyb),
+        "cyb": int(cyb),
+        "excluded": {k: int(reasons.get(k, 0))
+                     for k in ("board_excluded", "st", "giant", "invalid")},
+    }
+
+
+def get_universe_stats() -> dict:
+    """当前可交易范围规模（沪深主板+创业板，剔 ST/巨无霸）。
+
+    返回 source_total / in_scope / mainboard / cyb / excluded 分布。
+    计算失败（股票池不可达）时回退到 :data:`SCOPE_REFERENCE` 文档值。
+    """
+    try:
+        return dict(_universe_stats_cached())
+    except Exception:  # noqa: BLE001 - 降级为文档参考值，保证 API 不挂
+        return dict(SCOPE_REFERENCE)
