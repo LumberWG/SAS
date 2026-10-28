@@ -165,6 +165,32 @@ def test_universe_board_filter_applies_before_top_n():
     assert filtered["d1"] == ["600000", "300001"]
 
 
+def test_accept_verdict_three_lines():
+    """验收三条线：中位差 ≥0、差值>0 占比 ≥60%、最差段容差 5pp；缺一不通过。"""
+    from scripts.accept import verdict
+
+    assert verdict([0, 0, 0, 0, 0], [1, 1, 1, 1, 1])["ok"] is True
+
+    # 中位为正（4.5）但只有 50% 的段更好 → ② 不过
+    v = verdict([0] * 10, [-1] * 5 + [10] * 5)
+    assert v["checks"]["median_diff_ge_0"]["pass"] is True
+    assert v["checks"]["positive_share_ge_60"]["pass"] is False
+    assert v["ok"] is False
+
+    # 中位与占比都过，但最差段 −20 比基准 worst 0 差 20pp → ③ 不过
+    v = verdict([0] * 5, [-20, 10, 10, 10, 10])
+    assert v["checks"]["median_diff_ge_0"]["pass"] is True
+    assert v["checks"]["positive_share_ge_60"]["pass"] is True
+    assert v["checks"]["worst_not_much_worse"]["pass"] is False
+    assert v["ok"] is False
+
+    # 容差可调：4pp 差在 5pp 容差内通过
+    assert verdict([-10], [-14])["checks"]["worst_not_much_worse"]["pass"] is True
+    assert verdict([-10], [-16])["checks"]["worst_not_much_worse"]["pass"] is False
+
+    assert verdict([], [])["ok"] is False
+
+
 def test_slippage_cost_sign_convention():
     """成交偏离的符号约定：cost_bps > 0 一律表示"比开盘价吃亏"。"""
     from scripts.slippage_audit import bucket_of, cost_bps
