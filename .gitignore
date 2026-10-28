@@ -12,6 +12,8 @@ venv/
 # 注意：不能用无前缀的 data/，否则会误伤源代码目录 backend/app/data/
 /data/
 /backend/data/
+# 运行时缓存（K线/快照 parquet，运行态产物，反复变动会污染 git）
+backend/app/data/cache/
 
 # Node
 node_modules/
