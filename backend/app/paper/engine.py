@@ -57,6 +57,35 @@ def _rec_score(rec) -> float:
         return 0.0
 
 
+def _is_bj(code: str) -> bool:
+    """北交所代码：920xxx / 43xxxx / 83xxxx / 87xxxx（4、8 开头的旧三类同属北交所）。"""
+    return str(code).startswith(("920", "43", "83", "87", "4", "8"))
+
+
+def _name_ok(name: str, code: str) -> bool:
+    """名称是否可信：空、等于代码、含替换字符或疑似乱码一律拒绝下单。
+
+    「名称取不到」往往是股票池不完整的信号（池子里没有这只票），
+    静默用代码当名称继续买，等于绕过了池子约束（见 BACKTEST_LOG 记录 #19）。
+    """
+    text = str(name or "").strip()
+    if not text or text == str(code):
+        return False
+    if "\ufffd" in text:
+        return False
+    try:
+        # 能 round-trip 还原且与原串不同 → UTF-8 被当 GBK 解的乱码
+        if text.encode("gbk").decode("utf-8") != text:
+            return False
+    except (UnicodeEncodeError, UnicodeDecodeError):
+        return True
+    return True
+
+
+#: 当日「成交额 TopN」池缓存：(日期, N, 代码集合)
+_pool_cache: tuple[str, int, set[str]] | None = None
+
+
 @dataclass
 class TradeResult:
     """单笔执行结果。"""
@@ -117,6 +146,83 @@ class PaperEngine:
         except Exception as exc:  # noqa: BLE001
             logger.debug("K线取价失败 %s: %s", code, exc)
         return None
+
+    def _top_amount_codes(self) -> set[str] | None:
+        """当日成交额 TopN 代码集合（与回测的股票池口径对齐）。
+
+        回测的股票池是「每日成交额 TopN」，实盘此前是全市场扫描，
+        于是回测里选不到的小票（尤其北交所）被真实买入 —— 两边的策略
+        根本不是同一个，任何回测结论都无法解释实盘（BACKTEST_LOG 记录 #19）。
+
+        取不到快照时返回 ``None``（本轮不限制），不让数据源抖动直接停掉交易。
+        """
+        top_n = int(getattr(self.settings, "paper_pool_top_n", 0) or 0)
+        if top_n <= 0:
+            return None
+        global _pool_cache
+        today = datetime.now().strftime("%Y-%m-%d")
+        if _pool_cache is not None and _pool_cache[0] == today and _pool_cache[1] == top_n:
+            return _pool_cache[2]
+        try:
+            from app.data.snapshot_store import snapshot_store
+
+            snap = snapshot_store.peek_snapshot()
+            if snap is None or snap.empty or "amount" not in snap.columns:
+                return None
+            ranked = snap.dropna(subset=["amount"]).sort_values("amount", ascending=False)
+            codes = {str(c).zfill(6) for c in ranked["code"].head(top_n)}
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("成交额 TopN 池构建失败（本轮不限制股票池）: %s", exc)
+            return None
+        _pool_cache = (today, top_n, codes)
+        return codes
+
+    def _buy_allowed(self, code: str, name: str) -> tuple[bool, str]:
+        """下单前的准入检查：北交所 / 名称可信度 / 成交额 TopN 池。"""
+        code = str(code or "").zfill(6)
+        if getattr(self.settings, "paper_exclude_bj", False) and _is_bj(code):
+            return False, "北交所股票已排除（PAPER_EXCLUDE_BJ）"
+        if not _name_ok(name, code):
+            return False, "名称缺失或乱码，拒绝下单（股票池可能不完整）"
+        pool = self._top_amount_codes()
+        if pool is not None and code not in pool:
+            top_n = int(getattr(self.settings, "paper_pool_top_n", 0) or 0)
+            return False, f"不在当日成交额Top{top_n}池（与回测口径对齐）"
+        return True, ""
+
+    def _stop_distance(self, code: str) -> float:
+        """止损距离：固定 8%，开启 ATR 止损时取 max(8%, N×ATR%)，上限可配。
+
+        高波动票的日振幅常达 5~10%，固定 8% ≈ 1×ATR，止损必然被正常波动打掉
+        （实盘 2 天 5 笔 −8% 止损全是「刚碰线就砍」）。ATR 版本只放宽不收紧，
+        与回测里 ``e30_a15`` 的机制一致。
+        """
+        base = STOP_LOSS_RATIO
+        mult = float(getattr(self.settings, "paper_atr_stop_mult", 0.0) or 0.0)
+        if mult <= 0:
+            return base
+        try:
+            from app.data.cache import kline_cache
+            from app.indicators.technical import atr as atr_indicator
+
+            # 只用本地缓存：交易路径里不能因为某只票没缓存就去联网拉 K 线
+            # （会把 tick 拖成秒级甚至超时）；没缓存就退回固定止损。
+            df = kline_cache.get(code)
+            if df is None or df.empty or len(df) < 20:
+                return base
+            # 注意：atr() 返回的是**整张表**（新增 atr 列），不是 Series
+            frame = atr_indicator(df)
+            if "atr" not in getattr(frame, "columns", []):
+                return base
+            atr_val = float(frame["atr"].iloc[-1])
+            close = float(frame["close"].iloc[-1])
+            if not (atr_val == atr_val) or close <= 0:
+                return base
+            dist = mult * atr_val / close
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("ATR 止损计算失败 %s: %s", code, exc)
+            return base
+        return max(base, min(dist, float(getattr(self.settings, "paper_atr_stop_max", 0.2))))
 
     # ------------------------------------------------------------------
     # 费用计算
@@ -268,6 +374,12 @@ class PaperEngine:
                     rec.code, getattr(rec, "name", ""), "skip", 0,
                     0.0, 0.0, 0.0, "已持仓"))
                 continue
+            allowed, why = self._buy_allowed(rec.code, getattr(rec, "name", ""))
+            if not allowed:
+                results.append(TradeResult(
+                    rec.code, getattr(rec, "name", "") or rec.code, "skip", 0,
+                    0.0, 0.0, 0.0, why))
+                continue
             if len(positions) >= max_positions:
                 results.append(TradeResult(
                     rec.code, getattr(rec, "name", ""), "skip", 0,
@@ -340,9 +452,13 @@ class PaperEngine:
             cash -= amount + fee
             available_budget = max(0.0, available_budget - amount)
             name = getattr(rec, "name", "") or rec.code
+            # 止损线在建仓时一次定死（固定 8% 或 max(8%, 2×ATR)），
+            # 避免高波动票被固定 8% 的噪声打掉、也便于复盘「当时定的止损是多少」
+            stop_price = round(cost_price * (1 - self._stop_distance(rec.code)), 3)
             db.upsert_paper_position(
                 rec.code, name, shares, cost_price, today,
                 getattr(rec, "reason", "买入信号"), score=_rec_score(rec),
+                stop_price=stop_price,
             )
             db.insert_paper_trade(
                 rec.code, name, "buy", price, shares, amount, fee,
@@ -480,9 +596,14 @@ class PaperEngine:
                 continue
             cost = float(pos["cost_price"])
             change = price / cost - 1
+            # 建仓时定死的止损线（含 ATR 放宽）；老持仓没有该字段时按固定 8% 现算
+            stop_price = float(pos.get("stop_price") or 0) or cost * (1 - STOP_LOSS_RATIO)
             reason = None
-            if change <= -STOP_LOSS_RATIO:
-                reason = f"止损触发（成本{cost:.2f}，现价{price:.2f}，{change:+.1%}）"
+            if price <= stop_price:
+                reason = (
+                    f"止损触发（成本{cost:.2f}，现价{price:.2f}，{change:+.1%}，"
+                    f"止损线{stop_price:.2f}）"
+                )
             elif change >= TAKE_PROFIT_RATIO:
                 reason = f"止盈触发（成本{cost:.2f}，现价{price:.2f}，{change:+.1%}）"
             if reason is None:

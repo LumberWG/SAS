@@ -185,6 +185,7 @@ CREATE TABLE IF NOT EXISTS paper_positions (
     buy_date   TEXT NOT NULL,        -- 最近一次买入日期（T+1 可卖判断）
     strategy   TEXT,                 -- 买入来源（策略/建议原因）
     score      REAL DEFAULT 0,       -- 建仓时的建议评分（轮动替换的比较基准）
+    stop_price REAL,                 -- 止损线（买入时按 ATR/固定比例算好，NULL=按固定 8% 现算）
     created_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS paper_trades (
@@ -282,6 +283,7 @@ class Database:
             self._migrate_recommendation_rank(conn)
             self._migrate_signal_rank(conn)
             self._migrate_position_score(conn)
+            self._migrate_position_stop(conn)
             self._dedupe_signals(conn)
 
     @staticmethod
@@ -318,6 +320,17 @@ class Database:
             conn.execute(
                 "ALTER TABLE paper_positions ADD COLUMN score REAL DEFAULT 0"
             )
+
+    @staticmethod
+    def _migrate_position_stop(conn: sqlite3.Connection) -> None:
+        """老库补 stop_price 列：建仓时按波动率算好的止损线。
+
+        以前止损线是「成本 × (1-8%)」实时现算，高波动票会被噪声打掉；
+        现在建仓时就按 max(8%, N×ATR%) 定下来，落库便于复盘「当时定的止损是多少」。
+        """
+        cols = {row["name"] for row in conn.execute("PRAGMA table_info(paper_positions)")}
+        if "stop_price" not in cols:
+            conn.execute("ALTER TABLE paper_positions ADD COLUMN stop_price REAL")
 
     @staticmethod
     def _migrate_signal_rank(conn: sqlite3.Connection) -> None:
@@ -542,17 +555,20 @@ class Database:
     def upsert_paper_position(
         self, code: str, name: str, shares: int, cost_price: float,
         buy_date: str, strategy: str, score: float = 0.0,
+        stop_price: float | None = None,
     ) -> None:
         """新增/覆盖持仓（同代码重复买入时摊薄成本由调用方算好传入）。"""
         with self._lock, self._connect() as conn:
             conn.execute(
                 "INSERT INTO paper_positions(code, name, shares, cost_price,"
-                " buy_date, strategy, score, created_at) VALUES(?,?,?,?,?,?,?,?)"
+                " buy_date, strategy, score, stop_price, created_at)"
+                " VALUES(?,?,?,?,?,?,?,?,?)"
                 " ON CONFLICT(code) DO UPDATE SET name=excluded.name,"
                 " shares=excluded.shares, cost_price=excluded.cost_price,"
                 " buy_date=excluded.buy_date, strategy=excluded.strategy,"
-                " score=excluded.score",
-                (code, name, shares, cost_price, buy_date, strategy, score, _now()),
+                " score=excluded.score, stop_price=excluded.stop_price",
+                (code, name, shares, cost_price, buy_date, strategy, score,
+                 stop_price, _now()),
             )
 
     def count_paper_trades(

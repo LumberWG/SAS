@@ -13,6 +13,19 @@ from app.paper.engine import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _disable_pool_gate(monkeypatch):
+    """本文件的用例只验证仓位/轮动/候补规则，与「成交额 TopN 池」无关。
+
+    池子约束（北交所排除 / 名称守卫 / TopN）由 ``tests/test_exec_rules.py``
+    单独覆盖；否则这里读到真实快照时，测试用的假代码会被判成
+    「不在当日成交额 Top300 池」而全部跳过。
+    """
+    from app.config import get_settings
+
+    monkeypatch.setattr(get_settings(), "paper_pool_top_n", 0, raising=False)
+
+
 class TestKlineWarmup:
     def test_warmup_uses_cache(self, monkeypatch, tmp_path):
         """K线预热应调用增量缓存（get_kline_cached），并统计成功/失败。"""
@@ -253,7 +266,7 @@ class TestExecute:
         eng.ensure_account()
         codes = [f"6000{i:02d}" for i in range(6)]
         results = asyncio.run(eng.execute_recommendations(
-            [FakeRec(c, c, "buy", 45.0, "突破") for c in codes]))
+            [FakeRec(c, f"股票{c}", "buy", 45.0, "突破") for c in codes]))
 
         invested = sum(r.amount for r in results if r.side == "buy")
         assert 75000 <= invested <= 80000 + 1e-6
@@ -271,7 +284,7 @@ class TestExecute:
         eng.ensure_account()
         codes = [f"6000{i:02d}" for i in range(5)]
         results = asyncio.run(eng.execute_recommendations(
-            [FakeRec(c, c, "buy", 45.0, "突破") for c in codes]))
+            [FakeRec(c, f"股票{c}", "buy", 45.0, "突破") for c in codes]))
 
         bought = [r for r in results if r.side == "buy"]
         assert len(bought) == 3

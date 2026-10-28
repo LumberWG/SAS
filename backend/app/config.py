@@ -129,6 +129,22 @@ class Settings(BaseSettings):
     paper_backlog_enabled: bool = True
     paper_backlog_max: int = 30
 
+    # ---------- 执行口径对齐回测（见 BACKTEST_LOG 记录 #19） ----------
+    # 为什么需要：回测用「每日成交额 TopN」池，实盘此前是全市场扫描，
+    # 于是回测里选不到的票（尤其北交所小票）被真实买入，回测结论无法解释实盘。
+    # 只允许买入当日成交额 TopN 内的股票；0=不限制（回到旧的全市场行为）
+    paper_pool_top_n: int = 300
+    # 排除北交所（920/43/83/87/4/8 开头）：日波动 5~10%，固定 8% 止损≈1×ATR，
+    # 会被正常噪声打掉；且 Top300 成交额池里几乎不会出现
+    paper_exclude_bj: bool = True
+    # 止损距离 = max(固定 8%, N×ATR%)，上限 paper_atr_stop_max。
+    # 0=关闭（沿用固定 8%）；高波动票自动放宽，与回测里 e30_a15 的机制一致
+    paper_atr_stop_mult: float = 2.0
+    paper_atr_stop_max: float = 0.20
+    # 买单只允许在开盘后 N 分钟内成交（0=不限）。回测按「次日开盘价」成交，
+    # 实盘此前在盘中分析时刻（如 13:01）按实时价一把买入 → 系统性买高
+    paper_buy_open_window_minutes: int = 5
+
     # ---------- 通知管道（可选） ----------
     # Webhook 机器人地址（企业微信/飞书/钉钉均兼容，POST JSON）
     notify_webhook_url: str = ""

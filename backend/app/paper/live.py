@@ -27,7 +27,7 @@ from types import SimpleNamespace
 
 from app.config import get_settings
 from app.data.cache import db
-from app.market.clock import is_trading_hours, next_open
+from app.market.clock import AM_OPEN, is_trading_day, is_trading_hours, next_open
 from app.paper.engine import PaperEngine
 
 logger = logging.getLogger("sas.paper.live")
@@ -133,7 +133,6 @@ class LiveTrader:
         if not self.settings.paper_live_enabled or not self.auto_trade_enabled():
             return 0
         now = datetime.now()
-        expire = self._expiry(now)
         added = 0
         for rec in recommendations:
             action = getattr(rec, "action", "")
@@ -153,7 +152,7 @@ class LiveTrader:
                 action=action,
                 reason=str(getattr(rec, "reason", "") or source),
                 created_at=now,
-                expire_at=expire,
+                expire_at=self._expiry(now, action),
                 price_at_signal=getattr(rec, "price", None),
                 score=_signal_score(rec),
             )
@@ -164,9 +163,47 @@ class LiveTrader:
             )
         return added
 
-    def _expiry(self, now: datetime) -> datetime:
-        """信号有效期：盘中 N 分钟；非交易时段顺延到下一个开盘后计时。"""
+    def _window_minutes(self) -> int:
+        return max(0, int(getattr(self.settings, "paper_buy_open_window_minutes", 0) or 0))
+
+    def _buy_window(self, day: datetime) -> datetime:
+        """当日开盘撮合窗口的起点（09:30）。"""
+        return day.replace(hour=AM_OPEN // 60, minute=AM_OPEN % 60, second=0, microsecond=0)
+
+    def _in_buy_window(self, now: datetime) -> bool:
+        """是否处于开盘撮合窗口（09:30 起 N 分钟内）。N<=0 视为不限制。"""
+        window = self._window_minutes()
+        if window <= 0:
+            return True
+        start = self._buy_window(now)
+        return start <= now < start + timedelta(minutes=window)
+
+    def _next_buy_window_start(self, now: datetime) -> datetime:
+        """下一个开盘撮合窗口的起点：买单只可能在这里成交。
+
+        回测按「次日开盘价」成交，所以信号产生的时点无关紧要；
+        实盘把成交收敛到开盘那一刻，两边口径才可比（见 BACKTEST_LOG 记录 #19）。
+        """
+        start = self._buy_window(now)
+        if now < start and is_trading_day(now):
+            return start
+        day = now
+        for _ in range(10):
+            day = day + timedelta(days=1)
+            if is_trading_day(day):
+                return self._buy_window(day)
+        return now + timedelta(days=1)
+
+    def _expiry(self, now: datetime, action: str = "") -> datetime:
+        """信号有效期：盘中 N 分钟；非交易时段顺延到下一个开盘后计时。
+
+        买单在「开盘窗口」模式下只可能在下一个窗口成交，有效期必须相应顺延，
+        否则 13:01 产生的买单会在 13:31 过期，永远等不到次日开盘。
+        """
         ttl = timedelta(minutes=self.settings.paper_signal_ttl_minutes)
+        window = self._window_minutes()
+        if action == "buy" and window > 0 and not self._in_buy_window(now):
+            return self._next_buy_window_start(now) + timedelta(minutes=window) + ttl
         return now + ttl if is_trading_hours(now) else next_open(now) + ttl
 
     def clear(self) -> None:
@@ -211,7 +248,13 @@ class LiveTrader:
         return deferred
 
     def _backlog_expiry(self, now: datetime) -> datetime:
-        """候补有效到当日收盘；非交易时段则顺延到下一个交易日收盘。"""
+        """候补有效到当日收盘；非交易时段则顺延到下一个交易日收盘。
+
+        开盘窗口模式下候补也只可能在下一个开盘窗口成交，故同样顺延。
+        """
+        window = self._window_minutes()
+        if window > 0 and not self._in_buy_window(now):
+            return self._next_buy_window_start(now) + timedelta(minutes=window)
         if is_trading_hours(now):
             return now.replace(hour=15, minute=0, second=0, microsecond=0)
         return next_open(now) + timedelta(hours=5, minutes=30)
@@ -256,10 +299,19 @@ class LiveTrader:
         stop_trades = await self.engine.check_stop_loss_target(prices)
 
         # 2) 队列信号：第 3 次排序——卖出优先，其余按评分从高到低
+        # 买入只在开盘窗口成交：窗口外只跑卖出，买单继续挂着等下一个开盘（不出队）。
+        # 回测按「次日开盘价」成交，实盘此前在盘中分析时刻（如 13:01）按实时价
+        # 一把买入，系统性买高 —— 2 天 17 笔成交 vs 回测同区间 3 笔（记录 #19）。
+        in_window = self._in_buy_window(now)
         ordered = sorted(
             self._pending.values(),
             key=lambda s: (s.action != "sell", -s.score),
         )
+        if not in_window:
+            ordered = [s for s in ordered if s.action != "buy"]
+        kept_buys = {
+            c for c, s in self._pending.items() if s.action == "buy"
+        } if not in_window else set()
         recs = [
             SimpleNamespace(
                 code=s.code, name=s.name, action=s.action, reason=s.reason,
@@ -267,8 +319,8 @@ class LiveTrader:
             )
             for s in ordered
         ]
-        # 候补队列：仅在有剩余名额时补位（按评分从高到低）
-        if self.settings.paper_backlog_enabled and self._backlog:
+        # 候补队列：仅在有剩余名额时补位（按评分从高到低），同样受开盘窗口约束
+        if self.settings.paper_backlog_enabled and self._backlog and in_window:
             held = {p["code"] for p in db.list_paper_positions()}
             slots = self.settings.paper_max_positions - len(held)
             if slots > 0:
@@ -292,6 +344,8 @@ class LiveTrader:
         deferred = self._defer_skips(results, now)
 
         for code in list(self._pending):
+            if code in kept_buys:  # 窗口外的买单留到下个开盘，不算本轮未成交
+                continue
             if code not in retry and code not in deferred:
                 self._pending.pop(code, None)
 

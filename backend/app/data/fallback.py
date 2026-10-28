@@ -134,6 +134,21 @@ def _get_text(url: str, params: dict | None = None, timeout: float = 15.0) -> st
     return r.text
 
 
+def _decode_json_bytes(raw: bytes) -> str:
+    """JSON 响应体解码：UTF-8 严格优先，失败退回 GBK。
+
+    国内行情站的「声明 UTF-8、实际 GBK」（或反过来）很常见，
+    而固定编码解错**不会抛异常**，只会把中文名变成生僻字（如「华鑫股份」→
+    「鍗庨懌鑲′唤」），一路写进缓存和数据库。所以必须严格试 UTF-8 再退。
+    """
+    for enc in ("utf-8", "gbk"):
+        try:
+            return raw.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("utf-8", "replace")
+
+
 # ----------------------------------------------------------------------
 # K线（腾讯 / 新浪）
 # ----------------------------------------------------------------------
@@ -582,8 +597,12 @@ def sse_stock_list() -> pd.DataFrame:
     """上交所官方 A 股代码/名称（主板 + 科创板）。
 
     交易所官方数据，与行情站列表互相校验：用于补齐/核对沪市覆盖。
-    返回体为 GBK 编码 JSON（Content-Type 声明 UTF-8，需按 GBK 解码）。
     返回列: code / name（market 由上层补齐）。
+
+    编码：接口声明 UTF-8，但历史上实际返回过 GBK，现在实测是 UTF-8。
+    固定按某一编码解码都会出错 —— 按 GBK 解 UTF-8 字节会把「华鑫股份」变成
+    「鍗庨懌鑲′唤」（乱码名称就这样流进了自选/信号/推荐/模拟盘）。
+    因此先按 UTF-8 严格解码，失败再退回 GBK。
     """
     records: list[dict] = []
     errors: list[Exception] = []
@@ -602,7 +621,7 @@ def sse_stock_list() -> pd.DataFrame:
                 timeout=20.0,
             )
             r.raise_for_status()
-            payload = json.loads(r.content.decode("gbk", "replace"))
+            payload = json.loads(_decode_json_bytes(r.content))
         except Exception as exc:  # noqa: BLE001 - 单个板块失败不影响另一个
             errors.append(exc)
             continue
