@@ -46,6 +46,25 @@ def _codes() -> list[str]:
     return sorted(p.stem for p in kline_cache.dir.glob("*.parquet") if p.stem != INDEX_CODE)
 
 
+def _delisted_codes() -> set[str]:
+    """已知退市股代码：读 ``backfill_delisted.py`` 产出的清单。
+
+    「最后 bar 停在很久以前」有两种完全不同的成因：
+      1. **有意的**——已退市股票，本来就不该有今天的 bar（`backfill_delisted.py` 补齐的）；
+      2. **缺口**——在市股票停更（长期停牌/代码变更/数据源丢了）。
+    只有第 2 种才算缺口，混在一起会把已补齐的工作记成问题。
+    """
+    path = get_settings().kline_dir.parent / "logs" / "delisted_list.json"
+    if not path.exists():
+        return set()
+    try:
+        rows = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:  # noqa: BLE001 - 清单坏了不影响审计主结论
+        print(f"（退市清单读取失败，跳过分类：{exc}）", flush=True)
+        return set()
+    return {str(r["code"]).zfill(6) for r in rows if r.get("code")}
+
+
 def _calendar() -> list[str]:
     idx = kline_cache.get(INDEX_CODE)
     if idx is None or idx.empty:
@@ -144,6 +163,9 @@ def audit(max_workers: int = 8) -> dict:
 
     total = len(rows)
     stale = sorted((r for r in rows if r["last"] < stale_cut), key=lambda r: r["last"])
+    known_delisted = _delisted_codes()
+    stale_delisted = [r for r in stale if r["code"] in known_delisted]
+    stale_unknown = [r for r in stale if r["code"] not in known_delisted]
     late_listed = [r for r in rows if r["first"] > "2023-01-01"]
 
     # 每个交易日的截面股票数（只统计有 bar 的股）
@@ -191,6 +213,12 @@ def audit(max_workers: int = 8) -> dict:
         "stale": {
             "count": len(stale),
             "cut": stale_cut,
+            "delisted": len(stale_delisted),
+            "unexplained": len(stale_unknown),
+            "unexplained_stocks": [
+                {"code": r["code"], "last": r["last"], "bars": r["bars"]}
+                for r in stale_unknown[:10]
+            ],
             "samples": [{"code": r["code"], "last": r["last"], "bars": r["bars"]} for r in stale[:10]],
         },
         "late_listed": {"count": len(late_listed), "share": round(len(late_listed) / total * 100, 1)},
@@ -224,9 +252,11 @@ def _print_report(d: dict) -> None:
         print(f"**未发现任何「已停更」股票**（判定线 {st['cut']}）。"
               "说明本地缓存只含**当前在市**的股票，退市股完全缺失 → 存在幸存者偏差。")
     else:
-        print(f"已停更 {st['count']} 只（最后 bar 早于 {st['cut']}），前 10 只：")
-        for s in st["samples"]:
-            print(f"  - {s['code']} 最后 {s['last']}，{s['bars']} 根")
+        print(f"已停更 {st['count']} 只（最后 bar 早于 {st['cut']}）："
+              f"其中**已知退市股 {st.get('delisted', 0)} 只**（有意补齐，属正常）、"
+              f"原因不明 {st.get('unexplained', 0)} 只（才算缺口）。")
+        for s in (st.get("unexplained_stocks") or [])[:10]:
+            print(f"  - [缺口] {s['code']} 最后 {s['last']}，{s['bars']} 根")
     imp = d.get("pool_impact") or {}
     if imp.get("checked"):
         print(f"\n**对回测池的影响**：{imp['checked']} 只停更股，在各自最后 {imp['lookback']} 根 bar 里"
