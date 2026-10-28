@@ -47,7 +47,7 @@ MIN_POSITIVE_SHARE = 60.0
 WORST_TOLERANCE_PP = 5.0
 
 
-def build(topn: int, lookback: int, rebalance: int, weights: tuple[float, ...]):
+def build(topn: int, lookback: int, rebalance: int, weights: tuple[float, ...], universe: int = 0):
     settings = get_settings()
     kline_dir = str(settings.kline_dir)
     cal = _calendar(kline_dir)
@@ -76,6 +76,13 @@ def build(topn: int, lookback: int, rebalance: int, weights: tuple[float, ...]):
         tavg = np.nanmean(turn[:, t - lookback + 1:t + 1], axis=1)
         aavg = np.nanmean(amount[:, t - lookback + 1:t + 1], axis=1)
         valid = np.isfinite(retL) & np.isfinite(tavg) & np.isfinite(aavg)
+        if universe and universe > 0:
+            # 对齐 pipeline 的 universe_size：每日成交额 TopN 大票优先池
+            order = np.argsort(-np.where(np.isfinite(amount[:, t]), amount[:, t], -np.inf))
+            top = min(universe, m)
+            top_mask = np.zeros(m, bool)
+            top_mask[order[:top]] = True
+            valid = valid & top_mask
         if valid.sum() < topn:
             continue
         zr = (retL - np.nanmean(retL[valid])) / np.nanstd(retL[valid])
@@ -125,8 +132,8 @@ def _nav(ret_close, ret_buy, ret_sell, buy_day, sell_day, H_mat, s: float):
     return nav_s, nav_b
 
 
-def run(topn, lookback, rebalance, weights, seed, draws, span, tag):
-    data = build(topn, lookback, rebalance, weights)
+def run(topn, lookback, rebalance, weights, seed, draws, span, tag, universe=0):
+    data = build(topn, lookback, rebalance, weights, universe)
     if data is None:
         raise SystemExit("样本不足，无法生成换仓日")
     cal_a = data["cal_a"]
@@ -155,8 +162,9 @@ def run(topn, lookback, rebalance, weights, seed, draws, span, tag):
         }
 
     # 打印
+    uni_txt = f" universe=Top{universe}" if universe else " universe=全市场"
     print(f"\n### 反转+缩量+小盘 横截面（topn={topn} lookback={lookback} rebal={rebalance} "
-          f"w={weights} seed={seed} {draws}段×{span}日）")
+          f"w={weights} seed={seed} {draws}段×{span}日{uni_txt}）")
     print("| 档位 | 方案中位 | 基准中位 | 配对中位差 | 差值>0占比 | 最差(方案/基准) | ① | ② | ③ | 结论 |")
     print("| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |")
     for s in SLIPPAGE:
@@ -185,7 +193,8 @@ def run(topn, lookback, rebalance, weights, seed, draws, span, tag):
         json.dump({
             "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             "params": {"topn": topn, "lookback": lookback, "rebalance": rebalance,
-                       "weights": list(weights), "seed": seed, "draws": draws, "span": span},
+                       "weights": list(weights), "universe": universe,
+                       "seed": seed, "draws": draws, "span": span},
             "passed": all_ok, "variants": out,
         }, fh, ensure_ascii=False, indent=1, default=float)
     print(f"\n结果已保存：{os.path.abspath(outp)}")
@@ -200,6 +209,8 @@ def main():
     p.add_argument("--w-rev", type=float, default=1.0)
     p.add_argument("--w-turn", type=float, default=1.0)
     p.add_argument("--w-size", type=float, default=1.0)
+    p.add_argument("--universe", type=int, default=0,
+                   help="每日成交额 TopN 候选池；0=全市场（对齐 pipeline 的 universe_size，默认500）")
     p.add_argument("--seed", default="20261029", help="逗号分隔多个种子；协议要求全部通过")
     p.add_argument("--draws", type=int, default=30)
     p.add_argument("--span", type=int, default=21)
@@ -209,7 +220,7 @@ def main():
     oks = []
     for sd in seeds:
         oks.append(run(a.topn, a.lookback, a.rebalance, (a.w_rev, a.w_turn, a.w_size),
-                        sd, a.draws, a.span, a.tag))
+                        sd, a.draws, a.span, a.tag, a.universe))
     if len(seeds) > 1:
         print(f"\n### 多种子总判定：{'通过（可进入部署讨论）' if all(oks) else '不采纳'} "
               f"（{sum(oks)}/{len(oks)} 种子通过）")
