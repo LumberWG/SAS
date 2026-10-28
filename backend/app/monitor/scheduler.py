@@ -15,6 +15,9 @@
                        生成次日「明日关注」TopN
   8. paper_settle      每交易日 15:40 模拟盘收盘结算（净值快照 + 兜底止盈止损）
   9. paper_tick        实时撮合（默认 5s）：信号队列成交 + 盘中止盈止损
+ 10. shadow_eval       每交易日 16:45 影子账户：冻结参数重跑「起点 ~ 今天」，
+                       只记录快照（data/logs/shadow_<tag>.json），不交易；
+                       需配置 shadow_start 才启用
 
 模拟交易联动（全链条）: 选股命中/开盘分析/盘中分析产生的买卖建议都进入
 实时队列（LiveTrader），由 paper_tick 在 ≤5 秒内按实时价成交；
@@ -26,6 +29,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import sys
 from collections import deque
 from datetime import datetime
 
@@ -133,14 +138,24 @@ class MarketScheduler:
             id="kline_warmup", replace_existing=True,
         )
 
+        # 10) 影子账户（交易日 16:45，冻结参数逐日重跑；未配置起点则不注册）
+        if self.settings.shadow_start:
+            self.scheduler.add_job(
+                self.shadow_eval,
+                CronTrigger(day_of_week="mon-fri", hour=16, minute=45, timezone=tz),
+                id="shadow_eval", replace_existing=True,
+                max_instances=1, coalesce=True,
+            )
+
         self.scheduler.start()
         # 开机后台预热K线（低并发，不阻塞服务就绪；其余由16:00调度补全）
         asyncio.create_task(self.warmup_klines())
         logger.info(
             "调度器已启动（快照60s / 异动5min / 开盘9:20 / 盘中%dm / "
-            "实时撮合%ds / 收盘选股15:30 / 盘后15:35 / 结算15:40 / K线预热16:00）",
+            "实时撮合%ds / 收盘选股15:30 / 盘后15:35 / 结算15:40 / K线预热16:00%s）",
             self.settings.intraday_analysis_interval,
             self.settings.paper_tick_interval,
+            " / 影子账户16:45" if self.settings.shadow_start else "",
         )
 
     def shutdown(self) -> None:
@@ -482,6 +497,71 @@ class MarketScheduler:
         except Exception as exc:  # noqa: BLE001
             logger.exception("K线预热失败")
             return {"error": str(exc)}
+
+    # ------------------------------------------------------------------
+    # 影子账户（16:45）：冻结参数逐日重跑，只记录不下单
+    # ------------------------------------------------------------------
+    async def shadow_eval(self) -> dict:
+        """跑一次影子快照：``shadow_start ~ 今天``，四方案并行记录。
+
+        与模拟盘完全隔离：不读写 ``paper_*`` 表、不改配置、不影响其它任务。
+        放在 16:45 是因为 16:00 的 K 线预热要先补齐当日 bar，否则最后一根还是昨天，
+        快照会原地覆盖而不向前推进。同日重跑幂等（按 as_of 覆盖）。
+        """
+        if not is_trading_day():
+            return {"skipped": "非交易日"}
+        start = self.settings.shadow_start
+        if not start:
+            return {"skipped": "未配置 shadow_start"}
+        # 起点还没到（提前配置的情况）就别跑：start > today 会得到空区间并报错
+        if datetime.now().strftime("%Y-%m-%d") < start:
+            return {"skipped": f"未到影子起点 {start}"}
+
+        def _run() -> dict:
+            # scripts/ 不在 app 包内：把 backend 目录加进 sys.path 再导入
+            backend_dir = os.path.dirname(
+                os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+            )
+            if backend_dir not in sys.path:
+                sys.path.insert(0, backend_dir)
+            from scripts.shadow import DEFAULT_PROFILES, run_shadow
+
+            return run_shadow(
+                start=start,
+                universe=self.settings.shadow_universe,
+                profiles=self.settings.shadow_profiles or DEFAULT_PROFILES,
+                tag=self.settings.shadow_tag,
+                log=lambda msg: logger.info("%s", msg),
+            )
+
+        try:
+            data = await asyncio.to_thread(_run)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("影子账户运行失败")
+            await notifier.notify("影子账户失败", str(exc))
+            return {"error": str(exc)}
+
+        snaps = {
+            name: (series["snapshots"][-1] if series.get("snapshots") else None)
+            for name, series in (data.get("profiles") or {}).items()
+        }
+        base = snaps.get("default")
+        diffs = [
+            f"{name} {s['excess'] - base['excess']:+.2f}"
+            for name, s in snaps.items()
+            if base and s and name != "default"
+        ]
+        await notifier.notify(
+            f"影子账户 {data.get('tag')} 已更新",
+            (f"{start} 起 | default 超额 {base['excess']:+.2f}% "
+             f"回撤 {base['max_drawdown']:.2f}%" if base else f"{start} 起（无 default 快照）")
+            + ("\n相对 default 超额差: " + ", ".join(diffs) if diffs else ""),
+        )
+        return {
+            "tag": data.get("tag"),
+            "as_of": base["as_of"] if base else None,
+            "profiles": [n for n, s in snaps.items() if s],
+        }
 
     # ------------------------------------------------------------------
     # 盘中监控（每 N 分钟）：自选股实时买卖建议

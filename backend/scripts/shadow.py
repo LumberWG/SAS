@@ -28,6 +28,7 @@ import json
 import os
 import sys
 import time
+from collections.abc import Callable
 from datetime import date
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -93,44 +94,63 @@ def _snapshot(name: str, result: dict, end: str) -> dict:
     }
 
 
+class ShadowConfigError(ValueError):
+    """影子账户配置冲突（起点被改动 / 方案名不存在）。
+
+    继承 ValueError 而不是 SystemExit：调度器要能 `except Exception` 捕获并告警，
+    SystemExit 会穿透 asyncio.to_thread 直接结束线程；CLI 入口再转成退出码。
+    """
+
+
 def _check_start(data: dict, start: str, path: str) -> None:
     """起始日一旦定下就冻结：中途改起点会让曲线断裂、超额不可比。"""
     old = data.get("start")
     if old and old != start:
-        raise SystemExit(
+        raise ShadowConfigError(
             f"该 tag 的影子账户起点已是 {old}，与本次 --start {start} 不一致；"
             f"换一个 --tag 或删掉 {path} 重开"
         )
 
 
-def run(args: argparse.Namespace) -> None:
-    path = _shadow_path(args.tag)
-    data = _load(path)
-    end = args.end or date.today().isoformat()
-    _check_start(data, args.start, path)
+def run_shadow(
+    start: str,
+    end: str = "",
+    universe: int = 300,
+    profiles: str = DEFAULT_PROFILES,
+    tag: str = "live",
+    log: Callable[[str], None] = print,
+) -> dict:
+    """跑一次影子快照并落盘，返回写入后的完整数据（调度器与 CLI 共用）。
 
-    names = [n.strip() for n in args.profiles.split(",") if n.strip()]
+    ``log`` 可换成调度器的 logger；同日重跑覆盖、不同日追加，因此幂等。
+    """
+    path = _shadow_path(tag)
+    data = _load(path)
+    end = end or date.today().isoformat()
+    _check_start(data, start, path)
+
+    names = [n.strip() for n in profiles.split(",") if n.strip()]
     unknown = [n for n in names if n not in PROFILES]
     if unknown:
-        raise SystemExit(f"未知方案: {unknown}，可选: {list(PROFILES)}")
+        raise ShadowConfigError(f"未知方案: {unknown}，可选: {list(PROFILES)}")
 
     data.update({
-        "tag": args.tag,
-        "start": args.start,
-        "universe": args.universe,
+        "tag": tag,
+        "start": start,
+        "universe": universe,
         "profiles_used": names,
     })
 
-    print(f"影子账户 {args.tag}：{args.start} ~ {end}，Top{args.universe}，方案 {names}", flush=True)
+    log(f"影子账户 {tag}：{start} ~ {end}，Top{universe}，方案 {names}")
     for name in names:
         t0 = time.time()
         params = PipelineParams(
-            start_date=args.start, end_date=end, universe_size=args.universe, **PROFILES[name]
+            start_date=start, end_date=end, universe_size=universe, **PROFILES[name]
         )
         try:
             result = _run_sync(params)
         except Exception as exc:  # noqa: BLE001 - 单方案失败不影响其它方案
-            print(f"  [{name}] 失败：{type(exc).__name__} {exc}", flush=True)
+            log(f"  [{name}] 失败：{type(exc).__name__} {exc}")
             continue
         snap = _snapshot(name, result, end)
         # 同一天重跑覆盖，不同天追加 → 一条随时间推进的曲线
@@ -140,15 +160,22 @@ def run(args: argparse.Namespace) -> None:
             s for s in series["snapshots"] if s["as_of"] != snap["as_of"]
         ] + [snap]
         series["snapshots"].sort(key=lambda s: s["as_of"])
-        print(
+        log(
             f"  [{name}] {snap['as_of']} 收益 {snap['total_return']:+.2f}% | "
             f"基准 {snap['benchmark_return']:+.2f}% | 超额 {snap['excess']:+.2f}% | "
             f"回撤 {snap['max_drawdown']:.2f}% | {snap['trade_count']} 笔 | "
-            f"持仓 {snap['open_positions']} 只 | {time.time() - t0:.0f}s",
-            flush=True,
+            f"持仓 {snap['open_positions']} 只 | {time.time() - t0:.0f}s"
         )
     _save(path, data)
-    print(f"\n已写入 {os.path.abspath(path)}", flush=True)
+    log(f"\n已写入 {os.path.abspath(path)}")
+    return data
+
+
+def run(args: argparse.Namespace) -> None:
+    data = run_shadow(
+        start=args.start, end=args.end, universe=args.universe,
+        profiles=args.profiles, tag=args.tag,
+    )
     report(data)
 
 
@@ -201,7 +228,10 @@ def main() -> None:
     if args.report:
         report(_load(_shadow_path(args.tag)))
         return
-    run(args)
+    try:
+        run(args)
+    except ShadowConfigError as exc:      # CLI 仍以非零退出码结束
+        raise SystemExit(str(exc)) from exc
 
 
 if __name__ == "__main__":

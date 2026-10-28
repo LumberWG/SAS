@@ -39,8 +39,40 @@ def test_snapshot_fields():
 def test_start_is_frozen():
     _check_start({"start": "2026-11-02"}, "2026-11-02", "p")  # 同起点：放行
     _check_start({}, "2026-11-02", "p")                        # 新开：放行
-    with pytest.raises(SystemExit):
+    # 用 ValueError 而不是 SystemExit：调度器要能 except Exception 接住（见 scheduler.shadow_eval）
+    with pytest.raises(ValueError):
         _check_start({"start": "2026-11-02"}, "2026-11-05", "p")
+
+
+def test_run_shadow_merges_snapshots_idempotently(tmp_path, monkeypatch):
+    """调度器每天调用的入口：同一天重跑覆盖、不重复追加；起点被改则拒绝。"""
+    import scripts.shadow as shadow
+
+    monkeypatch.setattr(shadow, "_shadow_path", lambda tag: str(tmp_path / f"shadow_{tag}.json"))
+    monkeypatch.setattr(shadow, "_run_sync", lambda params: _result(6.0, 2.0))
+    quiet = lambda msg: None  # noqa: E731
+
+    data = shadow.run_shadow(start="2026-11-02", end="2026-11-06", tag="t", log=quiet)
+    assert data["start"] == "2026-11-02"
+    assert data["universe"] == 300
+    assert data["profiles"]["default"]["snapshots"][0]["excess"] == pytest.approx(4.0)
+
+    # 同日重跑：覆盖而非追加（调度器可能因重启重复触发）
+    shadow.run_shadow(start="2026-11-02", end="2026-11-06", tag="t", log=quiet)
+    saved = shadow._load(shadow._shadow_path("t"))
+    assert len(saved["profiles"]["default"]["snapshots"]) == 1
+
+    # 起点冻结：换起点必须报错，否则曲线断裂
+    with pytest.raises(ValueError):
+        shadow.run_shadow(start="2026-11-05", end="2026-11-06", tag="t", log=quiet)
+
+
+def test_run_shadow_rejects_unknown_profile(tmp_path, monkeypatch):
+    import scripts.shadow as shadow
+
+    monkeypatch.setattr(shadow, "_shadow_path", lambda tag: str(tmp_path / f"shadow_{tag}.json"))
+    with pytest.raises(ValueError):
+        shadow.run_shadow(start="2026-11-02", tag="t", profiles="no_such", log=lambda m: None)
 
 
 def test_report_compares_against_default(capsys):

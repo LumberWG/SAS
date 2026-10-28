@@ -75,6 +75,16 @@ class Settings(BaseSettings):
     # 等待一轮扫描完成的最长秒数（全市场扫描必须给足，否则盘后分析会拿不到结果）
     scan_wait_timeout: int = 1800
 
+    # ---------- 影子账户（冻结参数的前向验证，见 BACKTEST_LOG #17/#34） ----------
+    # 起点为空 = 不启用；设定后每交易日 16:45 自动重跑「起点 ~ 今天」并落快照，
+    # 结果在 data/logs/shadow_<tag>.json。只记录、不交易、不碰 paper_* 表。
+    # 起点一旦写入即冻结：改它会让曲线断裂、超额不可比（换一个 tag 重开）。
+    shadow_start: str = ""
+    shadow_tag: str = "live"
+    shadow_universe: int = 300
+    # 逗号分隔的方案名；空 = 用 scripts/shadow.DEFAULT_PROFILES
+    shadow_profiles: str = ""
+
     # ---------- 智能建议 / 自动盯盘 ----------
     # 收盘自动选股后，将评分 Top N 的命中自动加入自选股
     auto_watch_enabled: bool = True

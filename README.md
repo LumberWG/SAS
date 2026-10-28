@@ -326,6 +326,16 @@ nssm remove SAS confirm                # 卸载服务
 - 配置项：`kline_warmup_concurrency`（预热并发）、`kline_warmup_top_n`（开机预热只数，0=全市场）
 - 预热进度可见：选股中心操作栏显示「本地K线 已缓存/总数 (百分比)」，点「预热K线」后实时轮询刷新；后端接口 `GET /api/screening/kline-status`
 
+### 8b. 影子账户（冻结参数的前向验证）
+
+参数在历史数据上怎么调都容易过拟合（见 `BACKTEST_LOG` 记录 #15/#34），唯一能判定"候选参数是真信号还是噪声"的办法是**向前看**：固定一个起点，每天用当天收盘后的数据重跑一遍，逐日累积超额。
+
+- 启用：`backend/.env` 里设 `SHADOW_START=2026-11-02`（留空 = 不启用），可选 `SHADOW_TAG`（默认 `live`）、`SHADOW_UNIVERSE`、`SHADOW_PROFILES`（默认四方案 `default,e30_a15,e32_b,rev_inv`）
+- 调度：每交易日 **16:45** 自动跑「起点 ~ 今天」（排在 16:00 K线预热之后，确保当日 bar 已补齐），日内重跑幂等
+- 结果：`data/logs/shadow_<tag>.json`（按 `as_of` 追加快照），盘中不下单、不读写 `paper_*` 表、不改配置
+- 查看：`.venv\Scripts\python.exe scripts\shadow.py --start 2026-11-02 --tag live --report`
+- 注意：**起点写入后即冻结**，中途改起点会让曲线断裂、超额不可比（要换起点请换一个 `--tag`）
+
 ### 7. 模拟交易（验证选股思路）
 
 用模拟盘把「分析建议」变成可复盘的账本，验证选股思路的准确性。

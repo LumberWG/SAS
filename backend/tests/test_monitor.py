@@ -153,3 +153,43 @@ class TestNotifiers:
                 return False
             monkeypatch.setattr(channel, "send", failing_send)
         await manager.notify("标题", "内容")  # 不抛异常即通过
+
+
+class TestShadowJob:
+    """影子账户任务：只有配置了 `shadow_start` 才注册（避免空跑/无起点报错）。"""
+
+    @staticmethod
+    def _job_ids(monkeypatch, shadow_start: str) -> set[str]:
+        import app.monitor.scheduler as sched_mod
+
+        settings = SimpleNamespace(
+            scheduler_enabled=True,
+            scheduler_timezone="Asia/Shanghai",
+            intraday_analysis_interval=1,
+            paper_tick_interval=5,
+            shadow_start=shadow_start,
+            shadow_tag="live",
+            shadow_universe=300,
+            shadow_profiles="",
+        )
+        monkeypatch.setattr(sched_mod, "get_settings", lambda: settings)
+
+        async def fake_warmup():
+            return {}
+
+        async def runner() -> set[str]:
+            sched = MarketScheduler()
+            sched.warmup_klines = fake_warmup   # 别在测试里真去拉 5500 只 K 线
+            sched.start()
+            try:
+                return {job.id for job in sched.scheduler.get_jobs()}
+            finally:
+                sched.shutdown()
+
+        return asyncio.run(runner())
+
+    def test_registered_when_start_configured(self, monkeypatch):
+        assert "shadow_eval" in self._job_ids(monkeypatch, "2026-11-02")
+
+    def test_not_registered_without_start(self, monkeypatch):
+        assert "shadow_eval" not in self._job_ids(monkeypatch, "")
