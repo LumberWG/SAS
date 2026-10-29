@@ -189,6 +189,7 @@ CREATE TABLE IF NOT EXISTS paper_positions (
     peak_price REAL,                 -- 持仓期最高价（移动/保本止损跟踪）
     sellable_shares INTEGER DEFAULT 0,  -- 可卖股数（T+1：buy_date<今日 的批次合计）
     t_t_sold   INTEGER DEFAULT 0,    -- 做T：已卖出待买回股数（倒T/涨停卖半）
+    t_sold_date TEXT,                -- 做T：上述待买回的卖出日（<今日=跨日待买回，次日开盘恢复底仓）
     t_down_armed INTEGER DEFAULT 0,  -- 做T：下跌加仓已触发（防每tick重复）
     created_at TEXT NOT NULL
 );
@@ -375,6 +376,11 @@ class Database:
         if "t_down_armed" not in cols:
             conn.execute(
                 "ALTER TABLE paper_positions ADD COLUMN t_down_armed INTEGER DEFAULT 0"
+            )
+        if "t_sold_date" not in cols:
+            # 做T待买回的卖出日：跨日后仍可识别「往日待买回」，次日开盘恢复底仓
+            conn.execute(
+                "ALTER TABLE paper_positions ADD COLUMN t_sold_date TEXT"
             )
 
     @staticmethod
@@ -821,8 +827,12 @@ class Database:
         self, code: str,
         t_t_sold: int | None = None,
         t_down_armed: int | None = None,
+        t_sold_date: str | None = None,
     ) -> None:
-        """更新做T状态字段（倒T/涨停卖半待买回股数、下跌加仓触发标记）。"""
+        """更新做T状态字段（倒T/涨停卖半待买回股数、卖出日、下跌加仓触发标记）。
+
+        ``t_sold_date`` 传空串表示清空（买回完成后不再挂「待买回」状态）。
+        """
         sets: list[str] = []
         vals: list[Any] = []
         if t_t_sold is not None:
@@ -831,6 +841,9 @@ class Database:
         if t_down_armed is not None:
             sets.append("t_down_armed=?")
             vals.append(int(t_down_armed))
+        if t_sold_date is not None:
+            sets.append("t_sold_date=?")
+            vals.append(t_sold_date or None)
         if not sets:
             return
         vals.append(code)

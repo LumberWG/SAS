@@ -155,3 +155,66 @@ def test_crash_guard_pauses(monkeypatch, eng):
                         lambda: pd.DataFrame([{"code": "000001", "pct_change": -5.0}]))
     trades = asyncio.run(eng.t_tick({"300001": 11.0}))
     assert not any(t.reason == "涨停卖半" for t in trades)  # 大盘暴跌护栏暂停
+
+
+def test_crash_defers_buyback_until_next_open(monkeypatch, eng):
+    """当日 crash 暂停买回：待买回跨日保留，次日开盘恢复底仓（与回测口径一致）。"""
+    db = engine_module.db
+    from app.data.snapshot_store import snapshot_store
+    _seed(db, 1000)
+
+    # ① 非 crash：涨停卖半 → 底仓减半，标记「今日待买回」
+    monkeypatch.setattr(snapshot_store, "peek_snapshot",
+                        lambda: _snap(10.0, 11.0, 9.8, 10.0, 11.0))
+    asyncio.run(eng.t_tick({"300001": 11.0}))
+    pos = db.list_paper_positions()[0]
+    assert int(pos["shares"]) == 500
+    assert int(pos["t_t_sold"]) == 500
+    assert str(pos["t_sold_date"]) == _today()
+
+    # ② 同日 crash：价格已跌回买回线（10.2 ≤ max(10,10)×1.03），护栏不接刀
+    monkeypatch.setattr(snapshot_store, "peek_indices",
+                        lambda: pd.DataFrame([{"code": "000001", "pct_change": -5.0}]))
+    monkeypatch.setattr(snapshot_store, "peek_snapshot",
+                        lambda: _snap(10.0, 11.0, 9.8, 10.0, 10.2))
+    trades = asyncio.run(eng.t_tick({"300001": 10.2}))
+    assert not any(t.reason == "做T买回" for t in trades)
+    pos = db.list_paper_positions()[0]
+    assert int(pos["shares"]) == 500          # 底仓仍缺 500，但状态保留（不再丢）
+    assert int(pos["t_t_sold"]) == 500
+
+    # ③ 次日（无 crash、价格远高于买回线）：往日待买回 → 直接恢复底仓
+    monkeypatch.setattr(snapshot_store, "peek_indices",
+                        lambda: pd.DataFrame([{"code": "000001", "pct_change": 0.0}]))
+    monkeypatch.setattr(snapshot_store, "peek_snapshot",
+                        lambda: _snap(12.0, 12.5, 11.8, 11.0, 12.2))
+    db.update_paper_t_state("300001", t_sold_date=_yesterday())
+    eng._t_day = ""                           # 模拟跨交易日（触发每日重置分支）
+    trades = asyncio.run(eng.t_tick({"300001": 12.2}))
+    assert any(t.reason == "做T买回" for t in trades)
+    pos = db.list_paper_positions()[0]
+    assert int(pos["shares"]) == 1000         # 底仓恢复
+    assert int(pos["t_t_sold"]) == 0
+    assert not pos["t_sold_date"]             # 状态已清空
+    lots = db.list_paper_lots("300001")
+    assert any(l["tag"] == "t_buyback" and str(l["buy_date"]) == _today() for l in lots)
+
+
+def test_no_buyback_when_price_not_pulled_back(monkeypatch, eng):
+    """当日未回落（高于买回线）不买回，但次日开盘同样恢复底仓（不做永久减仓）。"""
+    db = engine_module.db
+    from app.data.snapshot_store import snapshot_store
+    _seed(db, 1000)
+
+    monkeypatch.setattr(snapshot_store, "peek_snapshot",
+                        lambda: _snap(10.0, 11.0, 9.8, 10.0, 11.0))
+    asyncio.run(eng.t_tick({"300001": 11.0}))          # 涨停卖半 500
+    trades = asyncio.run(eng.t_tick({"300001": 11.0}))  # 价格未回落
+    assert not any(t.reason == "做T买回" for t in trades)
+    assert int(db.list_paper_positions()[0]["t_t_sold"]) == 500
+
+    db.update_paper_t_state("300001", t_sold_date=_yesterday())
+    eng._t_day = ""
+    trades = asyncio.run(eng.t_tick({"300001": 11.5}))
+    assert any(t.reason == "做T买回" for t in trades)
+    assert int(db.list_paper_positions()[0]["shares"]) == 1000

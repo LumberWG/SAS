@@ -697,7 +697,9 @@ class PaperEngine:
         设计要点：
         - 卖出只动「可卖批次」（底仓），今仓留到次日才可卖；
         - 加仓/买回建「今仓」批次（tag=t_add/t_buyback），次日才可卖；
-        - 每日重置做T状态（t_t_sold / t_down_armed），使每个交易日最多一轮、次日志清；
+        - 每日只重置「下跌加仓已触发」（t_down_armed），使每票每日最多加一次；
+          待买回股数（t_t_sold）**跨日保留**：当日 crash 护栏或价格未回落没买回的底仓，
+          次日开盘恢复（回测侧 ``t_buyback_shares`` 同样是次日开盘买回，口径一致）；
         - 默认 paper_t_active=False，不影响现有模拟盘。
         """
         settings = self.settings
@@ -706,11 +708,13 @@ class PaperEngine:
         today = datetime.now().strftime("%Y-%m-%d")
         self.ensure_account()  # 确保 lots migrate + 刷新可卖股数（T+1 跨日生效）
 
-        # 每日重置做T状态（跨交易日清空待买回/加仓触发标记）
+        # 每日重置：只清「下跌加仓已触发」，使每票每日最多加一次。
+        # 待买回股数（t_t_sold）**不清零** —— 当日 crash 或价格未回落没买回的底仓要留到
+        # 次日开盘恢复，否则做T会悄悄变成永久减仓（与回测口径也不一致）。
         if getattr(self, "_t_day", "") != today:
             self._t_day = today
             for p in db.list_paper_positions():
-                db.update_paper_t_state(p["code"], t_t_sold=0, t_down_armed=0)
+                db.update_paper_t_state(p["code"], t_down_armed=0)
 
         positions = db.list_paper_positions()
         if not positions:
@@ -778,12 +782,17 @@ class PaperEngine:
                 and idx_drop >= float(settings.paper_t_crash_guard)
             )
 
-            # 1) 买回（倒T/涨停卖半待买回）：价格回落到开盘价上方 t_up_buyback 内即买回
+            # 1) 买回（倒T/涨停卖半待买回）
+            #    - 当日卖出（t_sold_date == today）：回落到 max(开盘,昨收)×(1+t_up_buyback)
+            #      以内才买回；遇 crash 护栏当日不接刀，顺延次日；
+            #    - 往日卖出（t_sold_date < today）：开盘直接恢复底仓，不看 crash 与买回线
+            #      （回测侧 t_buyback_shares 也是次日开盘无条件买回，两边口径一致）。
             if t_t_sold > 0:
-                if crash:
+                stale = str(pos.get("t_sold_date") or today) < today
+                if crash and not stale:
                     continue
                 buyback_line = max(open_px, prev_close) * (1 + float(settings.paper_t_up_buyback))
-                if price <= buyback_line:
+                if stale or price <= buyback_line:
                     want = (t_t_sold // LOT_SIZE) * LOT_SIZE
                     if want >= LOT_SIZE:
                         amount = price * want
@@ -791,9 +800,14 @@ class PaperEngine:
                         if amount + fee <= cash:
                             cash -= amount + fee
                             db.add_paper_lot(code, name, want, price, today, "做T买回", today=today, tag="t_buyback")
-                            db.update_paper_t_state(code, t_t_sold=0)
+                            db.update_paper_t_state(code, t_t_sold=0, t_sold_date="")
                             db.insert_paper_trade(code, name, "buy", price, want, amount, fee, "做T买回", today)
                             trades.append(TradeResult(code, name, "buy", want, price, amount, fee, "做T买回"))
+                        else:
+                            logger.warning(
+                                "做T买回资金不足 %s：待买回 %d 股，现金 %.2f（保留待买回状态）",
+                                code, want, cash,
+                            )
                 continue
 
             if crash:
@@ -809,7 +823,7 @@ class PaperEngine:
                         fee = self.calc_fee("sell", amount)
                         cash += amount - fee
                         db.insert_paper_trade(code, name, "sell", price, sold, amount, fee, "涨停卖半", today)
-                        db.update_paper_t_state(code, t_t_sold=sold)
+                        db.update_paper_t_state(code, t_t_sold=sold, t_sold_date=today)
                         trades.append(TradeResult(code, name, "sell", sold, price, amount, fee, "涨停卖半"))
                 continue
 
@@ -832,7 +846,7 @@ class PaperEngine:
                         fee = self.calc_fee("sell", amount)
                         cash += amount - fee
                         db.insert_paper_trade(code, name, "sell", price, sold, amount, fee, "做T卖出", today)
-                        db.update_paper_t_state(code, t_t_sold=sold)
+                        db.update_paper_t_state(code, t_t_sold=sold, t_sold_date=today)
                         trades.append(TradeResult(code, name, "sell", sold, price, amount, fee, "做T卖出"))
                 continue
 
