@@ -11,6 +11,8 @@ set LOG=logs\nightly_combined.log
 if not exist "logs" mkdir "logs"
 
 REM ---- optional overrides via env: PRELOAD_SHARDS / PRELOAD_LIMIT ----
+REM shards 3 + sleep 2.5: keeps request rate ~15/min. Direct connection got
+REM IP-banned by Baostock (error 10001011) at ~25/min, so --proxy is mandatory.
 set SHARDS=4
 if defined PRELOAD_SHARDS set SHARDS=%PRELOAD_SHARDS%
 set EXTRA=
@@ -31,6 +33,6 @@ if %errorlevel%==2 (
 )
 
 echo [%date% %time%] START nightly preload shards=%SHARDS% >> "%LOG%"
-.venv\Scripts\python.exe scripts\preload_minutes_parallel.py --shards %SHARDS% %EXTRA% >> "%LOG%" 2>&1
+.venv\Scripts\python.exe scripts\preload_minutes_parallel.py --proxy --shards %SHARDS% --sleep 2.5 %EXTRA% >> "%LOG%" 2>&1
 echo [%date% %time%] END exitcode=%errorlevel% >> "%LOG%"
 exit /b %errorlevel%

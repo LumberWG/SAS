@@ -272,6 +272,27 @@ def split_chunks(codes: list[str], n: int) -> list[list[str]]:
     return out
 
 
+# Baostock 黑名单（10001011）：出口 IP 被反爬系统封禁。重试毫无意义，只会加深封禁，
+# 必须立刻整体停机并提示换出口。直连实测 25 请求/分钟跑 14 分钟就被封。
+BANNED = {"hit": False, "msg": ""}
+
+
+def is_ban_error(code, msg) -> bool:
+    s = f"{code} {msg}"
+    return "10001011" in s or "黑名单" in s
+
+
+def mark_banned(code, msg) -> None:
+    if not BANNED["hit"]:
+        BANNED["hit"] = True
+        BANNED["msg"] = f"{code} {msg}".strip()
+        log("=" * 60)
+        log(f"[FATAL] Baostock 返回黑名单：{BANNED['msg']}")
+        log("        本机出口 IP 已被封，继续重试只会加重封禁。")
+        log("        处理办法：改用 --proxy（走 Forest 代理换出口 IP），或等封禁解除后重跑。")
+        log("=" * 60)
+
+
 def relogin(max_try: int = 3) -> bool:
     """会话被代理断开后重新登录（断线自愈）。返回是否成功。"""
     try:
@@ -283,9 +304,15 @@ def relogin(max_try: int = 3) -> bool:
             lg = bs.login()
             if getattr(lg, "error_code", "1") == "0":
                 return True
-            log(f"  [WARN] 重新登录返回错误: {getattr(lg, 'error_code', '?')} {getattr(lg, 'error_msg', '')}")
+            ec, em = getattr(lg, "error_code", "?"), getattr(lg, "error_msg", "")
+            if is_ban_error(ec, em):
+                mark_banned(ec, em)
+                return False  # 不再重试
+            log(f"  [WARN] 重新登录返回错误: {ec} {em}")
         except Exception as _e:  # noqa: BLE001
             log(f"  [WARN] 重新登录异常({k + 1}/{max_try}): {type(_e).__name__}: {str(_e)[:120]}")
+        if BANNED["hit"]:
+            return False
         time.sleep(2.0 * (k + 1))
     return False
 
@@ -330,6 +357,9 @@ def fetch_baostock(code: str, start: str, end: str, period: str, sleep: float) -
                 # 于是整片股票被静默划掉、数据永久漏抓，日志还显示一切正常。
                 err_hit = True
                 emsg = f"{rs.error_code} {rs.error_msg}".strip()
+                if is_ban_error(rs.error_code, rs.error_msg):
+                    mark_banned(rs.error_code, rs.error_msg)
+                    break  # 被封了，本只直接放弃，主循环会整体停机
                 if is_net_error(rs.error_code, rs.error_msg):
                     net_err += 1
                     log(f"  [WARN] {code} 段 {s}~{e} 网络错误({net_err}/{MAX_NET_ERR}) {emsg}")
@@ -481,6 +511,10 @@ def main() -> None:
     log(f"待处理 {len(codes)} 只 | 输入 {kdir} | 输出 {odir} | 周期 {args.period} | 间隔 {args.sleep}s | 起点 {args.start or START_DEFAULT}")
 
     for code in codes:
+        if BANNED["hit"]:
+            log("!! 出口 IP 已被 Baostock 拉黑（10001011），停止本分片剩余任务。")
+            log("   请用 --proxy 走代理换出口重跑，或等封禁解除。已抓数据全部保留，重跑自动续传。")
+            break
         if state["disabled"]:
             # 熔断后不退出进程：并行模式下退出会被看门狗反复重启，反而更浪费时间。
             # 改为冷却一段时间（每 30s 打一条心跳，避免被看门狗误判卡死）+ 重连，然后自动恢复。
