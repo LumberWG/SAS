@@ -129,7 +129,7 @@ class Settings(BaseSettings):
 
     # ---------- 满仓后的处理：轮动替换 + 候补队列 ----------
     # 轮动替换：满仓时若出现更高分的新票，卖出最弱持仓换入（T+1 与持有满 1 日保护）
-    paper_rotation_enabled: bool = True
+    paper_rotation_enabled: bool = False
     # 触发条件：新票评分 >= min_score，且比「最弱持仓的建仓评分」高出 gap 分
     paper_rotation_min_score: float = 40.0
     paper_rotation_gap: float = 20.0
@@ -151,6 +151,24 @@ class Settings(BaseSettings):
     # 0=关闭（沿用固定 8%）；高波动票自动放宽，与回测里 e30_a15 的机制一致
     paper_atr_stop_mult: float = 2.0
     paper_atr_stop_max: float = 0.20
+    # ---- 模拟盘盈利保护（对齐回测 breakeven/trail） ----
+    paper_breakeven_pct: float = 0.10   # 浮盈达此比例后止损上移到成本（保本）
+    paper_trail_pct: float = 0.10       # 从持仓期最高价回撤此比例即卖出（移动止损）
+    paper_trail_arm: float = 0.0        # 移动止损启用门槛：浮盈达此比例后才跟踪
+    # ---- 模拟盘大盘择时买入闸门（弱市暂停自动买入） ----
+    paper_regime_ma: int = 60           # 上证指数 MA 周期，<=0 关闭
+    paper_regime_weak_pause: bool = True  # 弱市（指数在 MA 下）暂停自动买入
+    # ---- 做T引擎（真实 tick：严格 T+1 多批次；默认全部关闭） ----
+    paper_t_active: bool = False
+    paper_t_size: float = 0.25             # 单次做T比例（相对总仓）
+    paper_t_up_sell: float = 0.05          # 开盘涨幅超此先卖锁利
+    paper_t_up_buyback: float = 0.03       # 从高点回调超此买回
+    # 下跌加仓在单边弱市会放大亏损（回测 E 版验证），默认调到「跌 20% 才加」≈关闭
+    paper_t_down_add: float = 0.20         # 开盘跌幅达此加仓（0.20 ≈ 关闭）
+    paper_t_down_full: float = 0.20        # 跌幅达此加满仓（0.20 ≈ 关闭）
+    paper_t_rebound_sell: float = 0.02     # 反弹至跌幅小于此减仓
+    paper_t_limit_sell_half: bool = True   # 涨停弱封板卖 1/2（F 组合开启）
+    paper_t_crash_guard: float = 0.02      # 大盘当日跌幅超此暂停做T
     # 买单只允许在开盘后 N 分钟内成交（0=不限）。回测按「次日开盘价」成交，
     # 实盘此前在盘中分析时刻（如 13:01）按实时价一把买入 → 系统性买高
     paper_buy_open_window_minutes: int = 5

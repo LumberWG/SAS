@@ -30,6 +30,8 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime
 
+import pandas as pd
+
 from app.config import get_settings
 from app.data.cache import db
 from app.data.service import get_kline_cached
@@ -115,6 +117,8 @@ class PaperEngine:
         if account is None:
             account = db.init_paper_account(self.settings.paper_initial_capital)
             logger.info("模拟账户初始化：%.0f 元", self.settings.paper_initial_capital)
+        # 批次模型兼容：把尚无批次的现有持仓补建为一个批次（幂等）
+        db.ensure_lots_migrated(datetime.now().strftime("%Y-%m-%d"))
         return account
 
     async def _latest_price(
@@ -178,10 +182,17 @@ class PaperEngine:
         return codes
 
     def _buy_allowed(self, code: str, name: str) -> tuple[bool, str]:
-        """下单前的准入检查：北交所 / 名称可信度 / 成交额 TopN 池。"""
+        """下单前的准入检查：板块范围 / 北交所 / 名称可信度 / 成交额 TopN 池。
+
+        板块范围与选股 scanner 统一口径（app.data.scope.is_tradable）：只做
+        沪深主板+创业板，排除科创板(688)/北交所(92,43,83,87,88)/B股/ST/巨无霸。
+        """
         code = str(code or "").zfill(6)
         if getattr(self.settings, "paper_exclude_bj", False) and _is_bj(code):
             return False, "北交所股票已排除（PAPER_EXCLUDE_BJ）"
+        from app.data.scope import is_tradable
+        if not is_tradable(code, name)[0]:
+            return False, "不在沪深主板+创业板范围（scope 过滤）"
         if not _name_ok(name, code):
             return False, "名称缺失或乱码，拒绝下单（股票池可能不完整）"
         pool = self._top_amount_codes()
@@ -223,6 +234,36 @@ class PaperEngine:
             logger.debug("ATR 止损计算失败 %s: %s", code, exc)
             return base
         return max(base, min(dist, float(getattr(self.settings, "paper_atr_stop_max", 0.2))))
+
+    async def _index_is_weak(self, today: str) -> bool:
+        """大盘择时：上证指数前一交易日收盘 < MA(N) 即判弱势（与回测 regime 同口径，无未来函数）。
+
+        指数文件 ``idx_sh000001.parquet`` 缺失时退化为「不暂停」（避免数据源抖动直接停交易）。
+        """
+        n = int(getattr(self.settings, "paper_regime_ma", 0) or 0)
+        if n <= 0:
+            return False
+        try:
+            idx_path = self.settings.kline_dir / "idx_sh000001.parquet"
+            if not idx_path.exists():
+                return False
+            df = await asyncio.to_thread(pd.read_parquet, idx_path)
+            if df is None or df.empty or "close" not in df.columns or len(df) < n + 1:
+                return False
+            close = df["close"].astype(float)
+            ma = close.rolling(n).mean().shift(1)  # 前一交易日，避免未来函数
+            last = df[df["date"] <= today] if "date" in df.columns else df
+            i = (len(last) - 1) if not last.empty else (len(df) - 1)
+            if i <= 0:
+                return False
+            prev_close = float(close.iloc[i - 1])
+            prev_ma = float(ma.iloc[i - 1])
+            if prev_ma != prev_ma or prev_ma <= 0:
+                return False
+            return prev_close < prev_ma
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("大盘择时判断失败: %s", exc)
+            return False
 
     # ------------------------------------------------------------------
     # 费用计算
@@ -276,29 +317,38 @@ class PaperEngine:
                     rec.code, getattr(rec, "name", ""), "skip", 0,
                     0.0, 0.0, 0.0, "无持仓可卖"))
                 continue
-            if pos["buy_date"] >= today:
-                results.append(TradeResult(
-                    rec.code, pos["name"], "skip", 0,
-                    0.0, 0.0, 0.0, "T+1 当日买入不可卖"))
-                continue
             price = await self._latest_price(rec.code, prices)
             if price is None:
                 results.append(TradeResult(
                     rec.code, pos["name"], "skip", 0,
                     0.0, 0.0, 0.0, "取价失败"))
                 continue
-            shares = int(pos["shares"])
-            amount = price * shares
+            # 严格 T+1：只卖可卖批次（buy_date<today），今仓留到次日
+            sold = db.reduce_paper_sellable(rec.code, int(pos["shares"]), today)
+            if sold <= 0:
+                results.append(TradeResult(
+                    rec.code, pos["name"], "skip", 0,
+                    0.0, 0.0, 0.0, "T+1 当日买入不可卖"))
+                continue
+            amount = price * sold
             fee = self.calc_fee("sell", amount)
             cash += amount - fee
             db.insert_paper_trade(
-                rec.code, pos["name"], "sell", price, shares, amount, fee,
+                rec.code, pos["name"], "sell", price, sold, amount, fee,
                 getattr(rec, "reason", "卖出信号"), today,
             )
-            db.remove_paper_position(rec.code)
             results.append(TradeResult(
-                rec.code, pos["name"], "sell", shares, price, amount, fee,
+                rec.code, pos["name"], "sell", sold, price, amount, fee,
                 getattr(rec, "reason", "卖出信号")))
+
+        # ---- 大盘择时买入闸门：弱市暂停自动买入与轮动（仅保留卖出） ----
+        market_weak = (
+            bool(self.settings.paper_regime_weak_pause)
+            and int(self.settings.paper_regime_ma) > 0
+            and await self._index_is_weak(today)
+        )
+        if market_weak:
+            logger.info("大盘弱势（指数在 MA 下），暂停自动买入/轮动，仅执行卖出")
 
         # ---- 轮动替换：满仓时用显著更高分的新票换掉最弱持仓 ----
         # 触发条件（全部满足）：开关开启 + 持仓已满 + 存在未持仓的买入候选 +
@@ -306,6 +356,7 @@ class PaperEngine:
         #   最弱持仓非当日买入（T+1）+ 当日轮动次数未达上限。
         if (
             self.settings.paper_rotation_enabled
+            and not market_weak
             and len(positions) >= self.settings.paper_max_positions
         ):
             fresh = [r for r in buy_candidates if r.code not in positions]
@@ -333,27 +384,28 @@ class PaperEngine:
                 if can_rotate:
                     price = await self._latest_price(weak_code, prices)
                     if price and price > 0:
-                        shares = int(weak_pos["shares"])
-                        amount = price * shares
-                        fee = self.calc_fee("sell", amount)
-                        cash += amount - fee
-                        reason = (
-                            f"轮动替换(建仓{weak_score:.0f}分→新票{best_score:.0f}分)"
-                        )
-                        db.insert_paper_trade(
-                            weak_code, weak_pos.get("name", ""), "sell", price,
-                            shares, amount, fee, reason, today,
-                        )
-                        db.remove_paper_position(weak_code)
-                        positions.pop(weak_code, None)
-                        results.append(TradeResult(
-                            weak_code, weak_pos.get("name", ""), "sell", shares,
-                            price, amount, fee, reason,
-                        ))
-                        logger.info(
-                            "轮动替换：卖出 %s（建仓 %.0f 分），换入 %s（%.0f 分）",
-                            weak_code, weak_score, best.code, best_score,
-                        )
+                        # 严格 T+1：只卖可卖批次，今仓留到次日
+                        sold = db.reduce_paper_sellable(weak_code, int(weak_pos["shares"]), today)
+                        if sold > 0:
+                            amount = price * sold
+                            fee = self.calc_fee("sell", amount)
+                            cash += amount - fee
+                            reason = (
+                                f"轮动替换(建仓{weak_score:.0f}分→新票{best_score:.0f}分)"
+                            )
+                            db.insert_paper_trade(
+                                weak_code, weak_pos.get("name", ""), "sell", price,
+                                sold, amount, fee, reason, today,
+                            )
+                            positions.pop(weak_code, None)
+                            results.append(TradeResult(
+                                weak_code, weak_pos.get("name", ""), "sell", sold,
+                                price, amount, fee, reason,
+                            ))
+                            logger.info(
+                                "轮动替换：卖出 %s（建仓 %.0f 分），换入 %s（%.0f 分）",
+                                weak_code, weak_score, best.code, best_score,
+                            )
 
         # ---- 买入（第 3 次排序：评分加权仓位 + 评分分档 + 总仓位上限） ----
         # 规则：
@@ -367,6 +419,13 @@ class PaperEngine:
         # 现有持仓市值 = 总资产 - 现金；总仓位上限扣掉已有仓位后才是本轮可投预算
         exposure_cap = total_asset * self.settings.paper_max_total_exposure
         available_budget = max(0.0, exposure_cap - max(0.0, total_asset - cash))
+        if market_weak:
+            for rec in buy_candidates:
+                results.append(TradeResult(
+                    rec.code, getattr(rec, "name", "") or rec.code, "skip", 0,
+                    0.0, 0.0, 0.0, "大盘弱势，暂停买入"))
+            buy_candidates = []
+
         candidates: list[tuple[float, object, float]] = []
         for rec in buy_candidates:
             if rec.code in positions:
@@ -455,10 +514,10 @@ class PaperEngine:
             # 止损线在建仓时一次定死（固定 8% 或 max(8%, 2×ATR)），
             # 避免高波动票被固定 8% 的噪声打掉、也便于复盘「当时定的止损是多少」
             stop_price = round(cost_price * (1 - self._stop_distance(rec.code)), 3)
-            db.upsert_paper_position(
+            db.add_paper_lot(
                 rec.code, name, shares, cost_price, today,
                 getattr(rec, "reason", "买入信号"), score=_rec_score(rec),
-                stop_price=stop_price,
+                stop_price=stop_price, peak_price=cost_price, today=today,
             )
             db.insert_paper_trade(
                 rec.code, name, "buy", price, shares, amount, fee,
@@ -512,39 +571,29 @@ class PaperEngine:
         account = db.get_paper_account()
         cash = float(account["cash"])
 
-        # ---- 卖出 ----
+        # ---- 卖出 ----（严格 T+1：只卖可卖批次，今仓留次日）
         if side == "sell":
             pos = db.get_paper_position(code)
             if pos is None:
                 return TradeResult(code, name, "skip", 0, price, 0.0, 0.0, "无持仓可卖")
-            if pos["buy_date"] >= today:
+            held = int(pos["shares"])
+            qty = held if (not shares or int(shares) >= held) else int(shares) // LOT_SIZE * LOT_SIZE
+            if qty <= 0:
+                return TradeResult(code, pos["name"], "skip", 0, price, 0.0, 0.0, "股数不足一手")
+            sold = db.reduce_paper_sellable(code, qty, today)
+            if sold <= 0:
                 return TradeResult(
                     code, pos["name"], "skip", 0, price, 0.0, 0.0, "T+1 当日买入不可卖"
                 )
-            held = int(pos["shares"])
-            if not shares or int(shares) >= held:
-                qty = held
-            else:
-                qty = int(shares) // LOT_SIZE * LOT_SIZE
-            if qty <= 0:
-                return TradeResult(code, pos["name"], "skip", 0, price, 0.0, 0.0, "股数不足一手")
-            amt = price * qty
+            amt = price * sold
             fee = self.calc_fee("sell", amt)
             cash += amt - fee
             db.insert_paper_trade(
-                code, pos["name"], "sell", price, qty, amt, fee, reason, today
+                code, pos["name"], "sell", price, sold, amt, fee, reason, today
             )
-            if qty >= held:
-                db.remove_paper_position(code)
-            else:
-                # 部分卖出：剩余仓位保持原成本与买入日
-                db.upsert_paper_position(
-                    code, pos["name"], held - qty, float(pos["cost_price"]),
-                    pos["buy_date"], pos.get("strategy", ""),
-                )
             db.update_paper_cash(round(cash, 2))
-            logger.info("手动卖出 %s %d 股 @ %.2f", code, qty, price)
-            return TradeResult(code, pos["name"], "sell", qty, price, amt, fee, reason)
+            logger.info("手动卖出 %s %d 股（可卖）@ %.2f", code, sold, price)
+            return TradeResult(code, pos["name"], "sell", sold, price, amt, fee, reason)
 
         # ---- 买入 ----
         if db.get_paper_position(code) is not None:
@@ -562,7 +611,7 @@ class PaperEngine:
         if amt + fee > cash:
             return TradeResult(code, name, "skip", 0, price, 0.0, 0.0, "可用资金不足")
         cash -= amt + fee
-        db.upsert_paper_position(code, name, qty, (amt + fee) / qty, today, reason)
+        db.add_paper_lot(code, name, qty, (amt + fee) / qty, today, reason, today=today)
         db.insert_paper_trade(code, name, "buy", price, qty, amt, fee, reason, today)
         db.update_paper_cash(round(cash, 2))
         # 持仓纳入自选：保证后续卖出建议能覆盖到这只股票
@@ -580,6 +629,7 @@ class PaperEngine:
 
         ``prices`` 供实时撮合传入（逐 tick 检查，而非只在收盘后检查）。
         """
+        self.ensure_account()  # 确保批次模型已迁移
         positions = db.list_paper_positions()
         if not positions:
             return []
@@ -589,15 +639,25 @@ class PaperEngine:
         results: list[TradeResult] = []
 
         for pos in positions:
-            if pos["buy_date"] >= today:
-                continue  # T+1 不可卖
+            if int(pos.get("sellable_shares") or 0) <= 0:
+                continue  # T+1 无可卖批次（今仓留次日）
             price = await self._latest_price(pos["code"], prices)
             if price is None:
                 continue
             cost = float(pos["cost_price"])
             change = price / cost - 1
+            # 持仓期最高价（移动/保本止损跟踪），先更新再落库
+            peak = float(pos.get("peak_price") or cost)
+            if price > peak:
+                peak = price
+                db.update_paper_peak(pos["code"], peak)
             # 建仓时定死的止损线（含 ATR 放宽）；老持仓没有该字段时按固定 8% 现算
             stop_price = float(pos.get("stop_price") or 0) or cost * (1 - STOP_LOSS_RATIO)
+            # 盈利保护：浮盈达 breakeven 上移止损到成本；达 trail_arm 后跟踪高点回撤
+            if self.settings.paper_breakeven_pct > 0 and peak >= cost * (1 + self.settings.paper_breakeven_pct):
+                stop_price = max(stop_price, cost)
+            if self.settings.paper_trail_pct > 0 and peak >= cost * (1 + self.settings.paper_trail_arm):
+                stop_price = max(stop_price, peak * (1 - self.settings.paper_trail_pct))
             reason = None
             if price <= stop_price:
                 reason = (
@@ -608,23 +668,213 @@ class PaperEngine:
                 reason = f"止盈触发（成本{cost:.2f}，现价{price:.2f}，{change:+.1%}）"
             if reason is None:
                 continue
-            shares = int(pos["shares"])
-            amount = price * shares
+            # 严格 T+1：只卖可卖批次，今仓留到次日（由批次模型保证）
+            sold = db.reduce_paper_sellable(pos["code"], int(pos["shares"]), today)
+            if sold <= 0:
+                continue
+            amount = price * sold
             fee = self.calc_fee("sell", amount)
             cash += amount - fee
             db.insert_paper_trade(
-                pos["code"], pos["name"], "sell", price, shares, amount, fee,
+                pos["code"], pos["name"], "sell", price, sold, amount, fee,
                 reason, today,
             )
-            db.remove_paper_position(pos["code"])
             results.append(TradeResult(
-                pos["code"], pos["name"], "sell", shares, price, amount, fee,
+                pos["code"], pos["name"], "sell", sold, price, amount, fee,
                 reason))
 
         if results:
             db.update_paper_cash(round(cash, 2))
             logger.info("止盈止损触发 %d 笔", len(results))
         return results
+
+    # ------------------------------------------------------------------
+    # 做T引擎（真实 tick，严格 T+1）
+    # ------------------------------------------------------------------
+    async def t_tick(self, prices: dict[str, float]) -> list:
+        """做T引擎（真实 tick，严格 T+1）：涨停卖半 / 倒T / 下跌分级加仓 / 反弹减仓 / 大盘护栏。
+
+        设计要点：
+        - 卖出只动「可卖批次」（底仓），今仓留到次日才可卖；
+        - 加仓/买回建「今仓」批次（tag=t_add/t_buyback），次日才可卖；
+        - 每日重置做T状态（t_t_sold / t_down_armed），使每个交易日最多一轮、次日志清；
+        - 默认 paper_t_active=False，不影响现有模拟盘。
+        """
+        settings = self.settings
+        if not settings.paper_t_active:
+            return []
+        today = datetime.now().strftime("%Y-%m-%d")
+        self.ensure_account()  # 确保 lots migrate + 刷新可卖股数（T+1 跨日生效）
+
+        # 每日重置做T状态（跨交易日清空待买回/加仓触发标记）
+        if getattr(self, "_t_day", "") != today:
+            self._t_day = today
+            for p in db.list_paper_positions():
+                db.update_paper_t_state(p["code"], t_t_sold=0, t_down_armed=0)
+
+        positions = db.list_paper_positions()
+        if not positions:
+            return []
+
+        # 实时快照（内存，不刷新）：含 open/high/low/prev_close/price
+        from app.data.snapshot_store import snapshot_store
+        snap = snapshot_store.peek_snapshot()
+        snap_map = {}
+        if snap is not None and not snap.empty and "code" in snap.columns:
+            for row in snap.itertuples(index=False):
+                snap_map[str(getattr(row, "code", ""))] = row
+
+        # 大盘当日涨跌幅（护栏）：取最弱主要指数当日跌幅
+        idx_drop = None
+        try:
+            indices = snapshot_store.peek_indices()
+            if indices is not None and not indices.empty and "pct_change" in indices.columns:
+                vals = [
+                    float(getattr(r, "pct_change", 0) or 0)
+                    for r in indices.itertuples(index=False)
+                ]
+                if vals:
+                    idx_drop = -min(vals)
+        except Exception:  # noqa: BLE001
+            idx_drop = None
+
+        account = db.get_paper_account()
+        cash = float(account["cash"])
+        trades = []
+
+        def _num(v):
+            try:
+                f = float(v)
+                return f if f == f else None
+            except (TypeError, ValueError):
+                return None
+
+        for pos in positions:
+            code = pos["code"]
+            row = snap_map.get(code)
+            if row is None:
+                continue
+            price = prices.get(code)
+            if price is None:
+                continue
+            open_px = _num(getattr(row, "open", None))
+            high = _num(getattr(row, "high", None))
+            low = _num(getattr(row, "low", None))
+            prev_close = _num(getattr(row, "prev_close", None))
+            if None in (open_px, high, low, prev_close) or prev_close <= 0 or open_px <= 0:
+                continue
+
+            total = int(pos["shares"])
+            sellable = int(pos.get("sellable_shares") or 0)
+            t_t_sold = int(pos.get("t_t_sold") or 0)
+            t_down_armed = int(pos.get("t_down_armed") or 0)
+            name = pos.get("name", "")
+            size = float(settings.paper_t_size or 0.25)
+
+            # 大盘极速下跌护栏：暂停所有做T动作（仅允许已卖出待买回的平仓）
+            crash = (
+                bool(settings.paper_t_crash_guard)
+                and idx_drop is not None
+                and idx_drop >= float(settings.paper_t_crash_guard)
+            )
+
+            # 1) 买回（倒T/涨停卖半待买回）：价格回落到开盘价上方 t_up_buyback 内即买回
+            if t_t_sold > 0:
+                if crash:
+                    continue
+                buyback_line = max(open_px, prev_close) * (1 + float(settings.paper_t_up_buyback))
+                if price <= buyback_line:
+                    want = (t_t_sold // LOT_SIZE) * LOT_SIZE
+                    if want >= LOT_SIZE:
+                        amount = price * want
+                        fee = self.calc_fee("buy", amount)
+                        if amount + fee <= cash:
+                            cash -= amount + fee
+                            db.add_paper_lot(code, name, want, price, today, "做T买回", today=today, tag="t_buyback")
+                            db.update_paper_t_state(code, t_t_sold=0)
+                            db.insert_paper_trade(code, name, "buy", price, want, amount, fee, "做T买回", today)
+                            trades.append(TradeResult(code, name, "buy", want, price, amount, fee, "做T买回"))
+                continue
+
+            if crash:
+                continue
+
+            # 2) 涨停卖半（封板弱）：盘中高点触涨停且仍有可卖底仓 → 卖 1/2
+            if settings.paper_t_limit_sell_half and high >= prev_close * 1.095 and sellable >= LOT_SIZE:
+                want = ((sellable // 2) // LOT_SIZE) * LOT_SIZE
+                if want >= LOT_SIZE:
+                    sold = db.reduce_paper_sellable(code, want, today)
+                    if sold > 0:
+                        amount = price * sold
+                        fee = self.calc_fee("sell", amount)
+                        cash += amount - fee
+                        db.insert_paper_trade(code, name, "sell", price, sold, amount, fee, "涨停卖半", today)
+                        db.update_paper_t_state(code, t_t_sold=sold)
+                        trades.append(TradeResult(code, name, "sell", sold, price, amount, fee, "涨停卖半"))
+                continue
+
+            open_chg = open_px / prev_close - 1
+
+            # 3) 倒T：开盘涨且盘中触 +t_up_sell → 卖 t_size 可卖底仓，待买回
+            if (
+                settings.paper_t_up_sell
+                and open_chg > 0
+                and high >= open_px * (1 + float(settings.paper_t_up_sell))
+                and sellable >= LOT_SIZE
+            ):
+                want = int(total * size / LOT_SIZE) * LOT_SIZE
+                want = min(want, sellable)
+                want = (want // LOT_SIZE) * LOT_SIZE
+                if want >= LOT_SIZE:
+                    sold = db.reduce_paper_sellable(code, want, today)
+                    if sold > 0:
+                        amount = price * sold
+                        fee = self.calc_fee("sell", amount)
+                        cash += amount - fee
+                        db.insert_paper_trade(code, name, "sell", price, sold, amount, fee, "做T卖出", today)
+                        db.update_paper_t_state(code, t_t_sold=sold)
+                        trades.append(TradeResult(code, name, "sell", sold, price, amount, fee, "做T卖出"))
+                continue
+
+            # 4) 下跌分级加仓（今仓）/ 反弹减仓（次日卖加仓批次，T+1）
+            if open_chg < 0:
+                # 反弹减仓：已有「可卖」的做T加仓批次（今仓次日才可卖）→ 只减加仓批次
+                if settings.paper_t_rebound_sell and price >= prev_close * (1 - float(settings.paper_t_rebound_sell)):
+                    sold = db.reduce_paper_lots_by_tag(code, "t_add", 10**9, today)
+                    if sold > 0:
+                        amount = price * sold
+                        fee = self.calc_fee("sell", amount)
+                        cash += amount - fee
+                        db.insert_paper_trade(code, name, "sell", price, sold, amount, fee, "反弹减仓", today)
+                        trades.append(TradeResult(code, name, "sell", sold, price, amount, fee, "反弹减仓"))
+                        continue  # 本轮已减仓，不再加仓
+                # 分级加仓（今仓，T+1 次日可卖）：每日每票最多一次（t_down_armed 当日内防重复）
+                if t_down_armed == 0:
+                    budget = 0.0
+                    if settings.paper_t_down_full and low <= open_px * (1 - float(settings.paper_t_down_full)):
+                        budget = cash * 0.95
+                    elif settings.paper_t_down_add and low <= open_px * (1 - float(settings.paper_t_down_add)):
+                        budget = cash * float(settings.paper_t_down_add)
+                    if budget > 0:
+                        est = int(budget / price / LOT_SIZE) * LOT_SIZE
+                        if est >= LOT_SIZE:
+                            amount = price * est
+                            fee = self.calc_fee("buy", amount)
+                            while est >= LOT_SIZE and amount + fee > cash:
+                                est -= LOT_SIZE
+                                amount = price * est
+                                fee = self.calc_fee("buy", amount)
+                            if est >= LOT_SIZE:
+                                cash -= amount + fee
+                                db.add_paper_lot(code, name, est, price, today, "做T加仓", today=today, tag="t_add")
+                                db.update_paper_t_state(code, t_down_armed=1)
+                                db.insert_paper_trade(code, name, "buy", price, est, amount, fee, "做T加仓", today)
+                                trades.append(TradeResult(code, name, "buy", est, price, amount, fee, "做T加仓"))
+                        else:
+                            db.update_paper_t_state(code, t_down_armed=1)  # 现金不足也标记，避免反复尝试
+
+        db.update_paper_cash(round(cash, 2))
+        return trades
 
     # ------------------------------------------------------------------
     # 账户查询与结算

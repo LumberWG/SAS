@@ -186,8 +186,22 @@ CREATE TABLE IF NOT EXISTS paper_positions (
     strategy   TEXT,                 -- 买入来源（策略/建议原因）
     score      REAL DEFAULT 0,       -- 建仓时的建议评分（轮动替换的比较基准）
     stop_price REAL,                 -- 止损线（买入时按 ATR/固定比例算好，NULL=按固定 8% 现算）
+    peak_price REAL,                 -- 持仓期最高价（移动/保本止损跟踪）
+    sellable_shares INTEGER DEFAULT 0,  -- 可卖股数（T+1：buy_date<今日 的批次合计）
+    t_t_sold   INTEGER DEFAULT 0,    -- 做T：已卖出待买回股数（倒T/涨停卖半）
+    t_down_armed INTEGER DEFAULT 0,  -- 做T：下跌加仓已触发（防每tick重复）
     created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS paper_position_lots (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    code        TEXT NOT NULL,       -- 持仓批次（做T/严格 T+1：每批带 buy_date 算可卖）
+    shares      INTEGER NOT NULL,
+    cost_price  REAL NOT NULL,
+    buy_date    TEXT NOT NULL,       -- 该批次买入日（T+1 可卖判断）
+    tag         TEXT DEFAULT 'base', -- base=底仓 / t_add=做T加仓 / t_buyback=做T买回
+    created_at  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_lots_code ON paper_position_lots(code);
 CREATE TABLE IF NOT EXISTS paper_trades (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     code       TEXT NOT NULL,
@@ -284,6 +298,9 @@ class Database:
             self._migrate_signal_rank(conn)
             self._migrate_position_score(conn)
             self._migrate_position_stop(conn)
+            self._migrate_position_peak(conn)
+            self._migrate_position_lots(conn)
+            self._migrate_lots_tag(conn)
             self._dedupe_signals(conn)
 
     @staticmethod
@@ -331,6 +348,41 @@ class Database:
         cols = {row["name"] for row in conn.execute("PRAGMA table_info(paper_positions)")}
         if "stop_price" not in cols:
             conn.execute("ALTER TABLE paper_positions ADD COLUMN stop_price REAL")
+
+    @staticmethod
+    def _migrate_position_peak(conn: sqlite3.Connection) -> None:
+        """老库补 peak_price 列：持仓期最高价（移动/保本止损跟踪用）。"""
+        cols = {row["name"] for row in conn.execute("PRAGMA table_info(paper_positions)")}
+        if "peak_price" not in cols:
+            conn.execute("ALTER TABLE paper_positions ADD COLUMN peak_price REAL")
+
+    @staticmethod
+    def _migrate_position_lots(conn: sqlite3.Connection) -> None:
+        """老库补 sellable_shares 列（可卖股数=T+1 判定用）；批次表已在 schema 建好。
+
+        历史持仓不在此处灌入批次——由 engine 启动时的 ensure_lots_migrated()
+        在切换到批次模型后幂等补建，避免「旧引擎已灌 lots 但还没切批次逻辑」的窗口不一致。
+        """
+        cols = {row["name"] for row in conn.execute("PRAGMA table_info(paper_positions)")}
+        if "sellable_shares" not in cols:
+            conn.execute(
+                "ALTER TABLE paper_positions ADD COLUMN sellable_shares INTEGER DEFAULT 0"
+            )
+        if "t_t_sold" not in cols:
+            conn.execute(
+                "ALTER TABLE paper_positions ADD COLUMN t_t_sold INTEGER DEFAULT 0"
+            )
+        if "t_down_armed" not in cols:
+            conn.execute(
+                "ALTER TABLE paper_positions ADD COLUMN t_down_armed INTEGER DEFAULT 0"
+            )
+
+    @staticmethod
+    def _migrate_lots_tag(conn: sqlite3.Connection) -> None:
+        """老库补 lots 表的 tag 列（区分底仓/做T加仓/做T买回）。"""
+        cols = {row["name"] for row in conn.execute("PRAGMA table_info(paper_position_lots)")}
+        if "tag" not in cols:
+            conn.execute("ALTER TABLE paper_position_lots ADD COLUMN tag TEXT DEFAULT 'base'")
 
     @staticmethod
     def _migrate_signal_rank(conn: sqlite3.Connection) -> None:
@@ -555,20 +607,29 @@ class Database:
     def upsert_paper_position(
         self, code: str, name: str, shares: int, cost_price: float,
         buy_date: str, strategy: str, score: float = 0.0,
-        stop_price: float | None = None,
+        stop_price: float | None = None, peak_price: float | None = None,
     ) -> None:
         """新增/覆盖持仓（同代码重复买入时摊薄成本由调用方算好传入）。"""
         with self._lock, self._connect() as conn:
             conn.execute(
                 "INSERT INTO paper_positions(code, name, shares, cost_price,"
-                " buy_date, strategy, score, stop_price, created_at)"
-                " VALUES(?,?,?,?,?,?,?,?,?)"
+                " buy_date, strategy, score, stop_price, peak_price, created_at)"
+                " VALUES(?,?,?,?,?,?,?,?,?,?)"
                 " ON CONFLICT(code) DO UPDATE SET name=excluded.name,"
                 " shares=excluded.shares, cost_price=excluded.cost_price,"
                 " buy_date=excluded.buy_date, strategy=excluded.strategy,"
-                " score=excluded.score, stop_price=excluded.stop_price",
+                " score=excluded.score, stop_price=excluded.stop_price,"
+                " peak_price=excluded.peak_price",
                 (code, name, shares, cost_price, buy_date, strategy, score,
-                 stop_price, _now()),
+                 stop_price, peak_price, _now()),
+            )
+
+    def update_paper_peak(self, code: str, peak_price: float) -> None:
+        """更新持仓期最高价（移动/保本止损跟踪用）。"""
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                "UPDATE paper_positions SET peak_price=? WHERE code=?",
+                (peak_price, code),
             )
 
     def count_paper_trades(
@@ -586,6 +647,197 @@ class Database:
     def remove_paper_position(self, code: str) -> None:
         with self._lock, self._connect() as conn:
             conn.execute("DELETE FROM paper_positions WHERE code=?", (code,))
+
+    # ---------------- 持仓批次（做T / 严格 T+1：每批带 buy_date 算可卖） ----------------
+    def _aggregate_paper_summary(self, conn, code: str) -> bool:
+        """从 lots 聚合汇总行的 shares/cost_price/buy_date；无批次则删汇总行。返回是否仍有持仓。"""
+        lots = conn.execute(
+            "SELECT shares, cost_price, buy_date FROM paper_position_lots WHERE code=?",
+            (code,),
+        ).fetchall()
+        if not lots:
+            conn.execute("DELETE FROM paper_positions WHERE code=?", (code,))
+            return False
+        total_shares = sum(int(r["shares"]) for r in lots)
+        total_cost = sum(int(r["shares"]) * float(r["cost_price"]) for r in lots)
+        agg_cost = (total_cost / total_shares) if total_shares else 0.0
+        max_buy = max(str(r["buy_date"]) for r in lots)
+        conn.execute(
+            "UPDATE paper_positions SET shares=?, cost_price=?, buy_date=? WHERE code=?",
+            (total_shares, round(agg_cost, 4), max_buy, code),
+        )
+        return True
+
+    def _refresh_paper_sellable(self, conn, code: str, today: str) -> int:
+        row = conn.execute(
+            "SELECT COALESCE(SUM(shares),0) AS s FROM paper_position_lots "
+            "WHERE code=? AND buy_date < ?",
+            (code, today),
+        ).fetchone()
+        sellable = int(row["s"]) if row else 0
+        conn.execute(
+            "UPDATE paper_positions SET sellable_shares=? WHERE code=?",
+            (sellable, code),
+        )
+        return sellable
+
+    def add_paper_lot(
+        self, code: str, name: str, shares: int, cost_price: float,
+        buy_date: str, strategy: str, score: float = 0.0,
+        stop_price: float | None = None, peak_price: float | None = None,
+        today: str | None = None, tag: str = "base",
+    ) -> None:
+        """新增一个买入批次（开仓 / 做T加仓 / 做T买回都走这里；buy_date=当日→次日可卖）。"""
+        today = today or datetime.now().strftime("%Y-%m-%d")
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                "INSERT INTO paper_position_lots(code, shares, cost_price, buy_date, tag, created_at)"
+                " VALUES(?,?,?,?,?,?)",
+                (code, shares, cost_price, buy_date, tag, _now()),
+            )
+            exists = conn.execute(
+                "SELECT 1 FROM paper_positions WHERE code=?", (code,)
+            ).fetchone()
+            if exists:
+                self._aggregate_paper_summary(conn, code)
+            else:
+                conn.execute(
+                    "INSERT INTO paper_positions(code,name,shares,cost_price,buy_date,"
+                    " strategy,score,stop_price,peak_price,sellable_shares,created_at)"
+                    " VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+                    (code, name, shares, round(cost_price, 4), buy_date,
+                     strategy, score, stop_price, peak_price, 0, _now()),
+                )
+            conn.execute(
+                "UPDATE paper_positions SET name=?, strategy=?, score=?, "
+                "stop_price=?, peak_price=? WHERE code=?",
+                (name, strategy, score, stop_price, peak_price, code),
+            )
+            self._refresh_paper_sellable(conn, code, today)
+
+    def reduce_paper_lots_by_tag(
+        self, code: str, tag: str, want_shares: int, today: str
+    ) -> int:
+        """从指定 tag 的可卖批次（buy_date<today，FIFO）减仓，返回实际卖出股数。
+
+        用于做T反弹减仓：只卖「做T加仓」批次（t_add），不误伤底仓。
+        """
+        if want_shares <= 0:
+            return 0
+        with self._lock, self._connect() as conn:
+            lots = conn.execute(
+                "SELECT id, shares FROM paper_position_lots "
+                "WHERE code=? AND tag=? AND buy_date < ? ORDER BY buy_date, id",
+                (code, tag, today),
+            ).fetchall()
+            remaining = int(want_shares)
+            sold = 0
+            for lot in lots:
+                if remaining <= 0:
+                    break
+                take = min(int(lot["shares"]), remaining)
+                new_shares = int(lot["shares"]) - take
+                if new_shares <= 0:
+                    conn.execute("DELETE FROM paper_position_lots WHERE id=?", (lot["id"],))
+                else:
+                    conn.execute(
+                        "UPDATE paper_position_lots SET shares=? WHERE id=?",
+                        (new_shares, lot["id"]),
+                    )
+                remaining -= take
+                sold += take
+            self._aggregate_paper_summary(conn, code)
+            self._refresh_paper_sellable(conn, code, today)
+            return sold
+
+    def reduce_paper_sellable(self, code: str, want_shares: int, today: str) -> int:
+        """从可卖批次（buy_date<today，FIFO 最老先卖）减仓，返回实际卖出股数；刷新汇总与可卖。"""
+        if want_shares <= 0:
+            return 0
+        with self._lock, self._connect() as conn:
+            lots = conn.execute(
+                "SELECT id, shares FROM paper_position_lots WHERE code=? AND buy_date < ? "
+                "ORDER BY buy_date, id",
+                (code, today),
+            ).fetchall()
+            remaining = int(want_shares)
+            sold = 0
+            for lot in lots:
+                if remaining <= 0:
+                    break
+                take = min(int(lot["shares"]), remaining)
+                new_shares = int(lot["shares"]) - take
+                if new_shares <= 0:
+                    conn.execute("DELETE FROM paper_position_lots WHERE id=?", (lot["id"],))
+                else:
+                    conn.execute(
+                        "UPDATE paper_position_lots SET shares=? WHERE id=?",
+                        (new_shares, lot["id"]),
+                    )
+                remaining -= take
+                sold += take
+            self._aggregate_paper_summary(conn, code)
+            self._refresh_paper_sellable(conn, code, today)
+            return sold
+
+    def list_paper_lots(self, code: str | None = None) -> list[dict[str, Any]]:
+        with self._lock, self._connect() as conn:
+            if code:
+                rows = conn.execute(
+                    "SELECT * FROM paper_position_lots WHERE code=? ORDER BY id", (code,)
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM paper_position_lots ORDER BY code, id"
+                ).fetchall()
+        return [dict(r) for r in rows]
+
+    def ensure_lots_migrated(self, today: str | None = None) -> None:
+        """批次模型兼容：把尚无批次的现有持仓补建为一个批次（买入日沿用）。幂等。
+
+        在 engine 切换到批次卖出逻辑后、首次启动时调用一次，避免历史持仓因无 lot 而无法卖出。
+        """
+        today = today or datetime.now().strftime("%Y-%m-%d")
+        with self._lock, self._connect() as conn:
+            rows = conn.execute(
+                "SELECT code, shares, cost_price, buy_date FROM paper_positions"
+            ).fetchall()
+            for r in rows:
+                code = r["code"]
+                has = conn.execute(
+                    "SELECT 1 FROM paper_position_lots WHERE code=?", (code,)
+                ).fetchone()
+                if has:
+                    self._refresh_paper_sellable(conn, code, today)
+                    continue
+                conn.execute(
+                    "INSERT INTO paper_position_lots(code, shares, cost_price, buy_date, created_at)"
+                    " VALUES(?,?,?,?,?)",
+                    (code, int(r["shares"]), float(r["cost_price"]), str(r["buy_date"]), _now()),
+                )
+                self._refresh_paper_sellable(conn, code, today)
+
+    def update_paper_t_state(
+        self, code: str,
+        t_t_sold: int | None = None,
+        t_down_armed: int | None = None,
+    ) -> None:
+        """更新做T状态字段（倒T/涨停卖半待买回股数、下跌加仓触发标记）。"""
+        sets: list[str] = []
+        vals: list[Any] = []
+        if t_t_sold is not None:
+            sets.append("t_t_sold=?")
+            vals.append(int(t_t_sold))
+        if t_down_armed is not None:
+            sets.append("t_down_armed=?")
+            vals.append(int(t_down_armed))
+        if not sets:
+            return
+        vals.append(code)
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                "UPDATE paper_positions SET " + ",".join(sets) + " WHERE code=?", vals
+            )
 
     def insert_paper_trade(
         self, code: str, name: str, side: str, price: float, shares: int,

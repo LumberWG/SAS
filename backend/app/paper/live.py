@@ -298,6 +298,9 @@ class LiveTrader:
         # 1) 实时止盈止损（T+1 由 engine 内部拦截）
         stop_trades = await self.engine.check_stop_loss_target(prices)
 
+        # 1.5) 做T引擎（默认关闭；开启后按 T+1 多批次做T）
+        t_trades = await self.engine.t_tick(prices)
+
         # 2) 队列信号：第 3 次排序——卖出优先，其余按评分从高到低
         # 买入只在开盘窗口成交：窗口外只跑卖出，买单继续挂着等下一个开盘（不出队）。
         # 回测按「次日开盘价」成交，实盘此前在盘中分析时刻（如 13:01）按实时价
@@ -356,7 +359,7 @@ class LiveTrader:
             if code in held or code in traded:
                 self._backlog.pop(code, None)
 
-        self._executed += len(executed) + len(stop_trades)
+        self._executed += len(executed) + len(stop_trades) + len(t_trades)
         trades = [
             {
                 "code": t.code, "name": t.name, "side": t.side,
@@ -364,7 +367,7 @@ class LiveTrader:
                 "fee": t.fee, "reason": t.reason,
                 "time": now.strftime("%H:%M:%S"),
             }
-            for t in [*stop_trades, *executed]
+            for t in [*stop_trades, *t_trades, *executed]
         ]
         if trades:
             self._last_trades = (trades + self._last_trades)[:_MAX_RECENT_TRADES]
