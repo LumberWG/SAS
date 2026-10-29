@@ -58,6 +58,9 @@ class PendingSignal:
     expire_at: datetime
     price_at_signal: float | None = None
     score: float = 0.0               # 第 2 次排序总分（用于第 3 次排序与仓位权重）
+    #: ⑤ 回踩确认：tick 期间是否曾触及「信号价 ×(1-pullback)」。置位后不再要求
+    #: 成交时刻价格仍在回踩线下方（避免反弹一次就永久错过）。
+    armed: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -244,6 +247,26 @@ class LiveTrader:
                 return self._buy_window(day)
         return now + timedelta(days=1)
 
+    def _mark_armed(self, prices: dict[str, float]) -> None:
+        """⑤ 回踩确认：待执行买单期间现价曾触及「信号价×(1-pullback)」即置位。
+
+        没有这一步，``paper_entry_pullback`` 会退化成「成交时刻必须仍在回踩线下方」，
+        价格反弹一次就永久错过（回测里对应分钟窗口的「曾触及」口径）。
+        """
+        pullback = float(getattr(self.settings, "paper_entry_pullback", 0.0) or 0.0)
+        if pullback <= 0:
+            return
+        for signal in [*self._pending.values(), *self._backlog.values()]:
+            if signal.action != "buy" or signal.armed or not signal.price_at_signal:
+                continue
+            px = prices.get(signal.code)
+            if px and px <= signal.price_at_signal * (1 - pullback):
+                signal.armed = True
+                logger.info(
+                    "回踩确认 %s：现价 %.2f ≤ 阈值 %.2f，放开买入",
+                    signal.code, px, signal.price_at_signal * (1 - pullback),
+                )
+
     def _expiry(self, now: datetime, action: str = "") -> datetime:
         """信号有效期：盘中 N 分钟；非交易时段顺延到下一个开盘后计时。
 
@@ -364,6 +387,8 @@ class LiveTrader:
         # 回测按「次日开盘价」成交，实盘此前在盘中分析时刻（如 13:01）按实时价
         # 一把买入，系统性买高 —— 2 天 17 笔成交 vs 回测同区间 3 笔（记录 #19）。
         in_window = self._in_buy_window(now)
+        # ⑤ 回踩确认：用 tick 价累积最低价，触及回踩线即放开买入
+        self._mark_armed(prices)
         ordered = sorted(
             self._pending.values(),
             key=lambda s: (s.action != "sell", -s.score),
@@ -379,6 +404,7 @@ class LiveTrader:
                 score=s.score,
                 # ⑤ 切入点判定要用信号价（不追高/回踩），丢了就只能裸价成交
                 price=s.price_at_signal,
+                entry_armed=s.armed,
             )
             for s in ordered
         ]
@@ -395,13 +421,18 @@ class LiveTrader:
                         code=signal.code, name=signal.name, action=signal.action,
                         reason=signal.reason, score=signal.score,
                         price=signal.price_at_signal,
+                        entry_armed=signal.armed,
                     ))
 
         results = await self.engine.execute_recommendations(recs, prices=prices)
 
         # 未成交出队策略：只有「取价失败」保留重试，其余（已持仓/已满/资金不足/
         # T+1）本轮确定无法成交，直接出队，避免每个 tick 反复尝试。
-        retry = {r.code for r in results if r.side == "skip" and r.reason == "取价失败"}
+        # 「等待回踩」也保留重试：回踩确认是 tick 累积出来的，早晚可能满足
+        retry = {
+            r.code for r in results
+            if r.side == "skip" and (r.reason == "取价失败" or r.reason.startswith("等待回踩"))
+        }
         executed = [r for r in results if r.side != "skip"]
 
         # 五段式④⑤的可观测性：本轮被判定规则/切入点拒掉的买入原因

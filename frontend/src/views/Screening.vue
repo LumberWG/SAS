@@ -9,6 +9,7 @@ import { AlertCircle, CheckCircle2, Clock, Database, Play, Search, Square, Trend
 
 import {
   addWatch,
+  getWatchlist,
   getLatestScan,
   getScanTask,
   getStrategies,
@@ -31,6 +32,17 @@ const router = useRouter()
 const strategies = ref<StrategyInfo[]>([])
 const scopes = ref<ScanScope[]>([])
 const todayHits = ref<Record<string, number>>({})
+// 已在自选股里的代码（二选结果）：用于在股票池里标注「已进自选 / 未进」
+const watchCodes = ref<string[]>([])
+
+async function loadWatchCodes() {
+  try {
+    const data = await getWatchlist()
+    watchCodes.value = data.items.map((it) => it.code)
+  } catch {
+    watchCodes.value = []
+  }
+}
 const selected = ref<string[]>([])
 const scope = ref('top_amount:500')
 const task = ref<ScanTask | null>(null)
@@ -216,8 +228,11 @@ function startPolling(taskId: string) {
         stopPolling()
         stopTicker()
         loadKlineStatus()
-        // 完成后继续低频刷新：价格/涨跌幅随行情更新，不必重新扫描
-        if (t.status === 'done') startQuoteRefresh(taskId)
+        // 扫描完成时后端已执行「二选」（命中 Top N 自动加自选），刷新标注
+        if (t.status === 'done') {
+          void loadWatchCodes()
+          startQuoteRefresh(taskId)
+        }
       }
     } catch {
       misses += 1
@@ -300,6 +315,7 @@ function goDetail(hit: ScanHit) {
 async function addToWatch(hit: ScanHit) {
   try {
     await addWatch(hit.code)
+    void loadWatchCodes()
     toast(`已将 ${hit.name} 加入自选`)
   } catch (e: unknown) {
     const status = (e as { response?: { status?: number } })?.response?.status
@@ -329,7 +345,12 @@ function fmtDuration(seconds: number | null): string {
 }
 
 onMounted(async () => {
-  await Promise.all([loadStrategies(), restoreLatest(), loadKlineStatus()])
+  await Promise.all([
+    loadStrategies(),
+    restoreLatest(),
+    loadKlineStatus(),
+    loadWatchCodes(),
+  ])
 })
 </script>
 
@@ -517,6 +538,7 @@ onMounted(async () => {
       <ScanResultTable
         v-if="task && task.hits.length > 0"
         :hits="task.hits"
+        :watch-codes="watchCodes"
         @go-detail="goDetail"
         @add-watch="addToWatch"
       />

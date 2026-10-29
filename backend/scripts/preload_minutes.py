@@ -29,6 +29,7 @@ import argparse
 import os
 import socket
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -73,9 +74,11 @@ DISABLE_TTL = 180.0    # 熔断冷却（秒）：冷却后自动重连恢复，�
 MAX_NET_ERR = 6        # 单只连续网络错误上限：超过则放弃该只（记失败），避免一个坏连接拖死一片
 SOCKS_HOST = "127.0.0.1"
 SOCKS_PORT = 7891      # Forest 的 SOCKS 端口
-SOCK_TIMEOUT = 90.0    # socket 读写超时（秒）。必须有：Baostock 读取循环在连接被代理断开后
-                       # 不会退出（recv 立刻返回空 → 死循环空转 100% CPU、永不返回），
-                       # 加了超时才会抛异常，脚本才能捕获并换下一只/重连。
+SOCK_TIMEOUT = 75.0   # socket 读写超时（秒），已真正注入到 PySocks（见 setup_socks_proxy）。
+                       # 必须有：Baostock 的 send_msg 是 `while True: recv()`，
+                       # 连接被断开后 recv 返回空字节 → 死循环空转 100% CPU、永不返回。
+HARD_TIMEOUT = 120.0   # 单次请求的「硬」超时（秒）：起独立线程跑请求，超时就强关 socket 解阻塞。
+                       # 这是第二道保险 —— socket 层超时偶尔仍会因为 EOF 空转而失效。
 DIRECT_TIMEOUT = 30.0  # 直连时的 socket 超时：直连链路短，30s 还没回就该换段重试了
 START_DEFAULT = "2025-01-01"  # 默认起始日期：只抓 2025 年以后的数据（可用 --start 覆盖）
 
@@ -183,6 +186,63 @@ def is_net_error(code: str, msg: str) -> bool:
     return any(t.lower() in s for t in NET_ERR_TOKENS)
 
 
+_ORIG_SOCKET_CLS = socket.socket  # 补丁前的原始 socket 类（PySocks 不吃 setdefaulttimeout）
+
+
+def _force_close_bs_socket() -> None:
+    """强制关闭 baostock 的全局连接，用来解除阻塞中的 recv/send。
+
+    Baostock 的 send_msg 是 `while True: recv(8192)`，代理挂住或对端半关闭时
+    这个循环会永远不返回；从另一个线程 close 掉 socket，recv 立刻抛错跳出。
+    """
+    try:
+        import baostock.common.context as _ctx
+    except Exception:  # noqa: BLE001
+        return
+    s = getattr(_ctx, "default_socket", None)
+    if s is None:
+        return
+    try:
+        s.shutdown(socket.SHUT_RDWR)
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        s.close()
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        _ctx.default_socket = None
+    except Exception:  # noqa: BLE001
+        pass
+
+
+def _timed_call(fn, timeout: float = HARD_TIMEOUT, label: str = "请求"):
+    """在独立线程里执行 fn，超时则强关 baostock socket 并抛 TimeoutError。
+
+    为什么需要：PySocks + baostock 的 recv 死循环组合下，socket 层超时并不能保证
+    一定返回（对端半关闭时 recv 直接返回 b""，循环空转、永不超时）。这层硬超时是
+    最后的保险，代价是一次请求最多浪费 timeout 秒。
+    """
+    box: dict = {}
+
+    def _run():
+        try:
+            box["v"] = fn()
+        except BaseException as e:  # noqa: BLE001
+            box["e"] = e
+
+    th = threading.Thread(target=_run, daemon=True)
+    th.start()
+    th.join(timeout)
+    if th.is_alive():
+        _force_close_bs_socket()
+        th.join(5.0)
+        raise TimeoutError(f"{label} 硬超时 {timeout:.0f}s（已强制关闭连接）")
+    if "e" in box:
+        raise box["e"]
+    return box.get("v")
+
+
 def setup_socks_proxy(host: str = SOCKS_HOST, port: int = SOCKS_PORT) -> bool:
     """让 Baostock 的原生 socket 走 Forest 的 SOCKS5 代理。
 
@@ -192,10 +252,31 @@ def setup_socks_proxy(host: str = SOCKS_HOST, port: int = SOCKS_PORT) -> bool:
     try:
         import socks
         socks.set_default_proxy(socks.SOCKS5, host, port)
-        # 关键：全局 socket 超时。否则 Forest/代理断开后 baostock 的 recv 会一直返回空，
-        # 读取循环变成 100% CPU 死循环且永不返回（实测分片会整片卡死）。
+
+        # 【关键坑】PySocks 的 socksocket 有自己的 _timeout 属性，默认 None，
+        # 且它 **不读 socket.setdefaulttimeout()**（connect 时用的是 self._timeout）。
+        # 结果：socket.setdefaulttimeout(90) 形同虚设，代理一断 recv 就永久阻塞，
+        # 整个分片挂死、日志停更（21:36 那次卡死就是这么来的）。
+        # 唯一解法：子类化并强制把 _timeout 写成我们的超时值。
+        class _TimedSocksSocket(socks.socksocket):
+            def __init__(self, *a, **kw):
+                super().__init__(*a, **kw)
+                self._timeout = SOCK_TIMEOUT
+                try:
+                    _ORIG_SOCKET_CLS.settimeout(self, SOCK_TIMEOUT)
+                except Exception:  # noqa: BLE001
+                    pass
+
+            def settimeout(self, t):
+                # PySocks 内部 setblocking(True) 会调 settimeout(None) 关掉超时，
+                # 这里把 None 视作「恢复默认超时」，避免超时被悄悄清掉。
+                super().settimeout(SOCK_TIMEOUT if t is None else t)
+
+            def setblocking(self, v):
+                super().settimeout(SOCK_TIMEOUT)
+
         socket.setdefaulttimeout(SOCK_TIMEOUT)
-        socket.socket = socks.socksocket
+        socket.socket = _TimedSocksSocket
         log(f"已启用 SOCKS5 代理: {host}:{port}（Baostock 流量将经 Forest 出网，socket 超时 {SOCK_TIMEOUT:.0f}s）")
         return True
     except Exception as _e:  # noqa: BLE001
@@ -301,7 +382,7 @@ def relogin(max_try: int = 3) -> bool:
         pass
     for k in range(max_try):
         try:
-            lg = bs.login()
+            lg = _timed_call(bs.login, HARD_TIMEOUT, "重新登录")
             if getattr(lg, "error_code", "1") == "0":
                 return True
             ec, em = getattr(lg, "error_code", "?"), getattr(lg, "error_msg", "")
@@ -344,11 +425,14 @@ def fetch_baostock(code: str, start: str, end: str, period: str, sleep: float) -
         nxt = min(cur + pd.Timedelta(days=SEG_DAYS), end_ts)
         s, e = cur.strftime("%Y-%m-%d"), nxt.strftime("%Y-%m-%d")
         try:
-            rs = bs.query_history_k_data_plus(
-                bcode,
-                "date,time,code,open,high,low,close,volume,amount",
-                start_date=s, end_date=e,
-                frequency=str(period), adjustflag="3",
+            rs = _timed_call(
+                lambda: bs.query_history_k_data_plus(
+                    bcode,
+                    "date,time,code,open,high,low,close,volume,amount",
+                    start_date=s, end_date=e,
+                    frequency=str(period), adjustflag="3",
+                ),
+                HARD_TIMEOUT, f"{code} 段 {s}~{e}",
             )
             if rs.error_code != "0":
                 # 【关键】任何非零 error_code 都必须记成「出过错」= 算抓取失败。
@@ -384,7 +468,7 @@ def fetch_baostock(code: str, start: str, end: str, period: str, sleep: float) -
                 continue
             seg_err = 0
             net_err = 0
-            df = rs.get_data()
+            df = _timed_call(rs.get_data, HARD_TIMEOUT, f"{code} 段 {s}~{e} 取数")
         except Exception as _e:  # 网络/限频异常（含 socket 超时）：重连后重试本段
             err_hit = True
             seg_err += 1
@@ -428,14 +512,17 @@ def probe_last_minute_date(period: str = "5") -> "str | None":
     start = (today - pd.Timedelta(days=20)).strftime("%Y-%m-%d")
     for code in ("sz.000001", "sh.600000"):
         try:
-            rs = bs.query_history_k_data_plus(
-                code, "date,time,close",
-                start_date=start, end_date=today.strftime("%Y-%m-%d"),
-                frequency=str(period), adjustflag="3",
+            rs = _timed_call(
+                lambda: bs.query_history_k_data_plus(
+                    code, "date,time,close",
+                    start_date=start, end_date=today.strftime("%Y-%m-%d"),
+                    frequency=str(period), adjustflag="3",
+                ),
+                HARD_TIMEOUT, f"探测 {code}",
             )
             if getattr(rs, "error_code", "1") != "0":
                 continue
-            df = rs.get_data()
+            df = _timed_call(rs.get_data, HARD_TIMEOUT, f"探测 {code} 取数")
             if df is not None and not df.empty:
                 return str(df["date"].iloc[-1])
         except Exception:  # noqa: BLE001
@@ -475,16 +562,26 @@ def main() -> None:
         socket.setdefaulttimeout(DIRECT_TIMEOUT)  # 直连也要超时，防止 recv 空转死循环
         log(f"直连 Baostock（未走代理），socket 超时 {DIRECT_TIMEOUT:.0f}s；如需代理请加 --proxy")
 
-    # 登录 Baostock（无需 token）—— 同时充当连通性探针
-    try:
-        lg = bs.login()
-        if lg.error_code != "0":
-            log(f"Baostock 登录失败: {lg.error_code} {lg.error_msg}（请确认 Forest 代理已开且 baostock.com 走 Proxy）")
-            sys.exit(3)
-        log("Baostock 登录成功（连通性探针 OK）")
-    except Exception as _e:
-        log(f"Baostock 登录异常: {type(_e).__name__}: {_e}")
-        log("  -> 请确认 Forest 代理已开启、SOCKS 端口 7891 在监听，且已在 Forest 规则中把 baostock.com 指向 Proxy。")
+    # 登录 Baostock（无需 token）—— 同时充当连通性探针。
+    # 必须带重试：代理节点偶尔抽风 1~2 次就恢复，直接 sys.exit 会让整个分片白白退出。
+    login_ok = False
+    for attempt in range(1, 6):
+        try:
+            lg = _timed_call(bs.login, HARD_TIMEOUT, "登录")
+            if lg.error_code == "0":
+                log("Baostock 登录成功（连通性探针 OK）")
+                login_ok = True
+                break
+            if is_ban_error(lg.error_code, lg.error_msg):
+                mark_banned(lg.error_code, lg.error_msg)
+                sys.exit(3)
+            log(f"  [WARN] Baostock 登录失败({attempt}/5): {lg.error_code} {lg.error_msg}")
+        except Exception as _e:  # noqa: BLE001
+            log(f"  [WARN] Baostock 登录异常({attempt}/5): {type(_e).__name__}: {str(_e)[:120]}")
+        _force_close_bs_socket()  # 清掉半死连接，下次登录重新建
+        time.sleep(min(30.0, 5.0 * attempt))
+    if not login_ok:
+        log("Baostock 连续 5 次登录失败 —— 请确认 Forest 代理已开启、SOCKS 端口 7891 在监听。")
         sys.exit(3)
 
     # 夹住结束日期：Baostock 分钟线常滞后 1 个交易日，而 kline 会先更新到「今天」。
@@ -541,9 +638,12 @@ def main() -> None:
         ex_last = existing_last_date(code, odir)
         if ex_last and ex_last >= s:
             s = (pd.Timestamp(ex_last) + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
-        if s > e:  # 已有文件已覆盖到目标末尾
+        if s > e:  # 已有文件已覆盖到目标末尾（或该股在起始日期前就退市/停牌，本就没有 2025 年后的数据）
             state["skip"] += 1
-            log(f"- {code} 跳过（已有缓存已覆盖至 {ex_last}）")
+            if ex_last:
+                log(f"- {code} 跳过（已有缓存已覆盖至 {ex_last}）")
+            else:
+                log(f"- {code} 跳过（该股 {e} 后无行情，区间内无数据）")
             continue
         if already_cached(code, s, e, odir):
             state["skip"] += 1

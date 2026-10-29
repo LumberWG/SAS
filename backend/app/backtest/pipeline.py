@@ -164,6 +164,11 @@ class PipelineParams:
     #: ⑤ 回踩：要求次日开盘价 ≤ 信号日收盘 × (1 − entry_pullback)，即**低开才买**。
     #: 0/None = 不要求回踩（照价买，线上旧行为）。
     entry_pullback: float | None = None
+    #: ⑤ 分钟级切入点窗口（分钟）：需同时开 ``intraday_minutes``。设了以后买入不再用开盘价
+    #: 一次性成交，而是扫描开盘后前 N 分钟的 5 分钟收盘价：
+    #: ``entry_pullback>0`` 时要求**窗口内曾回踩**到 ``信号价×(1-pullback)``，以首次触及价成交；
+    #: 未触及则放弃（当天不买）。线上对应「tick 累积最低价、触及回踩线后放开买入」。
+    entry_window_minutes: int | None = None
 
 
 def calc_fee(side: str, amount: float) -> float:
@@ -855,12 +860,31 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
             # E2：高开太多不追（次日开盘涨幅上限），缺席即沿用线上「照价买入」
             if params.max_open_gain is not None and pc and px / pc - 1 > params.max_open_gain:
                 continue
-            # ⑤ 切入点：不追高（信号价≈前收）与回踩要求，与线上 entry_price_ok 同口径
-            if params.entry_max_chase is not None and pc and px / pc - 1 > params.entry_max_chase:
-                continue
-            if params.entry_pullback and pc and px > pc * (1 - float(params.entry_pullback)):
-                continue
-            px = px * (1 + slippage)   # E39：买入按不利方向滑点成交（股数按滑点后价格算）
+            # ⑤ 切入点：日K 粒度（不追高 + 回踩）或分钟级窗口（等回踩、以触及价成交）
+            fill_px = px
+            minute_window = int(params.entry_window_minutes or 0)
+            if params.intraday_minutes and minute_window > 0 and pc:
+                bars = get_minute_prices(code, date, "5", local_only=True)
+                if bars:
+                    target = pc * (1 - float(params.entry_pullback or 0.0))
+                    fill_px = None
+                    for bar_px in bars[: max(1, minute_window // 5)]:
+                        if (params.entry_max_chase is not None
+                                and float(bar_px) / pc - 1 > params.entry_max_chase):
+                            continue      # 这一刻在追高，不算切入点
+                        if params.entry_pullback and float(bar_px) > target:
+                            continue      # 还没回踩到位，继续等
+                        fill_px = float(bar_px)
+                        break
+                    if fill_px is None:
+                        continue          # 窗口内没等到切入点，当天不买
+            else:
+                if (params.entry_max_chase is not None and pc
+                        and px / pc - 1 > params.entry_max_chase):
+                    continue
+                if params.entry_pullback and pc and px > pc * (1 - float(params.entry_pullback)):
+                    continue
+            px = fill_px * (1 + slippage)   # E39：买入按不利方向滑点成交（股数按滑点后价格算）
             budget = min(
                 pool_budget * weight / weight_total if weight_total else 0,
                 total_asset * single_ratio, cash, pool_budget,
@@ -900,7 +924,8 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
         # 开启 intraday_minutes 且取到真实分钟线时改用分钟序列（按时间顺序，成交价取分钟价）。
         def intraday_series(code, date, open_px, low, high, close_px):
             if params.intraday_minutes:
-                ms = get_minute_prices(code, date, "5")
+                # 只读本地缓存：联网取数会让同一参数的结果随时间漂移（不可复现）
+                ms = get_minute_prices(code, date, "5", local_only=True)
                 if ms:
                     return ms, True
             seq = [x for x in (open_px, low, high, close_px) if x is not None]
@@ -1146,6 +1171,7 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
             "queue_top_m": params.queue_top_m,
             "entry_max_chase": params.entry_max_chase,
             "entry_pullback": params.entry_pullback,
+            "entry_window_minutes": params.entry_window_minutes,
             "max_gain_5d": params.max_gain_5d,
             "min_volume_ratio": params.min_volume_ratio,
             "min_turnover_rate": params.min_turnover_rate,

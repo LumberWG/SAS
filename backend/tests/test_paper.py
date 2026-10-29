@@ -574,8 +574,22 @@ class TestEntryPoint:
         monkeypatch.setattr(eng.settings, "paper_entry_pullback", 0.02, raising=False)
 
         ok, why = eng.entry_price_ok(self._rec(), 10.0, 10.0)
-        assert ok is False and "未回踩" in why
+        assert ok is False and "回踩" in why
         assert eng.entry_price_ok(self._rec(), 9.7, 10.0)[0] is True
+
+    def test_armed_allows_rebound(self, engine, monkeypatch):
+        """曾触及回踩线后（armed），价格反弹也能买，只受不追高约束。"""
+        eng, _db, _prices = engine
+        monkeypatch.setattr(eng.settings, "paper_entry_max_chase", 0.015, raising=False)
+        monkeypatch.setattr(eng.settings, "paper_entry_pullback", 0.02, raising=False)
+
+        # 未 armed：10.05 未回踩到 9.8，等回踩
+        assert eng.entry_price_ok(self._rec(), 10.05, 10.0)[0] is False
+        # armed 后反弹到 10.05（未超过追高线 10.15）→ 允许
+        assert eng.entry_price_ok(self._rec(), 10.05, 10.0, armed=True)[0] is True
+        # armed 但已追高到 10.2 → 仍然拒绝
+        ok, why = eng.entry_price_ok(self._rec(), 10.2, 10.0, armed=True)
+        assert ok is False and "追高" in why
 
     def test_missing_signal_price_allows(self, engine, monkeypatch):
         """老信号没有信号价 → 只校验价格有效性，不做切入点限制。"""

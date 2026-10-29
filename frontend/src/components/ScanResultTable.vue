@@ -9,7 +9,15 @@ import type { ScanHit } from '../api'
 
 const props = defineProps<{
   hits: ScanHit[]
+  /** 已在自选股里的代码（二选结果）：用于标注「已进自选 / 未进」 */
+  watchCodes?: string[]
 }>()
+
+const watchSet = computed(() => new Set(props.watchCodes ?? []))
+/** 池内已进自选的数量（二选命中数） */
+const watchHitCount = computed(
+  () => grouped.value.filter((r) => watchSet.value.has(r.code)).length
+)
 
 const emit = defineEmits<{
   goDetail: [ScanHit]
@@ -201,7 +209,15 @@ function exportCsv() {
           <tr class="border-b border-base-600/60">
             <th class="px-4 py-2.5 font-medium">代码</th>
             <th class="px-4 py-2.5 font-medium">名称</th>
-            <th class="px-1 py-2.5 font-medium" title="加入自选股">自选</th>
+            <th
+              class="px-2 py-2.5 font-medium"
+              title="★ 已进自选（二选选中）；☆ 未进自选（仅留在股票池）"
+            >
+              自选
+              <span class="ml-1 font-num text-[10px] text-content-faint">
+                {{ watchHitCount }}/{{ grouped.length }}
+              </span>
+            </th>
             <th
               class="cursor-pointer px-3 py-2.5 text-right font-medium hover:text-content"
               title="第 1 次排序：技术面评分降序（同股并列同名次）"
@@ -246,13 +262,19 @@ function exportCsv() {
           >
             <td class="font-num px-4 py-2.5 text-content-muted">{{ row.code }}</td>
             <td class="px-4 py-2.5 font-medium text-content">{{ row.name }}</td>
-            <td class="px-1 py-2.5">
+            <td class="px-2 py-2.5">
+              <span v-if="watchSet.has(row.code)" class="inline-flex items-center gap-1">
+                <Star class="h-3.5 w-3.5 fill-current text-warn" title="已在自选股" />
+                <span class="text-[10px] text-warn">已进</span>
+              </span>
               <button
-                class="rounded p-1 text-content-faint transition-colors hover:text-warn"
-                title="加入自选股"
+                v-else
+                class="inline-flex items-center gap-1 rounded px-1 py-0.5 text-content-faint transition-colors hover:text-warn"
+                title="未进自选（仅留在股票池），点击加入自选"
                 @click.stop="emit('addWatch', row.best)"
               >
                 <Star class="h-3.5 w-3.5" />
+                <span class="text-[10px]">未进</span>
               </button>
             </td>
             <td class="px-3 py-2.5 text-right">

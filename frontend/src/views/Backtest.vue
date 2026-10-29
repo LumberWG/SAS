@@ -33,6 +33,7 @@ const form = reactive<Record<string, any>>({
   queue_top_m: null,
   entry_max_chase: null,
   entry_pullback: null,
+  entry_window_minutes: null,
   invert_score: null,
   stop_loss: null,
   take_profit: null,
@@ -112,6 +113,7 @@ const groups: { name: string; items: ParamDef[] }[] = [
     { key: 'queue_top_m', label: '交易队列topM', type: 'number', min: 0, max: 50, unit: '每日买单数' },
     { key: 'entry_max_chase', label: '不追高', type: 'number', step: 0.005, unit: '开盘溢价上限' },
     { key: 'entry_pullback', label: '回踩要求', type: 'number', step: 0.005, unit: '0=不限' },
+    { key: 'entry_window_minutes', label: '分钟级切入窗口', type: 'number', min: 5, max: 240, step: 5, unit: '需开分钟线' },
   ]},
   { name: '止损/止盈', items: [
     { key: 'stop_loss', label: '止损比例', type: 'number', min: 0.01, max: 0.5, step: 0.01, unit: '成本×' },

@@ -231,21 +231,27 @@ class PaperEngine:
         return True, ""
 
     def entry_price_ok(
-        self, rec, price: float | None, signal_price: float | None
+        self, rec, price: float | None, signal_price: float | None,
+        armed: bool | None = None,
     ) -> tuple[bool, str]:
         """五段式⑤ 切入点判定（取价后）：价格有效 + 不追高 + 回踩要求。
 
         - 不追高：``price > 信号价 × (1 + paper_entry_max_chase)`` 放弃；
-        - 回踩：``paper_entry_pullback > 0`` 时要求 ``price ≤ 信号价 × (1 - pullback)``；
+        - 回踩：``paper_entry_pullback > 0`` 时，要求价格**曾**触及 ``信号价×(1-pullback)``
+          （``armed=True`` 由 tick 累积最低价置位）。未触及时返回「等待回踩」而不是直接放弃，
+          否则价格反弹一次这个机会就永久消失；
         - 信号价缺失（老信号 / 手动信号）时只做价格有效性检查，不做切入点限制。
         """
         if price is None or price <= 0:
             return False, "取价失败"
         chase = float(getattr(self.settings, "paper_entry_max_chase", 0.0) or 0.0)
         pullback = float(getattr(self.settings, "paper_entry_pullback", 0.0) or 0.0)
+        if armed is None:
+            armed = bool(getattr(rec, "entry_armed", False))
         if signal_price and signal_price > 0:
-            if pullback > 0 and price > signal_price * (1 - pullback):
-                return False, f"未回踩（需低于信号价 {pullback:.1%}）"
+            if pullback > 0 and not armed:
+                if price > signal_price * (1 - pullback):
+                    return False, f"等待回踩（需低于信号价 {pullback:.1%}）"
             if chase > 0 and price > signal_price * (1 + chase):
                 return False, f"追高（高于信号价 {chase:.1%}）"
         return True, ""

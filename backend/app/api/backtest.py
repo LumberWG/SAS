@@ -58,6 +58,8 @@ class BacktestRequest(BaseModel):
     queue_top_m: int | None = Field(None, ge=0, le=50, description="交易队列买入容量 topM")
     entry_max_chase: float | None = Field(None, description="不追高：次日开盘涨幅上限")
     entry_pullback: float | None = Field(None, description="回踩：要求低开此比例才买（0=不限）")
+    entry_window_minutes: int | None = Field(
+        None, ge=5, le=240, description="分钟级切入点窗口（需 intraday_minutes；窗口内等回踩）")
     invert_score: bool | None = Field(None, description="反转选股：分数取反")
     # ---- 止损 / 止盈 ----
     stop_loss: float | None = Field(None, gt=0, le=0.5, description="止损比例（相对成本）")

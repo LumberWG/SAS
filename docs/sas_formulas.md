@@ -347,6 +347,7 @@ paper_position_lots(code, shares, cost_price, buy_date, tag)
 | `queue_top_m` | None | ③ 队列容量：每日买单笔数上限（按评分截断） |
 | `entry_max_chase` | None | ⑤ 不追高：次日开盘相对信号日收盘的涨幅上限 |
 | `entry_pullback` | None | ⑤ 回踩：要求次日开盘 ≤ 信号日收盘×(1−x)，即低开才买 |
+| `entry_window_minutes` | None | ⑤ **分钟级切入点**：需开 `intraday_minutes`；买入日开盘后前 N 分钟的 5 分钟收盘价里等回踩，以首次触及价成交，等不到则当天不买。只读本地 `data/minute5` 缓存（保证可复现） |
 | `breakeven_trigger / trail_pct / trail_arm` | None | 保本止损 / 移动止损（回测侧） |
 
 `_intraday_first_trigger(series, stop, tp, partial)` 返回首个触发的 `(type, price)`，
@@ -406,6 +407,11 @@ paper_position_lots(code, shares, cost_price, buy_date, tag)
 > 回测结论见 `BACKTEST_LOG` 记录 #52：**三条切入点规则在样本外无稳定增益，不作为收益来源**；
 > `queue_top_m` 对收益中性（作用是有界排队），`entry_max_chase` 保留为防追高的工程保护。
 > 统一对照脚本：`backend/scripts/five_stage_backtest.py`。
+>
+> ⑤ 的**分钟级切入点**（`entry_window_minutes` + 回踩）已实现并可回测，结论见记录 #54：
+> 等回踩再买表现为**逆向选择**（+20.63% → −12.74%/−20.42%/−9.59%），**默认关闭**
+> （`paper_entry_pullback=0`、`entry_window_minutes=None`）。对照脚本 `scripts/minute_entry_backtest.py`。
+> 线上回踩用 tick 累积「曾触及」置位（`PendingSignal.armed`），避免价格反弹一次就永久错过。
 
 **回测一致性要求**：3 个切入点参数与 topM 都必须进 `PipelineParams`（默认 `None`=线上值），
 否则线上改了、回测测不到，两边又不可比。采纳前须按「验收协议」做 ≥30 段不重叠抽样 + 两档滑点。
@@ -415,7 +421,7 @@ paper_position_lots(code, shares, cost_price, buy_date, tag)
 | 段 | 路由 | 页面 | 展示内容 |
 | --- | --- | --- | --- |
 | 概览 | `/dashboard` | 大盘概览 | 指数 / 涨跌家数 / 情绪 / 自选盯盘 |
-| ① 一选 | `/screening` | 股票池 | 全市场扫描参数、策略选择、命中结果（`signals`）与评分名次 |
+| ① 一选 | `/screening` | 股票池 | 全市场扫描参数、策略选择、命中结果（`signals`）、评分名次；**自选列标注「已进/未进」**（★ 已进自选=二选选中，表头显示 `已进/池内` 计数） |
 | ② 二选 | `/signals` | 自选股 | 程序自选（`source=auto`）+ 手动自选，14 因子排名入口 |
 | ③ 三选 | `/advisory` | 交易队列 | 自选股详细分析、买卖建议、评分分项明细 |
 | ④ 交易池 | `/paper-pool` | 交易池 | 自动/手动模式、撮合状态、待执行信号与候补队列（判定结果） |

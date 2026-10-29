@@ -46,10 +46,16 @@ def clear_minute_cache() -> None:
         _MINUTE_CACHE.clear()
 
 
-def get_minute_prices(code: str, date: str, period: str = _PERIOD) -> Optional[list[float]]:
+def get_minute_prices(
+    code: str, date: str, period: str = _PERIOD, *, local_only: bool = False
+) -> Optional[list[float]]:
     """返回 ``code`` 在 ``date`` 当日的分钟收盘价序列（按时间升序）。
 
     失败 / 无数据返回 ``None``（调用方回落日K 边界）。数据源短期熔断时直接返回 ``None``。
+
+    ``local_only=True`` 时**只读本地 ``data/minute5`` 缓存**，不联网。回测必须用它：
+    否则同一参数在不同时间点跑，会因「哪些票恰好联网抓到了分钟线」而结果不同
+    （实测同参数两次跑出 20.63% / 16.36%，不可复现）。
     """
     global _SOURCE_DISABLED
     if _SOURCE_DISABLED and (time.time() - _SOURCE_DISABLED_AT) < _DISABLE_TTL:
@@ -60,16 +66,20 @@ def get_minute_prices(code: str, date: str, period: str = _PERIOD) -> Optional[l
         try:
             ldf = pd.read_parquet(local)
             if ldf is not None and not ldf.empty and "date" in ldf.columns and "close" in ldf.columns:
-                lday = ldf[ldf["date"] == date]
+                # 缓存里的 date 是带时分的 timestamp（2025-01-02 09:35:00），
+                # 直接跟 "YYYY-MM-DD" 比会永远匹配不上 → 统一截到日期再比
+                lday = ldf[ldf["date"].astype(str).str.slice(0, 10) == date]
                 if not lday.empty:
                     return [float(x) for x in lday["close"].tolist()]
         except Exception:  # noqa: BLE001
             pass
+    if local_only:
+        return None
     # 降级到实时拉取（带缓存 + 熔断）
     df = _ensure_code(code, period)
     if df is None or df.empty:
         return None
-    day = df[df["date"] == date]
+    day = df[df["date"].astype(str).str.slice(0, 10) == date]
     if day.empty:
         return None
     return [float(x) for x in day["close"].tolist()]
