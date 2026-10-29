@@ -170,7 +170,7 @@ Restart-Service cpolar   # 管理员 PowerShell
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│ Vue3 前端（5 页面）  仪表盘 / 选股 / 个股 / 回测 / 信号自选   │
+│ Vue3 前端（五段式流水线）  ①股票池→②自选→③队列→④交易池→⑤成交 │
 └──────────────────────────┬──────────────────────────────────┘
                            │ REST (/api)
 ┌──────────────────────────▼──────────────────────────────────┐
@@ -374,7 +374,7 @@ nssm remove SAS confirm                # 卸载服务
 - **自动执行链路**：开盘 9:20 / 盘中每 5 分钟分析产生的买卖建议自动送入模拟盘；盘后 15:40 结算并记录净值
 - **关闭自动执行**：环境变量 `PAPER_AUTO_TRADE=false`（仅记录信号不成交）
 
-页面：导航「模拟交易」→ 账户收益率 / 资金分布 / 净值曲线 / 当前持仓 / 交易流水；`POST /api/paper/reset` 重置账户。
+页面：导航「④ 交易池」→ 交易模式 / 撮合状态 / 待执行信号 / 候补队列；「⑤ 持仓与成交」→ 账户收益率 / 资金分布 / 净值曲线 / 当前持仓 / 交易流水（手动模式下单也在这一页）；`POST /api/paper/reset` 重置账户。
 
 ## 代码更新流程（重要）
 
@@ -435,7 +435,7 @@ SAS/
 │   └── requirements.txt
 ├── frontend/
 │   ├── src/
-│   │   ├── views/             # Dashboard/Screening/StockDetail/Backtest/Signals
+│   │   ├── views/             # Dashboard/Screening/Signals/Advisory/PaperTrading/Backtest/StockDetail
 │   │   ├── components/        # KLineChart/MetricCard/ConclusionBadge/StrategyPanel/StrategyEditor/ScanResultTable
 │   │   ├── api/               # 接口封装
 │   │   ├── layouts/           # 侧边导航 + 顶栏布局

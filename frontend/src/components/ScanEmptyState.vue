@@ -84,7 +84,7 @@ const steps = ['勾选策略', '选择范围', '开始扫描']
         <span class="font-num font-semibold text-primary-light">{{ todayHitTotal }}</span>
         个，
         <router-link to="/signals" class="text-primary-light underline underline-offset-2">
-          前往「信号与自选」查看
+          前往「② 二选 · 自选股」查看
         </router-link>
       </p>
       <div class="flex flex-wrap items-center justify-center gap-2 text-[11px]">

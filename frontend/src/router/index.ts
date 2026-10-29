@@ -1,5 +1,13 @@
 /**
- * 路由定义：5 个功能页面，统一挂在 DefaultLayout 布局下。
+ * 路由定义：按「自动交易五段式」组织页面（见 docs/sas_formulas.md §8）。
+ *
+ *   ① 一选 · 股票池   /screening   全市场扫描 → 候选池
+ *   ② 二选 · 自选股   /signals     池内打分排序 → topN 关注
+ *   ③ 三选 · 交易队列 /advisory    详细分析 → topM 候选
+ *   ④ 交易池          /paper-pool  判定规则筛选（模式/队列/候补）
+ *   ⑤ 持仓与成交      /paper       账户、持仓、流水
+ *
+ * 概览与回测为辅助页，不属于流水线环节。
  */
 import { createRouter, createWebHistory } from 'vue-router'
 
@@ -19,7 +27,7 @@ const routes = [
         path: 'screening',
         name: 'screening',
         component: () => import('../views/Screening.vue'),
-        meta: { title: '选股中心', icon: 'Filter' },
+        meta: { title: '① 一选 · 股票池', stage: 1, icon: 'Filter' },
       },
       {
         path: 'stock/:code',
@@ -37,19 +45,27 @@ const routes = [
         path: 'signals',
         name: 'signals',
         component: () => import('../views/Signals.vue'),
-        meta: { title: '信号与自选', icon: 'Bell' },
+        meta: { title: '② 二选 · 自选股', stage: 2, icon: 'Bell' },
       },
       {
         path: 'advisory',
         name: 'advisory',
         component: () => import('../views/Advisory.vue'),
-        meta: { title: '智能建议', icon: 'Lightbulb' },
+        meta: { title: '③ 三选 · 交易队列', stage: 3, icon: 'Lightbulb' },
       },
       {
+        // ④ 交易池：判定规则生效的地方（模式/撮合状态 + 待执行队列 + 候补 + 手动下单）
+        path: 'paper-pool',
+        name: 'paper-pool',
+        component: () => import('../views/PaperTrading.vue'),
+        meta: { title: '④ 交易池', stage: 4, icon: 'Layers' },
+      },
+      {
+        // ⑤ 持仓与成交：账户、净值、持仓、流水
         path: 'paper',
         name: 'paper',
         component: () => import('../views/PaperTrading.vue'),
-        meta: { title: '模拟交易', icon: 'Wallet' },
+        meta: { title: '⑤ 持仓与成交', stage: 5, icon: 'Wallet' },
       },
     ],
   },

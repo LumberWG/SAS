@@ -9,6 +9,7 @@ import {
   Bell,
   Filter,
   History,
+  Layers,
   LayoutDashboard,
   Lightbulb,
   ShieldAlert,
@@ -23,14 +24,27 @@ const router = useRouter()
 const market = useMarketStore()
 const scopeStats = ref<ScopeStats | null>(null)
 
-// 按业务流程排序：概览 → ①扫描选股 → ②加入自选 → ③排序出建议 → ④自动交易/持仓 → 回测
-const navItems = [
-  { path: '/dashboard', title: '大盘概览', icon: LayoutDashboard },
-  { path: '/screening', title: '选股中心', icon: Filter },
-  { path: '/signals', title: '信号与自选', icon: Bell },
-  { path: '/advisory', title: '智能建议', icon: Lightbulb },
-  { path: '/paper', title: '模拟交易', icon: Wallet },
-  { path: '/backtest', title: '回测中心', icon: History },
+// 按「自动交易五段式」组织导航（docs/sas_formulas.md §8）：
+// 一选池 → 二选自选 → 三选队列 → 交易池 → 成交持仓，概览/回测为辅助。
+const navGroups = [
+  {
+    title: '概览',
+    items: [{ path: '/dashboard', title: '大盘概览', icon: LayoutDashboard }],
+  },
+  {
+    title: '交易流水线',
+    items: [
+      { path: '/screening', title: '① 一选 · 股票池', icon: Filter },
+      { path: '/signals', title: '② 二选 · 自选股', icon: Bell },
+      { path: '/advisory', title: '③ 三选 · 交易队列', icon: Lightbulb },
+      { path: '/paper-pool', title: '④ 交易池', icon: Layers },
+      { path: '/paper', title: '⑤ 持仓与成交', icon: Wallet },
+    ],
+  },
+  {
+    title: '复盘',
+    items: [{ path: '/backtest', title: '回测中心', icon: History }],
+  },
 ]
 
 // 顶栏时钟
@@ -68,6 +82,11 @@ onUnmounted(() => {
 })
 
 const statusText = computed(() => phase.value || (market.trading ? '交易中' : '已收盘'))
+
+// 个股详情是流水线里的下钻页，高亮到 ② 二选（自选股入口）
+const activePath = computed(() =>
+  route.path.startsWith('/stock/') ? '/signals' : route.path
+)
 </script>
 
 <template>
@@ -88,24 +107,31 @@ const statusText = computed(() => phase.value || (market.trading ? '交易中' :
         </div>
       </div>
 
-      <nav class="flex-1 space-y-1 px-3 py-4">
-        <router-link
-          v-for="item in navItems"
-          :key="item.path"
-          :to="item.path"
-          class="group flex items-center gap-3 rounded-lg px-3 py-2.5 text-[13px] font-medium transition-all duration-200"
-          :class="
-            route.path === item.path
-              ? 'bg-primary/15 text-primary-light shadow-[inset_0_0_0_1px_rgba(56,189,248,0.25)]'
-              : 'text-content-muted hover:bg-base-700/60 hover:text-content'
-          "
-        >
-          <component
-            :is="item.icon"
-            class="h-4 w-4 transition-transform group-hover:scale-110"
-          />
-          {{ item.title }}
-        </router-link>
+      <nav class="flex-1 space-y-4 overflow-y-auto px-3 py-4">
+        <div v-for="group in navGroups" :key="group.title" class="space-y-1">
+          <div
+            class="px-3 pb-1 text-[10px] font-semibold uppercase tracking-wider text-content-faint"
+          >
+            {{ group.title }}
+          </div>
+          <router-link
+            v-for="item in group.items"
+            :key="item.path"
+            :to="item.path"
+            class="group flex items-center gap-3 rounded-lg px-3 py-2.5 text-[13px] font-medium transition-all duration-200"
+            :class="
+              activePath === item.path
+                ? 'bg-primary/15 text-primary-light shadow-[inset_0_0_0_1px_rgba(56,189,248,0.25)]'
+                : 'text-content-muted hover:bg-base-700/60 hover:text-content'
+            "
+          >
+            <component
+              :is="item.icon"
+              class="h-4 w-4 transition-transform group-hover:scale-110"
+            />
+            {{ item.title }}
+          </router-link>
+        </div>
       </nav>
 
       <!-- 免责声明（侧栏底部常驻） -->

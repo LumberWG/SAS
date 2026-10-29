@@ -4,7 +4,7 @@
  * 数据：账户/持仓/流水/净值/实时引擎状态（15s 轮询）。
  */
 import { computed, onMounted, onUnmounted, ref } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import {
   ArrowDownCircle,
   ArrowUpCircle,
@@ -39,6 +39,13 @@ import {
 use([CanvasRenderer, LineChart, GridComponent, TooltipComponent])
 
 const router = useRouter()
+const route = useRoute()
+
+// 五段式布局：④ 交易池（/paper-pool）与 ⑤ 持仓与成交（/paper）共用本组件，
+// 按当前路由切换展示分段，避免同一屏塞进「判定」和「复盘」两类信息。
+const tab = computed<'pool' | 'account'>(() =>
+  route.name === 'paper-pool' ? 'pool' : 'account'
+)
 
 const account = ref<PaperAccount | null>(null)
 const trades = ref<PaperTrade[]>([])
@@ -364,8 +371,37 @@ onUnmounted(() => {
       </div>
     </div>
 
+    <!-- 五段式分段切换：④ 交易池（判定与队列）/ ⑤ 持仓与成交（账户复盘） -->
+    <div class="flex items-center gap-2">
+      <router-link
+        to="/paper-pool"
+        class="rounded-lg border px-3.5 py-2 text-[12.5px] font-medium transition-colors"
+        :class="
+          tab === 'pool'
+            ? 'border-primary/40 bg-primary/15 text-primary-light'
+            : 'border-base-600 text-content-muted hover:text-content'
+        "
+      >
+        ④ 交易池 · 判定与队列
+      </router-link>
+      <router-link
+        to="/paper"
+        class="rounded-lg border px-3.5 py-2 text-[12.5px] font-medium transition-colors"
+        :class="
+          tab === 'account'
+            ? 'border-primary/40 bg-primary/15 text-primary-light'
+            : 'border-base-600 text-content-muted hover:text-content'
+        "
+      >
+        ⑤ 持仓与成交 · 账户复盘
+      </router-link>
+    </div>
+
     <!-- 交易模式 / 实时撮合状态 -->
-    <div class="glass-card flex flex-wrap items-center gap-x-6 gap-y-3 p-4">
+    <div
+      v-if="tab === 'pool'"
+      class="glass-card flex flex-wrap items-center gap-x-6 gap-y-3 p-4"
+    >
       <div class="flex items-center gap-2">
         <span class="relative flex h-2 w-2">
           <span
@@ -421,8 +457,8 @@ onUnmounted(() => {
       </div>
     </div>
 
-    <!-- 手动下单（手动模式） -->
-    <div v-if="live && !live.auto_trade" class="glass-card p-5">
+    <!-- 手动下单（手动模式，属于 ⑤ 成交） -->
+    <div v-if="tab === 'account' && live && !live.auto_trade" class="glass-card p-5">
       <div class="mb-3 flex flex-wrap items-center justify-between gap-2">
         <h3 class="text-subheading">手动下单</h3>
         <span class="text-[11px] text-content-faint">
@@ -498,9 +534,9 @@ onUnmounted(() => {
       </div>
     </div>
 
-    <!-- 待执行信号 -->
+    <!-- 待执行信号（④ 交易池：已过判定、等切入点成交的候选） -->
     <div
-      v-if="live && (live.pending.length > 0 || (live.backlog?.length ?? 0) > 0)"
+      v-if="tab === 'pool' && live && (live.pending.length > 0 || (live.backlog?.length ?? 0) > 0)"
       class="glass-card p-4"
     >
       <div class="mb-2 flex items-center justify-between">
@@ -553,7 +589,7 @@ onUnmounted(() => {
     </div>
 
     <!-- 资金与净值 -->
-    <div class="grid grid-cols-1 gap-5 xl:grid-cols-3">
+    <div v-if="tab === 'account'" class="grid grid-cols-1 gap-5 xl:grid-cols-3">
       <div class="glass-card p-5">
         <h3 class="text-subheading mb-3">资金分布</h3>
         <div class="space-y-3">
@@ -598,7 +634,7 @@ onUnmounted(() => {
     </div>
 
     <!-- 当前持仓 -->
-    <div class="glass-card p-5">
+    <div v-if="tab === 'account'" class="glass-card p-5">
       <div class="mb-3 flex items-center justify-between">
         <h3 class="text-subheading">当前持仓</h3>
         <span class="text-[11px] text-content-faint">{{ account?.position_count ?? 0 }} 只</span>
@@ -650,7 +686,7 @@ onUnmounted(() => {
     </div>
 
     <!-- 交易流水 -->
-    <div class="glass-card p-5">
+    <div v-if="tab === 'account'" class="glass-card p-5">
       <div class="mb-3 flex items-center justify-between">
         <h3 class="text-subheading">交易流水</h3>
         <span class="text-[11px] text-content-faint">最近 {{ trades.length }} 笔</span>
