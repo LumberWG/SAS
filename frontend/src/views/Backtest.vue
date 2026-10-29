@@ -59,6 +59,22 @@ const form = reactive<Record<string, any>>({
   rotation_min_score: null,
 })
 const formOpen = ref(true)
+// 参数分组改为 tab：一次只显示当前组，纵向空间从「9 组全部铺开」降到一组
+const activeGroup = ref('基础')
+
+/** 当前分组里已被填写的参数个数（留空=沿用线上默认，填了就提醒一下） */
+function groupFilledCount(g: { items: ParamDef[] }): number {
+  let n = 0
+  for (const it of g.items) {
+    const v = form[it.key]
+    if (Array.isArray(v)) {
+      if (v.length > 0) n += 1
+    } else if (v !== null && v !== undefined && v !== '') {
+      n += 1
+    }
+  }
+  return n
+}
 const result = ref<BacktestResult | null>(null)
 const loading = ref(false)
 const error = ref('')
@@ -266,6 +282,11 @@ function applyPreset(p: { name: string; params: Record<string, unknown> }) {
   for (const k in p.params) {
     form[k] = p.params[k]
   }
+  // 跳到第一个被预设改动的分组，避免 tab 模式下用户看不到变化发生在哪
+  const hit = groups.find(
+    (g) => g.items.some((it) => p.params[it.key] !== undefined)
+  )
+  if (hit) activeGroup.value = hit.name
 }
 
 const equityOption = ref({})
@@ -378,10 +399,42 @@ function metricTone(v: number): string {
         </div>
       </div>
 
-      <!-- 可调参数分组 -->
-      <div class="mt-5 space-y-4">
-        <div v-for="g in groups" :key="g.name" class="rounded-lg border border-base-600/50 bg-base-800/30 p-3">
-          <div class="mb-2 text-[12px] font-medium text-content-muted">{{ g.name }}</div>
+      <!-- 可调参数分组（tab 切换，避免一次性铺开占用太多纵向空间） -->
+      <div class="mt-5">
+        <div class="-mb-px flex flex-wrap items-center gap-1 border-b border-base-600/60 pb-2">
+          <button
+            v-for="g in groups"
+            :key="g.name"
+            type="button"
+            class="flex items-center gap-1.5 rounded-md px-3 py-1.5 text-[12px] font-medium transition-colors"
+            :class="
+              activeGroup === g.name
+                ? 'bg-primary/15 text-primary-light shadow-[inset_0_0_0_1px_rgba(56,189,248,0.25)]'
+                : 'text-content-muted hover:bg-base-700/60 hover:text-content'
+            "
+            @click="activeGroup = g.name"
+          >
+            {{ g.name }}
+            <span
+              v-if="groupFilledCount(g)"
+              class="rounded bg-primary/20 px-1 font-num text-[10px] text-primary-light"
+            >
+              {{ groupFilledCount(g) }}
+            </span>
+          </button>
+        </div>
+        <div
+          v-for="g in groups"
+          v-show="activeGroup === g.name"
+          :key="g.name"
+          class="mt-3 rounded-lg border border-base-600/50 bg-base-800/30 p-3"
+        >
+          <div class="mb-2 flex items-center justify-between text-[12px] font-medium text-content-muted">
+            <span>{{ g.name }}</span>
+            <span v-if="groupFilledCount(g)" class="text-[11px] font-normal text-content-faint">
+              已改 {{ groupFilledCount(g) }} 项，其余留空=线上默认
+            </span>
+          </div>
           <div class="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-4">
             <template v-for="it in g.items" :key="it.key">
               <label v-if="it.type === 'number'" class="flex flex-col gap-1">
