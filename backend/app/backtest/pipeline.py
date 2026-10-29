@@ -35,6 +35,7 @@ from app.analysis.scoring import score_technical
 from app.backtest.review import analyze
 from app.config import get_settings
 from app.data.service import get_stock_pool
+from app.data.minute import get_minute_prices  # E-intraday：真实分钟线（可选，失败降级）
 from app.indicators import add_all_indicators
 from app.screener.scanner import rank_hits
 from app.strategies import builtin  # noqa: F401  - 触发内置策略注册
@@ -134,9 +135,26 @@ class PipelineParams:
     #: 单边滑点：买入价 ×(1+s)、卖出价 ×(1−s)。涨跌停判定仍用原始价格（交易所规则），
     #: 只有「我们的成交价」变差，用于检验正超额是否只是摩擦假设的产物。
     slippage: float = 0.0
+    # ---- E-intraday：日内过程建模 ----
+    #: False（默认）：用当日 open/low/high/close 边界构造日内路径，已能捕捉盘中触及
+    #:（日K 的 low/high 含当日最低/最高，含插针）。True：对持仓日按需拉取真实 5 分钟线，
+    #: 按时间顺序检测止损/止盈首次触发，成交价取精确分钟价（带滑点）。
+    intraday_minutes: bool = False
     #: 满仓轮动开关（None = 沿用 settings.paper_rotation_enabled）。
     #: 轮动是**强制卖出**，也是换手与摩擦的最大来源（记录 #29：月换手约 2.2 个资本）。
     rotation_enabled: bool | None = None
+    # ---- 做T引擎（参数化主动交易；全部 None = 关闭，沿用被动持有） ----
+    #: 启用后，对已有持仓在「次日开盘→收盘」做日内做T / 分级网格（遵循 A 股 T+1：
+    #: 做T 只动用**底仓**做「先卖后买」的倒T，下跌加仓为隔夜行为，反弹减仓在之后交易日卖出）。
+    t_active: bool | None = None                       # 启用做T/分级网格
+    t_size: float | None = None                        # 单次做T比例（相对总仓，0.25=1/4）
+    t_up_sell: float | None = None                    # 开盘涨幅超此比例先卖 t_size 锁利
+    t_up_buyback: float | None = None                 # 从高点回调超此比例买回 t_size（恢复底仓）
+    t_down_add: float | None = None                   # 开盘跌幅达此用现金加 t_size 仓（隔夜）
+    t_down_full: float | None = None                  # 跌幅达此加满仓（隔夜）
+    t_rebound_sell: float | None = None               # 反弹至跌幅小于此比例减 t_size 仓
+    t_limit_sell_half: bool | None = None             # 涨停且封板弱则卖 1/2（底仓，T+1 可卖）
+    t_crash_guard: float | None = None                # 大盘当日跌幅超此比例暂停做T（防极速下跌）
 
 
 def calc_fee(side: str, amount: float) -> float:
@@ -144,6 +162,41 @@ def calc_fee(side: str, amount: float) -> float:
     commission = max(amount * COMMISSION_RATE, COMMISSION_MIN)
     stamp = amount * STAMP_RATE if side == "sell" else 0.0
     return round(commission + stamp + amount * TRANSFER_RATE, 2)
+
+
+def _intraday_first_trigger(series, stop_px, tp_px, partial_px):
+    """在按时间升序的日内价格序列上，找止损/止盈/分段止盈的首次触发。
+
+    返回 ``(type, price)``，``type`` 为 ``"stop"``/``"tp"``/``"partial"``/``None``，
+    ``price`` 为首次触发的那一笔价格（用于真实分钟线成交价；日K 边界模式会忽略它，
+    改用 min(开盘,止损)/max(开盘,目标) 以与历史行为完全一致）。
+
+    ``stop_px`` 为 ``None`` 表示跳过止损检测（如 E11 收盘确认模式）。
+    同日双触发时取**最早出现**者；止损与止盈同级时因序列顺序（low 在 high 前）
+    自然实现「止损优先」，与线上 ``pipeline`` 原逻辑一致。
+    """
+    si = ti = pi = None
+    sp = tp = pp = None
+    for i, px in enumerate(series):
+        if si is None and stop_px is not None and px <= stop_px:
+            si, sp = i, px
+        if ti is None and tp_px is not None and px >= tp_px:
+            ti, tp = i, px
+        if pi is None and partial_px is not None and px >= partial_px:
+            pi, pp = i, px
+        if si is not None and ti is not None and pi is not None:
+            break
+    cands = {}
+    if si is not None:
+        cands["stop"] = (si, sp)
+    if ti is not None:
+        cands["tp"] = (ti, tp)
+    if pi is not None:
+        cands["partial"] = (pi, pp)
+    if not cands:
+        return (None, None)
+    best = min(cands, key=lambda k: cands[k][0])
+    return (best, cands[best][1])
 
 
 def _load_klines(end_date: str, start_date: str, kline_dir: str) -> dict[str, pd.DataFrame]:
@@ -465,6 +518,12 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
         else:
             logger.warning("缺少 idx_sh000001 指数K线，regime_ma 失效并退化为「始终防守」")
 
+    # 大盘极速下跌护栏（做T引擎用）：指数收盘序列按交易日对齐（缺失 ffill）
+    idx_close: pd.Series = pd.Series(dtype=float)
+    _idx_df = prepared.get("index")
+    if _idx_df is not None and not _idx_df.empty and "close" in _idx_df.columns and "date" in _idx_df.columns:
+        idx_close = _idx_df.set_index("date")["close"].reindex(dates).ffill()
+
     # E32 大盘分档：0=双均线之下（最弱）1=仅破快速线 2=仅破慢速线 3=双均线之上
     # 同样只用前一交易日收盘，与上面的二值 regime 同一口径，不留未来函数。
     tiers_state: dict[str, int] = {}
@@ -648,6 +707,87 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
             "reason": reason, "score": p["score"],
         })
 
+    # ---- 做T引擎：次日开盘→收盘做T / 分级网格（遵循 A 股 T+1） ----
+    def _t_buy(code, date, price, shares):
+        """做T加仓 / 买回：买指定股数（受现金限制），加到期初持仓（隔夜，T+1 可卖）。"""
+        nonlocal cash
+        shares = int(shares / LOT) * LOT
+        if shares < LOT or code not in positions:
+            return
+        p = positions[code]
+        px = price * (1 + slippage)
+        amount = px * shares
+        fee = calc_fee("buy", amount)
+        while shares >= LOT and amount + fee > cash:
+            shares -= LOT
+            amount = px * shares
+            fee = calc_fee("buy", amount)
+        if shares < LOT:
+            return
+        cash -= amount + fee
+        cost = (amount + fee) / shares
+        old = p["shares"]
+        new = old + shares
+        p["cost"] = (p["cost"] * old + cost * shares) / new
+        p["shares"] = new
+        p["t_added_shares"] = (p.get("t_added_shares") or 0) + shares
+        p["peak"] = max(float(p.get("peak") or 0.0), px)
+
+    def _t_sell(code, date, price, ratio, reason):
+        """做T减仓：按当前持仓比例卖出；记录买回股数，次日开盘恢复底仓。"""
+        p = positions[code]
+        s = p["shares"]
+        want = int(s * ratio / LOT) * LOT
+        if want < LOT or (s - want) < LOT:
+            want = s
+        sell_part(code, date, price, (want / s) if s else 1.0, reason)
+        p = positions.get(code)
+        if p is not None:
+            p["t_buyback_shares"] = (p.get("t_buyback_shares") or 0) + want
+
+    def _t_engine(code, date, day_idx, open_px, low, high, close_px, pc):
+        """做T核心：涨停卖半 / 上涨倒T / 下跌分级加仓 / 反弹减仓（T+1）。"""
+        p = positions[code]
+        if p.get("t_half") or not params.t_active:
+            return
+        size = float(params.t_size or 0.25)
+        open_chg = (open_px / pc - 1) if pc and pc > 0 else 0.0
+        # 大盘极速下跌护栏：指数当日跌幅超阈值则暂停做T
+        if params.t_crash_guard is not None:
+            ic = idx_close.get(date)
+            ip = idx_close.get(dates[day_idx - 1]) if day_idx > 0 else None
+            if (
+                ic is not None and not pd.isna(ic)
+                and ip is not None and not pd.isna(ip) and ip > 0
+                and (float(ic) / float(ip) - 1) <= -float(params.t_crash_guard)
+            ):
+                return
+        # 涨停且封板弱 → 卖 1/2（底仓可卖），回调买回（次日开盘）
+        if params.t_limit_sell_half and high is not None and pc and high >= pc * 1.095:
+            _t_sell(code, date, close_px, 0.5, "涨停卖半")
+            p = positions.get(code)
+            if p is not None:
+                p["t_half"] = True
+            return
+        # 上涨倒T：开盘涨且盘中触 +t_up_sell → 卖 t_size 锁利，次日开盘买回
+        if params.t_up_sell and open_chg > 0 and high is not None and high >= open_px * (1 + params.t_up_sell):
+            _t_sell(code, date, open_px * (1 + params.t_up_sell), size, "做T卖")
+            return
+        # 下跌分级加仓（隔夜）
+        if open_chg < 0:
+            if params.t_down_add and low is not None and low <= open_px * (1 - params.t_down_add):
+                _t_buy(code, date, open_px * (1 - params.t_down_add), cash * float(params.t_down_add))
+            if params.t_down_full and low is not None and low <= open_px * (1 - params.t_down_full):
+                _t_buy(code, date, open_px * (1 - params.t_down_full), cash * 0.95)
+            # 反弹减仓：之前加仓且反弹至 -t_rebound_sell（之后交易日可卖，T+1 OK）
+            if params.t_rebound_sell and p.get("t_added_shares") and close_px is not None and pc and close_px >= pc * (1 - params.t_rebound_sell):
+                added = p["t_added_shares"]
+                ratio = added / p["shares"] if p["shares"] else 1.0
+                sell_part(code, date, close_px, min(1.0, ratio), "反弹减仓")
+                pp = positions.get(code)
+                if pp is not None:
+                    pp["t_added_shares"] = 0
+
     day_no = {d: i for i, d in enumerate(dates)}
 
     rebalance_every = max(1, int(params.rebalance_days or 1))
@@ -730,7 +870,26 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
                 "peak": price_on(code, date, "high") or 0.0,
             }
 
+        # 做T买回：涨停卖半 / 上涨倒T 在「次日开盘」恢复底仓（T+1：当日卖、次日买回）
+        for code in list(positions):
+            rb = positions[code].get("t_buyback_shares") or 0
+            if rb >= LOT:
+                px = price_on(code, date, "open")
+                if px is not None:
+                    _t_buy(code, date, px, rb)
+                positions[code]["t_buyback_shares"] = 0
+
         # ---------- 2) 盘中止损/止盈（T+1：当日买入不卖） ----------
+        # 日内序列：默认日K 边界（open→low→high→close，止损优先）；
+        # 开启 intraday_minutes 且取到真实分钟线时改用分钟序列（按时间顺序，成交价取分钟价）。
+        def intraday_series(code, date, open_px, low, high, close_px):
+            if params.intraday_minutes:
+                ms = get_minute_prices(code, date, "5")
+                if ms:
+                    return ms, True
+            seq = [x for x in (open_px, low, high, close_px) if x is not None]
+            return seq, False
+
         for code in list(positions):
             p = positions[code]
             if p["buy_date"] >= date:
@@ -738,7 +897,12 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
             open_px = price_on(code, date, "open")
             low = price_on(code, date, "low")
             high = price_on(code, date, "high")
+            close_px = price_on(code, date, "close")
             if open_px is None or low is None or high is None:
+                continue
+            # 做T引擎：次日开盘→收盘做T / 分级网格（遵循 A 股 T+1）
+            _t_engine(code, date, day_idx, open_px, low, high, close_px, prev_close(code, date))
+            if code not in positions:
                 continue
             cost = p["cost"]
             stop_px, stop_reason = p["stop"], "止损"
@@ -758,23 +922,40 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
                 trail_px = peak * (1 - params.trail_pct)
                 if trail_px > stop_px:
                     stop_px, stop_reason = trail_px, "移动止损"
-            # 止损优先（与线上「同日双触发止损优先」一致）；E11 收盘确认模式下不走盘中止损
-            if not params.stop_confirm_close and low <= stop_px:
-                sell(code, date, min(open_px, stop_px), stop_reason)
+            # 收盘确认模式下止损不走盘中止损（留到步骤 3 收盘判定）
+            stop_check = stop_px if (defensive and not params.stop_confirm_close) else None
+            series, real = intraday_series(code, date, open_px, low, high, close_px)
+            tp_px = p["target"]
+            partial_px = (
+                cost * (1 + params.partial_tp_at)
+                if (params.partial_tp_at is not None and not p.get("partial_done"))
+                else None
+            )
+
+            def _hit(cond):
+                # real=True 时返回首个触发价；real=False（日K 边界）时返回 True/False
+                for px in series:
+                    if cond(px):
+                        return px if real else True
+                return None if real else False
+
+            stop_hit = _hit(lambda px: stop_check is not None and px <= stop_check)
+            partial_hit = _hit(lambda px: partial_px is not None and px >= partial_px)
+            tp_hit = _hit(lambda px: px >= tp_px)
+            if stop_hit:
+                # 边界模式沿用历史成交价 min(开盘, 止损)；真实分钟线用触发分钟价（sell 内已含滑点）
+                fill = stop_hit if real else min(open_px, stop_px)
+                sell(code, date, fill, stop_reason)
                 continue
-            # E10 分段止盈：首次触及目标涨幅先卖一部分，剩余仓位继续按 +20% / 移动止损跑
-            if (
-                params.partial_tp_at is not None
-                and not p.get("partial_done")
-                and high >= cost * (1 + params.partial_tp_at)
-            ):
-                trigger = max(open_px, cost * (1 + params.partial_tp_at))
-                sell_part(code, date, trigger, params.partial_tp_ratio, "分段止盈")
+            if partial_hit:
+                fill = partial_hit if real else max(open_px, partial_px)
+                sell_part(code, date, fill, params.partial_tp_ratio, "分段止盈")
                 if code not in positions:
                     continue
                 p = positions[code]
-            if high >= p["target"]:
-                sell(code, date, max(open_px, p["target"]), "止盈")
+            if tp_hit:
+                fill = tp_hit if real else max(open_px, tp_px)
+                sell(code, date, fill, "止盈")
             else:
                 p["peak"] = max(peak, high)
 
@@ -863,11 +1044,6 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
         ]
 
         # ---------- 4) 记录净值与等权基准 ----------
-        mv = market_value(date)
-        equity_curve.append({
-            "date": date, "equity": round(cash + mv, 2),
-            "cash": round(cash, 2), "positions": len(positions),
-        })
         # 基准：**前一交易日收盘时确定的**股票池，等权持有到今日收盘的日收益。
         # 当日成交额排名要收盘后才知道，用「当日池」算「当日收益」等于用未来信息
         # 选股（成交额与当日涨跌幅强相关，会把基准抬得虚高），故整体滞后一天。
@@ -886,6 +1062,13 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
                 pcts.append(cur / prev - 1)
         if pcts:
             bench_value *= 1 + sum(pcts) / len(pcts)
+        # 基准净值与策略净值同轴（均按 initial_capital 起算），前端可叠加对比
+        mv = market_value(date)
+        equity_curve.append({
+            "date": date, "equity": round(cash + mv, 2),
+            "benchmark": round(bench_value * initial_capital, 2),
+            "cash": round(cash, 2), "positions": len(positions),
+        })
 
     # ---------- 收尾 ----------
     last = dates[-1]
@@ -941,6 +1124,7 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
             "buy_top_pct": params.buy_top_pct,
             "slippage": params.slippage,
             "rotation_enabled": rotation_on,
+            "intraday_minutes": params.intraday_minutes,
             "rebalance_days": rebalance_every,
             "max_open_gain": params.max_open_gain,
             "max_gain_5d": params.max_gain_5d,

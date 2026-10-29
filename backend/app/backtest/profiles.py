@@ -367,6 +367,10 @@ PROFILES: dict[str, dict] = {
     "wk": {"rebalance_days": 5},
     "wk_s30": {"rebalance_days": 5, "slippage": 0.003},
     "wk10_s30": {"rebalance_days": 10, "slippage": 0.003},
+    # ---- E-intraday：真实 5 分钟线精确止损/止盈（对照 default） ----
+    # 开启后对持仓日按需拉取历史 5 分钟线，按时间顺序检测首次触发，成交价取分钟价。
+    # 数据源限频，回测会变慢；default 走日K 边界（low/high 已含盘中极值，等价可对照）。
+    "intraday5": {"intraday_minutes": True},
 }
 
 

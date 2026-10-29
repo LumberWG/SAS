@@ -302,6 +302,40 @@ export interface BacktestRequest {
   initial_capital?: number
   max_positions?: number
   universe_size?: number
+  board_prefixes?: string[]
+  watch_cap?: number
+  add_per_day?: number
+  rebalance_days?: number
+  buy_threshold?: number
+  buy_top_pct?: number
+  max_open_gain?: number
+  max_gain_5d?: number
+  min_volume_ratio?: number
+  min_turnover_rate?: number
+  invert_score?: boolean
+  stop_loss?: number
+  take_profit?: number
+  max_hold_days?: number
+  stop_atr_mult?: number
+  stop_atr_min?: number
+  stop_atr_max?: number
+  stop_confirm_close?: boolean
+  partial_tp_at?: number
+  partial_tp_ratio?: number
+  breakeven_trigger?: number
+  trail_pct?: number
+  trail_arm?: number
+  regime_ma?: number
+  regime_fast_ma?: number
+  weak_exposure?: number
+  regime_flat_below?: boolean
+  max_total_exposure?: number
+  single_position_ratio?: number
+  full_score?: number
+  half_score?: number
+  rotation_enabled?: boolean
+  rotation_gap?: number
+  rotation_min_score?: number
 }
 
 export interface BacktestTrade {
@@ -336,7 +370,7 @@ export interface BacktestResult {
     trading_days: number
     open_positions?: number
   }
-  equity_curve: { date: string; equity: number }[]
+  equity_curve: { date: string; equity: number; benchmark?: number }[]
   trades: BacktestTrade[]
   review?: BacktestReview
 }

@@ -31,19 +31,67 @@ _JOB_TTL = 3600.0
 
 
 class BacktestRequest(BaseModel):
-    """回测请求体：只有时间段是必填，其余走线上默认值。"""
+    """回测请求体：时间段必填；其余风控参数默认 None = 沿用线上配置。
+
+    字段名与 :class:`app.backtest.pipeline.PipelineParams` 对齐——传入即覆盖
+    本次回测（线上参数不受影响），用于参数实验与回归测试。
+    """
 
     start_date: str = Field(..., description="开始日期 YYYY-MM-DD")
     end_date: str = Field(..., description="结束日期 YYYY-MM-DD")
-    initial_capital: float | None = Field(
-        None, gt=0, description="初始资金，缺省取模拟盘配置"
-    )
-    max_positions: int | None = Field(
-        None, ge=1, le=50, description="最大持仓数，缺省取模拟盘配置"
-    )
-    universe_size: int = Field(
-        500, ge=10, le=6000, description="每日成交额 TopN 股票池"
-    )
+    # ---- 基础 ----
+    initial_capital: float | None = Field(None, gt=0, description="初始资金，缺省取模拟盘配置")
+    max_positions: int | None = Field(None, ge=1, le=50, description="最大持仓数，缺省取模拟盘配置")
+    universe_size: int = Field(500, ge=10, le=6000, description="每日成交额 TopN 股票池")
+    board_prefixes: list[str] | None = Field(None, description="只在这些代码前缀里选股；None=全市场")
+    watch_cap: int | None = Field(None, ge=10, le=500, description="自选股上限（FIFO）")
+    add_per_day: int | None = Field(None, ge=1, le=200, description="每日扫描后加自选上限")
+    # ---- 选股 / 买入 ----
+    rebalance_days: int | None = Field(None, ge=1, le=20, description="调仓周期（交易日），1=每日")
+    buy_threshold: float | None = Field(None, description="14因子买入阈值")
+    buy_top_pct: float | None = Field(None, ge=0, le=1, description="买入分位门槛（前 X，替代绝对阈值）")
+    max_open_gain: float | None = Field(None, description="次日开盘涨幅上限（不追高）")
+    max_gain_5d: float | None = Field(None, description="近5日涨幅上限（不追已涨）")
+    min_volume_ratio: float | None = Field(None, description="量比下限")
+    min_turnover_rate: float | None = Field(None, description="换手率下限（%）")
+    invert_score: bool | None = Field(None, description="反转选股：分数取反")
+    # ---- 止损 / 止盈 ----
+    stop_loss: float | None = Field(None, gt=0, le=0.5, description="止损比例（相对成本）")
+    take_profit: float | None = Field(None, gt=0, description="止盈比例（相对成本）")
+    max_hold_days: int | None = Field(None, ge=0, le=250, description="时间止损（0=不限制）")
+    stop_atr_mult: float | None = Field(None, gt=0, description="ATR 止损倍数（None=用固定 stop_loss）")
+    stop_atr_min: float | None = Field(None, gt=0, description="ATR 止损距离下限")
+    stop_atr_max: float | None = Field(None, gt=0, description="ATR 止损距离上限")
+    stop_confirm_close: bool | None = Field(None, description="止损收盘确认（次日开盘卖）")
+    partial_tp_at: float | None = Field(None, gt=0, description="分段止盈触发涨幅")
+    partial_tp_ratio: float | None = Field(None, gt=0, le=1, description="分段止盈卖出比例")
+    # ---- 移动 / 保本止损 ----
+    breakeven_trigger: float | None = Field(None, gt=0, description="浮盈达此比例上移止损到成本（保本）")
+    trail_pct: float | None = Field(None, gt=0, description="从高点回撤此比例即卖出（移动止损）")
+    trail_arm: float | None = Field(None, ge=0, description="移动止损启用门槛（浮盈曾达）")
+    # ---- 大盘择时 ----
+    regime_ma: int | None = Field(None, ge=2, le=250, description="大盘择时均线周期")
+    regime_fast_ma: int | None = Field(None, ge=2, le=250, description="择时快线周期")
+    weak_exposure: float | None = Field(None, gt=0, le=1, description="弱市总仓位上限（需 regime_ma）")
+    regime_flat_below: bool | None = Field(None, description="最弱档清仓")
+    # ---- 仓位 / 评分 / 轮动 ----
+    max_total_exposure: float | None = Field(None, gt=0, le=1, description="总仓位上限")
+    single_position_ratio: float | None = Field(None, gt=0, le=1, description="单票仓位上限")
+    full_score: float | None = Field(None, description="全额评分档")
+    half_score: float | None = Field(None, description="半额评分档")
+    rotation_enabled: bool | None = Field(None, description="满仓轮动开关")
+    rotation_gap: float | None = Field(None, description="轮动分差")
+    rotation_min_score: float | None = Field(None, description="轮动最低分")
+    # ---- 做T引擎（参数化主动交易） ----
+    t_active: bool | None = Field(None, description="启用次日做T/分级网格")
+    t_size: float | None = Field(None, gt=0, le=1, description="单次做T比例（相对总仓）")
+    t_up_sell: float | None = Field(None, gt=0, description="开盘涨幅超此先卖1/4锁利")
+    t_up_buyback: float | None = Field(None, gt=0, description="从高点回调超此买回")
+    t_down_add: float | None = Field(None, gt=0, description="开盘跌幅达此加1/4仓")
+    t_down_full: float | None = Field(None, gt=0, description="跌幅达此加满仓")
+    t_rebound_sell: float | None = Field(None, gt=0, description="反弹至跌幅小于此减1/4仓")
+    t_limit_sell_half: bool | None = Field(None, description="涨停弱封板卖1/2")
+    t_crash_guard: float | None = Field(None, gt=0, description="大盘当日跌幅超此暂停做T")
 
 
 def _prune() -> None:
@@ -91,13 +139,13 @@ async def run_backtest(req: BacktestRequest) -> dict:
         if job["status"] == "running":
             return {"job_id": job_id, "status": "running", "reused": True}
 
-    params = PipelineParams(
-        start_date=req.start_date,
-        end_date=req.end_date,
-        initial_capital=req.initial_capital,
-        max_positions=req.max_positions,
-        universe_size=req.universe_size,
-    )
+    # 所有非 None 字段透传给 PipelineParams（None=沿用线上配置）；
+    # board_prefixes 在请求体里是 list，PipelineParams 要 tuple。
+    kwargs = req.model_dump(exclude_none=True)
+    bp = kwargs.pop("board_prefixes", None)
+    if bp is not None:
+        kwargs["board_prefixes"] = tuple(bp)
+    params = PipelineParams(**kwargs)
     job_id = uuid.uuid4().hex[:12]
     _JOBS[job_id] = {
         "status": "running",
