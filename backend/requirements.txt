@@ -13,6 +13,8 @@ numpy>=1.26.0
 
 # ---- 数据源 ----
 akshare>=1.16.0            # 免费 A 股数据源（实时快照 / 历史K线 / 复权）
+baostock>=0.8.9            # 分钟线历史数据（scripts/preload_minutes*.py，回测 intraday_minutes 用）
+PySocks>=1.7.1             # Baostock 仅支持进程内 SOCKS5 代理（出口 IP 被封时用 --proxy）
 
 # ---- 存储 ----
 pyarrow>=16.0.0            # Parquet 读写（K线缓存）
