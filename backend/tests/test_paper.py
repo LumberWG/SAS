@@ -472,6 +472,80 @@ class TestSettle:
         assert db.list_paper_trades() == []
 
 
+class TestQueueTopM:
+    """五段式③：交易队列容量——买入按评分择优取 topM，卖出不受限。"""
+
+    def _trader(self, monkeypatch, tmp_path, top_m=2):
+        from app.data.cache import Database
+
+        from app.paper import live as live_module
+
+        db = Database(tmp_path / "queue.db")
+        monkeypatch.setattr(live_module, "db", db)
+        monkeypatch.setattr("app.data.cache.db", db, raising=False)
+        trader = live_module.LiveTrader()
+        monkeypatch.setattr(trader.settings, "paper_trade_queue_top_m", top_m, raising=False)
+        monkeypatch.setattr(trader.settings, "paper_live_enabled", True, raising=False)
+        monkeypatch.setattr(trader, "auto_trade_enabled", lambda: True)
+        return trader, live_module
+
+    @staticmethod
+    def _rec(live_module, code, score, action="buy"):
+        return live_module.SimpleNamespace(
+            code=code, name=code, action=action, reason="突破", price=10.0, score=score
+        )
+
+    def test_buy_queue_capped_by_score(self, monkeypatch, tmp_path):
+        """3 条买入、上限 2：只留评分最高的两条，第三条记入拒绝列表。"""
+        trader, live_module = self._trader(monkeypatch, tmp_path, top_m=2)
+        added = trader.submit([
+            self._rec(live_module, "600001", 30.0),
+            self._rec(live_module, "600002", 50.0),
+            self._rec(live_module, "600003", 40.0),
+        ])
+
+        assert added == 2
+        assert set(trader._pending) == {"600002", "600003"}   # 高分优先
+        assert [r["code"] for r in trader._queue_rejected] == ["600001"]
+        assert "队列已满" in trader._queue_rejected[0]["reason"]
+
+    def test_sell_not_capped(self, monkeypatch, tmp_path):
+        """卖出是释放风险，不受队列容量约束。"""
+        trader, live_module = self._trader(monkeypatch, tmp_path, top_m=1)
+        added = trader.submit([
+            self._rec(live_module, "600001", 10.0, action="sell"),
+            self._rec(live_module, "600002", 10.0, action="sell"),
+            self._rec(live_module, "600003", 60.0, action="buy"),
+        ])
+
+        assert added == 3
+        assert trader._queue_rejected == []
+
+    def test_existing_buy_keeps_slot(self, monkeypatch, tmp_path):
+        """已在队列的买单占名额；同股更新不重复占位。"""
+        trader, live_module = self._trader(monkeypatch, tmp_path, top_m=1)
+        trader.submit([self._rec(live_module, "600001", 45.0)])
+        # 队列已满，新票进不来
+        trader.submit([self._rec(live_module, "600002", 90.0)])
+        assert set(trader._pending) == {"600001"}
+        # 同一只票更新建议：仍只占一个名额
+        added = trader.submit([self._rec(live_module, "600001", 70.0)])
+        assert added == 1
+        assert set(trader._pending) == {"600001"}
+        assert trader._pending["600001"].score == 70.0
+
+    def test_zero_means_unlimited(self, monkeypatch, tmp_path):
+        """0 = 不限制（回到旧行为）。"""
+        trader, live_module = self._trader(monkeypatch, tmp_path, top_m=0)
+        added = trader.submit([
+            self._rec(live_module, f"60000{i}", 10.0 * i) for i in range(1, 6)
+        ])
+
+        assert added == 5
+        assert len(trader._pending) == 5
+        assert trader._queue_rejected == []
+
+
 class TestRotation:
     """满仓后的轮动替换：用显著更高分的新票换掉最弱持仓。"""
 

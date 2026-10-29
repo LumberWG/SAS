@@ -655,6 +655,10 @@ export interface PaperLiveStatus {
   /** 候补队列：因满仓/资金不足没买成、等名额释放的高分票（按评分降序，最多 10 条） */
   backlog?: PaperPendingSignal[]
   backlog_count?: number
+  /** 五段式③：交易队列买入容量上限（0=不限制） */
+  queue_top_m?: number
+  /** 因队列容量未入队的买入候选（最近一批分析） */
+  queue_rejected?: Array<{ code: string; name: string; score: number; reason: string }>
   recent_trades: PaperLiveTrade[]
   last_error: string
   prices: Record<string, number>

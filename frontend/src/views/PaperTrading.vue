@@ -588,6 +588,31 @@ onUnmounted(() => {
       </div>
     </div>
 
+    <!-- 队列容量（五段式③）：买入候选最多 M 只，超出按评分择优落选 -->
+    <div v-if="tab === 'pool' && (live?.queue_top_m ?? 0) > 0" class="glass-card p-5">
+      <div class="mb-3 flex flex-wrap items-center justify-between gap-2">
+        <h3 class="text-subheading">交易队列容量</h3>
+        <span class="text-[11px] text-content-faint">
+          买入候选上限 {{ live?.queue_top_m }} 只（按 14 因子总分择优；卖出不受限）
+        </span>
+      </div>
+      <div v-if="live?.queue_rejected?.length" class="flex flex-wrap gap-1.5">
+        <span
+          v-for="r in live.queue_rejected"
+          :key="r.code"
+          class="inline-flex items-center gap-1.5 rounded-md border border-warn/40 bg-warn/10 px-2 py-1 text-[11px] text-warn"
+          :title="r.reason"
+        >
+          未入队 {{ r.name }}
+          <span class="font-num text-content-faint">{{ r.code }}</span>
+          <span class="font-num">{{ r.score }}分</span>
+        </span>
+      </div>
+      <p v-else class="text-[11px] text-content-faint">
+        最近一批分析没有因容量被拒的买入信号。
+      </p>
+    </div>
+
     <!-- 资金与净值 -->
     <div v-if="tab === 'account'" class="grid grid-cols-1 gap-5 xl:grid-cols-3">
       <div class="glass-card p-5">

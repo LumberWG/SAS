@@ -24,6 +24,7 @@ import logging
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from types import SimpleNamespace
+from typing import Any
 
 from app.config import get_settings
 from app.data.cache import db
@@ -90,6 +91,8 @@ class LiveTrader:
         self._last_error = ""
         self._ticks = 0
         self._executed = 0
+        #: 最近一批「因队列容量未入队」的买入信号（五段式③的判定证据）
+        self._queue_rejected: list[dict[str, Any]] = []
 
     # ------------------------------------------------------------------
     # 交易模式（自动 / 手动）
@@ -123,6 +126,10 @@ class LiveTrader:
     def submit(self, recommendations, source: str = "建议") -> int:
         """把买卖建议放进实时队列（同股覆盖，下个 tick 即执行）。
 
+        五段式③的收口：买入信号受队列容量 ``paper_trade_queue_top_m`` 约束
+        （同一批按 14 因子总分降序择优），**卖出信号不受限**（释放风险优先）。
+        超出容量的买单不入队，原因记在 ``_queue_rejected``（由 /api/paper/live 展示）。
+
         Args:
             recommendations: Recommendation 对象（需含 code/action/name/reason）
             source: 来源标记，仅用于日志
@@ -134,6 +141,25 @@ class LiveTrader:
             return 0
         now = datetime.now()
         added = 0
+        rejected: list[dict[str, Any]] = []
+        top_m = int(getattr(self.settings, "paper_trade_queue_top_m", 0) or 0)
+
+        def _enqueue(rec, action: str) -> None:
+            nonlocal added
+            code = str(getattr(rec, "code", "") or "")
+            self._pending[code] = PendingSignal(
+                code=code,
+                name=str(getattr(rec, "name", "") or code),
+                action=action,
+                reason=str(getattr(rec, "reason", "") or source),
+                created_at=now,
+                expire_at=self._expiry(now, action),
+                price_at_signal=getattr(rec, "price", None),
+                score=_signal_score(rec),
+            )
+            added += 1
+
+        buys = []
         for rec in recommendations:
             action = getattr(rec, "action", "")
             code = str(getattr(rec, "code", "") or "")
@@ -146,17 +172,34 @@ class LiveTrader:
                 continue
             if action not in ("buy", "sell"):
                 continue
-            self._pending[code] = PendingSignal(
-                code=code,
-                name=str(getattr(rec, "name", "") or code),
-                action=action,
-                reason=str(getattr(rec, "reason", "") or source),
-                created_at=now,
-                expire_at=self._expiry(now, action),
-                price_at_signal=getattr(rec, "price", None),
-                score=_signal_score(rec),
+            if action == "buy":
+                buys.append(rec)
+            else:
+                _enqueue(rec, "sell")
+
+        # 买入：高分优先占名额；已在队列的同一只票更新建议不重复占位
+        buys.sort(key=_signal_score, reverse=True)
+        for rec in buys:
+            code = str(getattr(rec, "code", "") or "")
+            if top_m > 0:
+                holding = {c for c, s in self._pending.items() if s.action == "buy"}
+                if code not in holding and len(holding) >= top_m:
+                    rejected.append({
+                        "code": code,
+                        "name": str(getattr(rec, "name", "") or code),
+                        "score": round(_signal_score(rec), 1),
+                        "reason": f"交易队列已满（{top_m} 只，按评分择优）",
+                    })
+                    continue
+            _enqueue(rec, "buy")
+
+        self._queue_rejected = rejected
+        if rejected:
+            logger.info(
+                "交易队列已满（上限 %d）：%d 条买入未入队 %s",
+                top_m, len(rejected),
+                ", ".join(f"{r['code']}({r['score']})" for r in rejected),
             )
-            added += 1
         if added:
             logger.info(
                 "实时队列更新 %d 条（%s），待执行 %d 条", added, source, len(self._pending)
@@ -213,6 +256,7 @@ class LiveTrader:
         self._last_trades.clear()
         self._last_prices.clear()
         self._last_error = ""
+        self._queue_rejected.clear()
 
     def _purge(self, now: datetime) -> None:
         """丢弃过期信号（价格已漂移，执行没有意义）。"""
@@ -426,6 +470,9 @@ class LiveTrader:
             "trading": is_trading_hours(now),
             "tick_interval": self.settings.paper_tick_interval,
             "signal_ttl_minutes": self.settings.paper_signal_ttl_minutes,
+            # 五段式③：队列容量与「因容量被拒」的买入候选（0=不限制）
+            "queue_top_m": int(getattr(self.settings, "paper_trade_queue_top_m", 0) or 0),
+            "queue_rejected": list(self._queue_rejected),
             "last_tick": self._last_tick.strftime("%H:%M:%S") if self._last_tick else None,
             "last_tick_at": (
                 self._last_tick.isoformat(timespec="seconds")

@@ -139,6 +139,13 @@ class Settings(BaseSettings):
     paper_backlog_enabled: bool = True
     paper_backlog_max: int = 30
 
+    # ---------- 五段式③：交易队列容量（topM） ----------
+    # 待执行买单最多同时挂 M 条（卖出不受限，释放风险优先）。
+    # 为什么需要：自选最多 50 只，一次分析可能把几十条买单塞进队列，
+    # 既无法逐只盯，也会在开盘窗口按低分先到先得占掉名额。
+    # 0 = 不限制（回到旧行为）。超出的买单不入队，原因记在 /api/paper/live 的 queue_rejected。
+    paper_trade_queue_top_m: int = 5
+
     # ---------- 执行口径对齐回测（见 BACKTEST_LOG 记录 #19） ----------
     # 为什么需要：回测用「每日成交额 TopN」池，实盘此前是全市场扫描，
     # 于是回测里选不到的票（尤其北交所小票）被真实买入，回测结论无法解释实盘。

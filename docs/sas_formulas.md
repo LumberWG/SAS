@@ -277,6 +277,10 @@ paper_position_lots(code, shares, cost_price, buy_date, tag)
 - **候补队列**：`paper_backlog_enabled`；仅「持仓已满 / 总仓位已达上限 / 资金不足一手」三种 skip 入候补，
   按评分降序在有剩余名额时补位（同样受开盘窗口约束），有效到当日收盘（非交易时段顺延次日）。
 - **卖出优先于买入**：队列按 `(action != "sell", -score)` 排序，卖完再按评分从高到低买。
+- **交易队列容量（五段式③）**：`paper_trade_queue_top_m`（默认 5）——待执行**买单**最多同时挂 M 条，
+  同一批按 14 因子总分降序择优入队；超额的不入队，原因写入 `queue_rejected`
+  （`GET /api/paper/live` 暴露，前端「④ 交易池」页以「未入队 名称/分值」展示）。
+  卖出信号不受限（释放风险优先）；同一只票更新建议不重复占位；`0` = 不限制（旧行为）。
 - **自动 / 手动模式**：手动模式只刷新报价与展示建议，不执行任何买卖（含止盈止损），由用户在模拟交易页手动下单。
 
 ---
@@ -295,6 +299,7 @@ paper_position_lots(code, shares, cost_price, buy_date, tag)
 | `paper_rotation_enabled` | **False** | 满仓轮动替换开关 | engine |
 | `paper_rotation_min_score / gap / max_per_day` | 40 / 20 / 1 | 轮动门槛、分差、每日次数 | engine |
 | `paper_backlog_enabled / max` | True / 30 | 候补队列开关/上限 | live |
+| `paper_trade_queue_top_m` | 5 | 交易队列**买入**容量 topM（0=不限，卖出不受限） | live |
 | `paper_exclude_bj` | True | 排除北交所 | engine |
 | `paper_pool_top_n` | 300 | 成交额 TopN 池（对齐回测，0=不限） | engine |
 | `paper_atr_stop_mult / max` | 2.0 / 0.20 | ATR 止损放宽倍数/上限（0=固定 8%） | engine |
@@ -345,6 +350,9 @@ paper_position_lots(code, shares, cost_price, buy_date, tag)
 - **做T护栏用当日指数收盘**：`_t_engine` 的 crash guard 读 `idx_close[date]`（当日收盘）判断当日跌幅，
   属于未来函数；线上 `t_tick` 用的是盘中快照涨跌幅。做T结论只能看方向，不能当收益预测。
 - **候补与轮动**：回测无候补队列，满仓/资金不足直接丢弃（实盘会顺延到窗口内补位）。
+- **交易队列容量**：回测没有队列概念，买单数只受剩余名额（`max_positions - 持仓`）约束；线上额外限
+  `paper_trade_queue_top_m`(5) 只买入候选。M 小于剩余名额时线上更保守，回测收益会略高估
+  （满分票扎堆的日子尤甚），对照时需注意。
 - **止损止盈触发**：回测用日线 `low/high`（或分钟线）判定，实盘每 5 秒用最新价判定，
   盘中被扫的止损在两端不完全等价。
 - **指数 K 线新鲜度**：`regime_ma` 依赖 `idx_sh000001.parquet`，该文件由开机预热与 16:00 日更刷新；
@@ -376,7 +384,7 @@ paper_position_lots(code, shares, cost_price, buy_date, tag)
 | --- | --- | --- |
 | ① 一选 | `scanner` 全市场或 `top_amount:N` 扫描，命中写 `signals`（含 `score/rank`） | 命中结果**没有作为独立「池」被二次筛选**：`_auto_watch_hits` 直接把 Top`scan_auto_watch_limit`(50) 写进自选，池层与自选层被合并 |
 | ② 二选 | `_auto_watch_hits` 按技术面 ±8 快评排序取 50 加自选；`auto_watch_top_n`(10) 只在盘后任务里用 | 一选/二选共用同一评分与同一个 N，缺少「宽池 → 小关注集」的两级收口 |
-| ③ 三选 | 14 因子对**全部自选**打分 → 买卖建议 → `live_trader.submit` **全部入队**（无 M 上限）；`paper_scan_autotrade_top_n`(10) 只限制「扫描后立即分析」的只数 | **队列没有 topM**：自选最多 50 只，一次分析可能全部入队 |
+| ③ 三选 | 14 因子对**全部自选**打分 → 买卖建议 → `live_trader.submit` 入队；**2026-10-29 已补 topM 收口**：买入按总分降序只留前 `paper_trade_queue_top_m`(5) 条，超额记 `queue_rejected`；`paper_scan_autotrade_top_n`(10) 只限制「扫描后立即分析」的只数 | 自选仍可能一次全部分析（属计算成本，不入队），队列层已收敛 |
 | ④ 进池 | 准入散在四处：`_buy_allowed`（范围/北交所/名称/成交额池）、大盘择时闸门、评分分档（<25 只记录）、满仓/资金；候补队列近似"池" | 无**统一判定层**，规则分散难审计、前端无法解释「为什么没买」 |
 | ⑤ 成交 | `tick` 撮合：开盘 5 分钟窗口 + 30 分钟信号 TTL，价格取实时价 | **完全没有切入点条件**：不校验相对信号价的溢价、不要求回踩、不看分时强弱，只有「时间窗」 |
 
@@ -384,7 +392,7 @@ paper_position_lots(code, shares, cost_price, buy_date, tag)
 
 | # | 内容 | 参数/接口 | 影响面 |
 | --- | --- | --- | --- |
-| 1 | **队列收敛 topM**：每次分析后，买入建议按 14 因子总分降序只取前 M 入队，其余记「队列已满」不出队 | 新增 `paper_trade_queue_top_m`（默认 5）；卖出建议不受限（释放风险优先） | `scheduler` 开盘/盘中分析、`scanner` 选股联动 |
+| 1 | **队列收敛 topM** ✅ 已实现（2026-10-29）：每次分析后，买入建议按 14 因子总分降序只取前 M 入队，其余记 `queue_rejected`，前端 ④ 页展示「未入队 + 分值」 | `paper_trade_queue_top_m`（默认 5，0=不限）；卖出不受限；同股更新不重复占位 | 已上线，`LiveTrader.submit` 单点收口（开盘/盘中/选股联动三处调用全覆盖） |
 | 2 | **交易池判定统一**：抽 `PaperEngine.entry_check(code, rec, ctx) -> (bool, reason)`，把现有四类规则合并，并暴露到 API/前端 | 无新参数，纯重构 | `engine` / API，行为需逐位不变（先加回归测试） |
 | 3 | **切入点**：不追高、要求回踩、超时放弃 | `paper_entry_max_chase`（相对信号价上限，默认 1.5%）、`paper_entry_pullback`（需回踩信号价 -Y%，0=不限）、`paper_entry_timeout_minutes`（默认 30，与 TTL 同量级） | `LiveTrader.tick` 撮合前判定；`paper_trades` 记录 `signal_price` 便于复盘 |
 | 4 | **一选/二选分离**：一选只落 `signals`（已有），新增「二选」从当日 signals 取 score Top`auto_watch_top_n` 加自选，`scan_auto_watch_limit` 与二选对齐下调 | 复用现有参数，仅改取值与调度 | `scanner` / `scheduler` |
