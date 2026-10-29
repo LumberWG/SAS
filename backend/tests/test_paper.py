@@ -546,6 +546,58 @@ class TestQueueTopM:
         assert trader._queue_rejected == []
 
 
+class TestEntryPoint:
+    """五段式⑤：切入点——不追高 / 回踩 / 信号价缺失不限制。"""
+
+    @staticmethod
+    def _rec(code="600004", price=None, score=45.0):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(
+            code=code, name="测试A", action="buy", score=score, reason="突破", price=price
+        )
+
+    def test_chase_rejected(self, engine, monkeypatch):
+        """现价高于信号价 1.5% 以上 → 追高放弃。"""
+        eng, _db, _prices = engine
+        monkeypatch.setattr(eng.settings, "paper_entry_max_chase", 0.015, raising=False)
+        monkeypatch.setattr(eng.settings, "paper_entry_pullback", 0.0, raising=False)
+
+        ok, why = eng.entry_price_ok(self._rec(price=10.0), 10.2, 10.0)
+        assert ok is False and "追高" in why
+        assert eng.entry_price_ok(self._rec(price=10.0), 10.1, 10.0)[0] is True
+
+    def test_pullback_required(self, engine, monkeypatch):
+        """要求回踩 2%：不低开则放弃，低开够深才买。"""
+        eng, _db, _prices = engine
+        monkeypatch.setattr(eng.settings, "paper_entry_max_chase", 0.05, raising=False)
+        monkeypatch.setattr(eng.settings, "paper_entry_pullback", 0.02, raising=False)
+
+        ok, why = eng.entry_price_ok(self._rec(), 10.0, 10.0)
+        assert ok is False and "未回踩" in why
+        assert eng.entry_price_ok(self._rec(), 9.7, 10.0)[0] is True
+
+    def test_missing_signal_price_allows(self, engine, monkeypatch):
+        """老信号没有信号价 → 只校验价格有效性，不做切入点限制。"""
+        eng, _db, _prices = engine
+        monkeypatch.setattr(eng.settings, "paper_entry_max_chase", 0.015, raising=False)
+
+        assert eng.entry_price_ok(self._rec(), 10.9, None)[0] is True
+
+    def test_execute_skips_chasing(self, engine, monkeypatch):
+        """端到端：信号价 10、现价 10.3（+3%）→ 不成交，原因写进结果。"""
+        eng, db, _prices = engine
+        monkeypatch.setattr(eng.settings, "paper_entry_max_chase", 0.015, raising=False)
+        eng.ensure_account()
+
+        results = asyncio.run(eng.execute_recommendations(
+            [self._rec(code="600004", price=10.0)], prices={"600004": 10.3}))
+
+        assert results[0].side == "skip"
+        assert "追高" in results[0].reason
+        assert db.get_paper_position("600004") is None
+
+
 class TestRotation:
     """满仓后的轮动替换：用显著更高分的新票换掉最弱持仓。"""
 

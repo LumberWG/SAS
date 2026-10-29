@@ -59,6 +59,15 @@ def _rec_score(rec) -> float:
         return 0.0
 
 
+def _rec_price(rec) -> float | None:
+    """建议携带的「信号价」（缺失/非法返回 None → 不做切入点限制）。"""
+    try:
+        value = float(getattr(rec, "price", None) or 0.0)
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
 def _is_bj(code: str) -> bool:
     """北交所代码：920xxx / 43xxxx / 83xxxx / 87xxxx（4、8 开头的旧三类同属北交所）。"""
     return str(code).startswith(("920", "43", "83", "87", "4", "8"))
@@ -200,6 +209,63 @@ class PaperEngine:
             top_n = int(getattr(self.settings, "paper_pool_top_n", 0) or 0)
             return False, f"不在当日成交额Top{top_n}池（与回测口径对齐）"
         return True, ""
+
+    def entry_gate(self, rec, *, positions: dict, market_weak: bool) -> tuple[bool, str]:
+        """五段式④ 交易池判定（前置闸，不取价）：择时 / 已持仓 / 板块范围 / 名额。
+
+        与 :meth:`entry_price_ok` 合起来构成 ``entry_check``；拆成两段是为了
+        保持原实现的取价时机——被前置闸拒掉的票不必再去拉一次实时价。
+        """
+        code = str(getattr(rec, "code", "") or "")
+        name = str(getattr(rec, "name", "") or code)
+        if market_weak:
+            return False, "大盘弱势，暂停买入"
+        if code in positions:
+            return False, "已持仓"
+        allowed, why = self._buy_allowed(code, name)
+        if not allowed:
+            return False, why
+        max_positions = self.settings.paper_max_positions
+        if len(positions) >= max_positions:
+            return False, f"持仓已满({max_positions}只)"
+        return True, ""
+
+    def entry_price_ok(
+        self, rec, price: float | None, signal_price: float | None
+    ) -> tuple[bool, str]:
+        """五段式⑤ 切入点判定（取价后）：价格有效 + 不追高 + 回踩要求。
+
+        - 不追高：``price > 信号价 × (1 + paper_entry_max_chase)`` 放弃；
+        - 回踩：``paper_entry_pullback > 0`` 时要求 ``price ≤ 信号价 × (1 - pullback)``；
+        - 信号价缺失（老信号 / 手动信号）时只做价格有效性检查，不做切入点限制。
+        """
+        if price is None or price <= 0:
+            return False, "取价失败"
+        chase = float(getattr(self.settings, "paper_entry_max_chase", 0.0) or 0.0)
+        pullback = float(getattr(self.settings, "paper_entry_pullback", 0.0) or 0.0)
+        if signal_price and signal_price > 0:
+            if pullback > 0 and price > signal_price * (1 - pullback):
+                return False, f"未回踩（需低于信号价 {pullback:.1%}）"
+            if chase > 0 and price > signal_price * (1 + chase):
+                return False, f"追高（高于信号价 {chase:.1%}）"
+        return True, ""
+
+    def entry_check(
+        self,
+        rec,
+        price: float | None = None,
+        signal_price: float | None = None,
+        *,
+        positions: dict | None = None,
+        market_weak: bool = False,
+    ) -> tuple[bool, str]:
+        """五段式④⑤ 统一判定入口：前置闸 + 切入点（供 API/测试/前端解释原因）。"""
+        if positions is None:
+            positions = {p["code"]: p for p in db.list_paper_positions()}
+        ok, why = self.entry_gate(rec, positions=positions, market_weak=market_weak)
+        if not ok or price is None:
+            return ok, why
+        return self.entry_price_ok(rec, price, signal_price)
 
     def _stop_distance(self, code: str) -> float:
         """止损距离：固定 8%，开启 ATR 止损时取 max(8%, N×ATR%)，上限可配。
@@ -419,36 +485,21 @@ class PaperEngine:
         # 现有持仓市值 = 总资产 - 现金；总仓位上限扣掉已有仓位后才是本轮可投预算
         exposure_cap = total_asset * self.settings.paper_max_total_exposure
         available_budget = max(0.0, exposure_cap - max(0.0, total_asset - cash))
-        if market_weak:
-            for rec in buy_candidates:
-                results.append(TradeResult(
-                    rec.code, getattr(rec, "name", "") or rec.code, "skip", 0,
-                    0.0, 0.0, 0.0, "大盘弱势，暂停买入"))
-            buy_candidates = []
-
         candidates: list[tuple[float, object, float]] = []
         for rec in buy_candidates:
-            if rec.code in positions:
+            name = getattr(rec, "name", "") or rec.code
+            # ④ 交易池前置闸：择时 / 已持仓 / 板块范围 / 名额
+            ok, why = self.entry_gate(rec, positions=positions, market_weak=market_weak)
+            if not ok:
                 results.append(TradeResult(
-                    rec.code, getattr(rec, "name", ""), "skip", 0,
-                    0.0, 0.0, 0.0, "已持仓"))
-                continue
-            allowed, why = self._buy_allowed(rec.code, getattr(rec, "name", ""))
-            if not allowed:
-                results.append(TradeResult(
-                    rec.code, getattr(rec, "name", "") or rec.code, "skip", 0,
-                    0.0, 0.0, 0.0, why))
-                continue
-            if len(positions) >= max_positions:
-                results.append(TradeResult(
-                    rec.code, getattr(rec, "name", ""), "skip", 0,
-                    0.0, 0.0, 0.0, f"持仓已满({max_positions}只)"))
+                    rec.code, name, "skip", 0, 0.0, 0.0, 0.0, why))
                 continue
             price = await self._latest_price(rec.code, prices)
-            if price is None or price <= 0:
+            # ⑤ 切入点：价格有效 / 不追高 / 回踩要求
+            ok, why = self.entry_price_ok(rec, price, _rec_price(rec))
+            if not ok:
                 results.append(TradeResult(
-                    rec.code, getattr(rec, "name", ""), "skip", 0,
-                    0.0, 0.0, 0.0, "取价失败"))
+                    rec.code, name, "skip", 0, 0.0, 0.0, 0.0, why))
                 continue
             candidates.append((_rec_score(rec), rec, price))
 

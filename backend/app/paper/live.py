@@ -39,6 +39,11 @@ _MAX_RECENT_TRADES = 20
 _MODE_KEY = "paper_trade_mode"
 #: 出现这些 skip 原因时说明信号有效、只是当下没名额/没钱，转入候补队列
 _BACKLOG_REASONS = ("持仓已满", "总仓位已达上限", "资金不足一手")
+#: 五段式④⑤：被判定规则/切入点拒掉的买入原因（前端「④ 交易池」展示，白名单避免噪音）
+_ENTRY_REJECT_REASONS = (
+    "追高", "未回踩", "大盘弱势", "不在当日成交额", "不在沪深主板",
+    "北交所", "名称缺失", "持仓已满", "总仓位已达上限",
+)
 
 
 @dataclass
@@ -93,6 +98,8 @@ class LiveTrader:
         self._executed = 0
         #: 最近一批「因队列容量未入队」的买入信号（五段式③的判定证据）
         self._queue_rejected: list[dict[str, Any]] = []
+        #: 最近一批「被判定规则/切入点拒掉」的买入信号（五段式④⑤的证据）
+        self._entry_rejected: list[dict[str, Any]] = []
 
     # ------------------------------------------------------------------
     # 交易模式（自动 / 手动）
@@ -243,7 +250,13 @@ class LiveTrader:
         买单在「开盘窗口」模式下只可能在下一个窗口成交，有效期必须相应顺延，
         否则 13:01 产生的买单会在 13:31 过期，永远等不到次日开盘。
         """
-        ttl = timedelta(minutes=self.settings.paper_signal_ttl_minutes)
+        ttl_minutes = int(self.settings.paper_signal_ttl_minutes)
+        if action == "buy":
+            # 五段式⑤：切入点超时（0 = 沿用统一 TTL）
+            timeout = int(getattr(self.settings, "paper_entry_timeout_minutes", 0) or 0)
+            if timeout > 0:
+                ttl_minutes = min(ttl_minutes, timeout)
+        ttl = timedelta(minutes=ttl_minutes)
         window = self._window_minutes()
         if action == "buy" and window > 0 and not self._in_buy_window(now):
             return self._next_buy_window_start(now) + timedelta(minutes=window) + ttl
@@ -257,6 +270,7 @@ class LiveTrader:
         self._last_prices.clear()
         self._last_error = ""
         self._queue_rejected.clear()
+        self._entry_rejected.clear()
 
     def _purge(self, now: datetime) -> None:
         """丢弃过期信号（价格已漂移，执行没有意义）。"""
@@ -363,6 +377,8 @@ class LiveTrader:
             SimpleNamespace(
                 code=s.code, name=s.name, action=s.action, reason=s.reason,
                 score=s.score,
+                # ⑤ 切入点判定要用信号价（不追高/回踩），丢了就只能裸价成交
+                price=s.price_at_signal,
             )
             for s in ordered
         ]
@@ -378,6 +394,7 @@ class LiveTrader:
                     recs.append(SimpleNamespace(
                         code=signal.code, name=signal.name, action=signal.action,
                         reason=signal.reason, score=signal.score,
+                        price=signal.price_at_signal,
                     ))
 
         results = await self.engine.execute_recommendations(recs, prices=prices)
@@ -386,6 +403,18 @@ class LiveTrader:
         # T+1）本轮确定无法成交，直接出队，避免每个 tick 反复尝试。
         retry = {r.code for r in results if r.side == "skip" and r.reason == "取价失败"}
         executed = [r for r in results if r.side != "skip"]
+
+        # 五段式④⑤的可观测性：本轮被判定规则/切入点拒掉的买入原因
+        self._entry_rejected = [
+            {
+                "code": r.code,
+                "name": r.name,
+                "reason": r.reason,
+                "chase": self.settings.paper_entry_max_chase,
+            }
+            for r in results
+            if r.side == "skip" and any(k in r.reason for k in _ENTRY_REJECT_REASONS)
+        ][:10]
 
         # 候补：因满仓/总仓位上限/资金不足没买成的高分票，存起来等名额释放
         deferred = self._defer_skips(results, now)
@@ -473,6 +502,12 @@ class LiveTrader:
             # 五段式③：队列容量与「因容量被拒」的买入候选（0=不限制）
             "queue_top_m": int(getattr(self.settings, "paper_trade_queue_top_m", 0) or 0),
             "queue_rejected": list(self._queue_rejected),
+            # 五段式⑤：切入点参数与本轮被拒原因
+            "entry_max_chase": float(getattr(self.settings, "paper_entry_max_chase", 0.0) or 0.0),
+            "entry_pullback": float(getattr(self.settings, "paper_entry_pullback", 0.0) or 0.0),
+            "entry_timeout_minutes": int(
+                getattr(self.settings, "paper_entry_timeout_minutes", 0) or 0),
+            "entry_rejected": list(self._entry_rejected),
             "last_tick": self._last_tick.strftime("%H:%M:%S") if self._last_tick else None,
             "last_tick_at": (
                 self._last_tick.isoformat(timespec="seconds")

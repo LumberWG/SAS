@@ -54,6 +54,10 @@ class BacktestRequest(BaseModel):
     max_gain_5d: float | None = Field(None, description="近5日涨幅上限（不追已涨）")
     min_volume_ratio: float | None = Field(None, description="量比下限")
     min_turnover_rate: float | None = Field(None, description="换手率下限（%）")
+    # ---- 五段式③④⑤：队列容量与切入点（None=不启用） ----
+    queue_top_m: int | None = Field(None, ge=0, le=50, description="交易队列买入容量 topM")
+    entry_max_chase: float | None = Field(None, description="不追高：次日开盘涨幅上限")
+    entry_pullback: float | None = Field(None, description="回踩：要求低开此比例才买（0=不限）")
     invert_score: bool | None = Field(None, description="反转选股：分数取反")
     # ---- 止损 / 止盈 ----
     stop_loss: float | None = Field(None, gt=0, le=0.5, description="止损比例（相对成本）")

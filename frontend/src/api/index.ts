@@ -659,6 +659,12 @@ export interface PaperLiveStatus {
   queue_top_m?: number
   /** 因队列容量未入队的买入候选（最近一批分析） */
   queue_rejected?: Array<{ code: string; name: string; score: number; reason: string }>
+  /** 五段式⑤：切入点参数（不追高比例 / 回踩要求 / 超时分钟） */
+  entry_max_chase?: number
+  entry_pullback?: number
+  entry_timeout_minutes?: number
+  /** 本轮被判定规则/切入点拒掉的买入信号 */
+  entry_rejected?: Array<{ code: string; name: string; reason: string }>
   recent_trades: PaperLiveTrade[]
   last_error: string
   prices: Record<string, number>

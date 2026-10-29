@@ -30,6 +30,9 @@ const form = reactive<Record<string, any>>({
   max_gain_5d: null,
   min_volume_ratio: null,
   min_turnover_rate: null,
+  queue_top_m: null,
+  entry_max_chase: null,
+  entry_pullback: null,
   invert_score: null,
   stop_loss: null,
   take_profit: null,
@@ -88,6 +91,11 @@ const groups: { name: string; items: ParamDef[] }[] = [
     { key: 'min_volume_ratio', label: '量比下限', type: 'number' },
     { key: 'min_turnover_rate', label: '换手率下限', type: 'number', unit: '%' },
     { key: 'invert_score', label: '反转选股', type: 'bool' },
+  ]},
+  { name: '五段式(队列/切入点)', items: [
+    { key: 'queue_top_m', label: '交易队列topM', type: 'number', min: 0, max: 50, unit: '每日买单数' },
+    { key: 'entry_max_chase', label: '不追高', type: 'number', step: 0.005, unit: '开盘溢价上限' },
+    { key: 'entry_pullback', label: '回踩要求', type: 'number', step: 0.005, unit: '0=不限' },
   ]},
   { name: '止损/止盈', items: [
     { key: 'stop_loss', label: '止损比例', type: 'number', min: 0.01, max: 0.5, step: 0.01, unit: '成本×' },

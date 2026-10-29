@@ -155,6 +155,15 @@ class PipelineParams:
     t_rebound_sell: float | None = None               # 反弹至跌幅小于此比例减 t_size 仓
     t_limit_sell_half: bool | None = None             # 涨停且封板弱则卖 1/2（底仓，T+1 可卖）
     t_crash_guard: float | None = None                # 大盘当日跌幅超此比例暂停做T（防极速下跌）
+    # ---- 五段式③④⑤（None = 不启用，与历史回测记录保持可比） ----
+    #: ③ 交易队列容量：每日最多生成多少条买入委托（按评分降序截断，模拟线上 topM）。
+    queue_top_m: int | None = None
+    #: ⑤ 不追高：次日开盘涨幅上限（相对信号日收盘价）。与 ``max_open_gain`` 同口径，
+    #: 区别是这里属于「切入点」参数组，便于一次性打开五段式执行规则做统一对照。
+    entry_max_chase: float | None = None
+    #: ⑤ 回踩：要求次日开盘价 ≤ 信号日收盘 × (1 − entry_pullback)，即**低开才买**。
+    #: 0/None = 不要求回踩（照价买，线上旧行为）。
+    entry_pullback: float | None = None
 
 
 def calc_fee(side: str, amount: float) -> float:
@@ -823,6 +832,8 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
         pool_budget = max(0.0, total_asset * day_exposure - mv_open)
         slots = max_positions - len(positions)
         ranked = sorted(pending_buys, key=lambda b: -b["score"])
+        if params.queue_top_m is not None and int(params.queue_top_m) > 0:
+            ranked = ranked[: int(params.queue_top_m)]   # ③ 交易队列容量 topM
         pending_buys = []
         eligible = [b for b in ranked if b["score"] >= half_score][:slots]
         weights = {
@@ -843,6 +854,11 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
                 continue  # 涨停或停牌买不到（判定用原始开盘价，滑点不影响能否成交）
             # E2：高开太多不追（次日开盘涨幅上限），缺席即沿用线上「照价买入」
             if params.max_open_gain is not None and pc and px / pc - 1 > params.max_open_gain:
+                continue
+            # ⑤ 切入点：不追高（信号价≈前收）与回踩要求，与线上 entry_price_ok 同口径
+            if params.entry_max_chase is not None and pc and px / pc - 1 > params.entry_max_chase:
+                continue
+            if params.entry_pullback and pc and px > pc * (1 - float(params.entry_pullback)):
                 continue
             px = px * (1 + slippage)   # E39：买入按不利方向滑点成交（股数按滑点后价格算）
             budget = min(
@@ -1127,6 +1143,9 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
             "intraday_minutes": params.intraday_minutes,
             "rebalance_days": rebalance_every,
             "max_open_gain": params.max_open_gain,
+            "queue_top_m": params.queue_top_m,
+            "entry_max_chase": params.entry_max_chase,
+            "entry_pullback": params.entry_pullback,
             "max_gain_5d": params.max_gain_5d,
             "min_volume_ratio": params.min_volume_ratio,
             "min_turnover_rate": params.min_turnover_rate,

@@ -89,8 +89,9 @@ class Settings(BaseSettings):
     # 收盘自动选股后，将评分 Top N 的命中自动加入自选股
     auto_watch_enabled: bool = True
     auto_watch_top_n: int = 10
-    # 每轮手动扫描后，命中按评分 Top N 写入「程序自选」（0 表示关闭）
-    scan_auto_watch_limit: int = 50
+    # 五段式②：扫描命中即「股票池」（一选，全部落 signals 表），
+    # 这里是从池内按技术面评分取前 N 只加入自选的口径（二选，0 表示关闭）
+    scan_auto_watch_limit: int = 10
     # 盘中自选股分析间隔（分钟）。1 分钟一轮：分析本身走本地K线缓存，
     # 单轮耗时约 1~3 秒；「分析 → 成交」由实时撮合（paper_tick）负责，
     # 超过一轮耗时也不会堆积（max_instances=1 自动跳过）。
@@ -145,6 +146,16 @@ class Settings(BaseSettings):
     # 既无法逐只盯，也会在开盘窗口按低分先到先得占掉名额。
     # 0 = 不限制（回到旧行为）。超出的买单不入队，原因记在 /api/paper/live 的 queue_rejected。
     paper_trade_queue_top_m: int = 5
+
+    # ---------- 五段式⑤：切入点（排队不等于成交） ----------
+    # 1) 不追高：现价高于「信号价」超过此比例就不买（0.015 = 1.5%）。
+    #    盘后产生的信号在次日开盘常跳空，追进去等于用最差价格接盘。
+    paper_entry_max_chase: float = 0.015
+    # 2) 回踩：要求现价低于信号价此比例才买（0 = 不要求回踩，照价买）。
+    #    开盘直接低开够深时买，避免在下跌中继接刀（与「不追高」互补）。
+    paper_entry_pullback: float = 0.0
+    # 3) 超时：信号超过此分钟数未成交就放弃（0 = 沿用 paper_signal_ttl_minutes）。
+    paper_entry_timeout_minutes: int = 0
 
     # ---------- 执行口径对齐回测（见 BACKTEST_LOG 记录 #19） ----------
     # 为什么需要：回测用「每日成交额 TopN」池，实盘此前是全市场扫描，

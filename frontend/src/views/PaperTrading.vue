@@ -613,6 +613,34 @@ onUnmounted(() => {
       </p>
     </div>
 
+    <!-- 切入点判定（五段式⑤）：进队不等于成交，价格/时间不满足就不买 -->
+    <div v-if="tab === 'pool'" class="glass-card p-5">
+      <div class="mb-3 flex flex-wrap items-center justify-between gap-2">
+        <h3 class="text-subheading">切入点判定</h3>
+        <span class="text-[11px] text-content-faint">
+          不追高 ≤ {{ ((live?.entry_max_chase ?? 0) * 100).toFixed(1) }}% ·
+          回踩需低于信号价
+          {{ live?.entry_pullback ? (live.entry_pullback * 100).toFixed(1) + '%' : '不限' }} ·
+          超时 {{ live?.entry_timeout_minutes ? live.entry_timeout_minutes + ' 分钟' : '沿用信号 TTL' }}
+        </span>
+      </div>
+      <div v-if="live?.entry_rejected?.length" class="flex flex-col gap-1.5">
+        <span
+          v-for="r in live.entry_rejected"
+          :key="r.code"
+          class="inline-flex items-center gap-2 rounded-md border border-base-600 px-2 py-1 text-[11px] text-content-muted"
+          :title="r.reason"
+        >
+          {{ r.name }}
+          <span class="font-num text-content-faint">{{ r.code }}</span>
+          <span class="text-warn">{{ r.reason }}</span>
+        </span>
+      </div>
+      <p v-else class="text-[11px] text-content-faint">
+        本轮没有被判定规则/切入点拒掉的买入信号。
+      </p>
+    </div>
+
     <!-- 资金与净值 -->
     <div v-if="tab === 'account'" class="grid grid-cols-1 gap-5 xl:grid-cols-3">
       <div class="glass-card p-5">
