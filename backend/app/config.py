@@ -237,6 +237,12 @@ class Settings(BaseSettings):
         "http://127.0.0.1:5174",
     ]
 
+    # ---------- 访问控制 ----------
+    # 公开部署（如 cpolar 隧道、云主机）时设置：所有 /api/* 请求需带 `X-API-Token`
+    # 请求头（或 `Authorization: Bearer <token>`），否则 401。留空 = 不校验（本机开发）。
+    # 该字段在 READONLY_KEYS 里：设置页不展示、不可改，避免令牌本身被接口读走。
+    api_token: str = ""
+
     # ---------- 免责声明 ----------
     # 接口响应中统一注入该字段，前端在页面上显著展示
     disclaimer: str = (

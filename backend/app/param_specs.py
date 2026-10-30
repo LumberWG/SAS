@@ -265,7 +265,74 @@ READONLY_KEYS: frozenset[str] = frozenset({
     # 预留渠道：EmailNotifier 目前只打一行日志并返回 False，打开它反而会让每次
     # 推送多记一条「渠道失败」，属于"看着能开、开了更糟"的开关
     "notify_email",
+    # 访问令牌：只从 .env 读，绝不能出现在 GET /api/settings 的返回里
+    # （否则等于把钥匙挂在门上）
+    "api_token",
 })
+
+#: 需要脱敏回显的项：接口只返回掩码（`sk-****abcd`），前端原样回传视为「未修改」。
+#: 这类值要么是密钥、要么是带 token 的机器人地址，明文回显等于公开。
+SECRET_KEYS: frozenset[str] = frozenset({"llm_api_key", "notify_webhook_url"})
+
+#: 掩码标记
+MASK_MARK = "****"
+
+
+def mask_secret(value: Any) -> str:
+    """密钥/地址脱敏：保留头 3 位与尾 4 位，中间打码。
+
+    空值返回空串（前端据空串判断「未配置」）；太短的值整体打码，避免拼出原文。
+    """
+    text = "" if value is None else str(value)
+    if not text:
+        return ""
+    if len(text) <= 10:
+        return MASK_MARK
+    return f"{text[:3]}{MASK_MARK}{text[-4:]}"
+
+#: 条件可见：子键 → 父键。
+#:
+#: 语义只有两条，够用且不用写表达式：
+#:   • 父键是开关（bool）→ 父为 true 时子项才显示；
+#:   • 父键是文本/数字 → 父为空（空串 / 0 / false）时子项隐藏。
+#:
+#: 为什么交给前端算：显隐要跟着**草稿**即时变化（打开「做T 总开关」立刻看到下面
+#: 八个参数），后端只声明关系，不参与渲染决策；`depends_on` 也可以套娃
+#: （`paper_scan_autotrade` 依赖 `paper_auto_trade`，它自己的两个子项再依赖它）。
+_DEPENDS_ON: dict[str, str] = {
+    # 做T 引擎：总开关关着时，下面 8 个参数改了也没有任何效果
+    "paper_t_size": "paper_t_active",
+    "paper_t_up_sell": "paper_t_active",
+    "paper_t_up_buyback": "paper_t_active",
+    "paper_t_down_add": "paper_t_active",
+    "paper_t_down_full": "paper_t_active",
+    "paper_t_rebound_sell": "paper_t_active",
+    "paper_t_limit_sell_half": "paper_t_active",
+    "paper_t_crash_guard": "paper_t_active",
+    # LLM：未启用时模型名/密钥/超时都无从生效（启用后自动降级与否由它自己判断）
+    "llm_base_url": "llm_enabled",
+    "llm_api_key": "llm_enabled",
+    "llm_model": "llm_enabled",
+    "llm_timeout": "llm_enabled",
+    # 影子账户：起点为空 = 不启用，其余三项只是它的作用域
+    "shadow_tag": "shadow_start",
+    "shadow_universe": "shadow_start",
+    "shadow_profiles": "shadow_start",
+    # 各种「总开关 + 细项」：关掉后细项无意义
+    "paper_rotation_min_score": "paper_rotation_enabled",
+    "paper_rotation_gap": "paper_rotation_enabled",
+    "paper_rotation_max_per_day": "paper_rotation_enabled",
+    "paper_backlog_max": "paper_backlog_enabled",
+    "paper_large_cap_yi": "paper_exclude_large_cap",
+    "auto_watch_top_n": "auto_watch_enabled",
+    "scheduler_timezone": "scheduler_enabled",
+    # 自动交易关掉 = 不产生委托，撮合方式（tick / 批量）与收盘自动下单都无从谈起
+    "paper_live_enabled": "paper_auto_trade",
+    "paper_tick_interval": "paper_auto_trade",
+    "paper_scan_autotrade": "paper_auto_trade",
+    "paper_scan_autotrade_top_n": "paper_scan_autotrade",
+    "paper_scan_autotrade_overnight": "paper_scan_autotrade",
+}
 
 #: 运行时覆盖在 app_state 里的前缀（`RUNTIME_KEYS` 那几项用无前缀的既有键）
 OVERRIDE_PREFIX = "cfg:"
@@ -566,6 +633,9 @@ def update_settings(changes: dict[str, Any]) -> dict[str, Any]:
             raise ValueError(f"未知参数: {key}")
         if key in READONLY_KEYS:
             raise ValueError(f"{key} 不支持页面修改（路径/列表类，请改 .env 后重启）")
+        # 密钥类：前端拿到的是掩码，原样回传说明用户没改，跳过（写库会毁掉真值）
+        if key in SECRET_KEYS and isinstance(raw, str) and MASK_MARK in raw:
+            continue
         value = _coerce_value(key, raw, field.default)
         floor = _MIN_EXCLUSIVE.get(key)
         if floor is not None and isinstance(value, (int, float)) and value <= floor:
@@ -695,7 +765,8 @@ def settings_overview() -> dict:
             # 短名进卡片，整句说明进 tooltip（前端 `tipOf`）
             "label": _short_label(key, texts.get(key, "")),
             "desc": texts.get(key) or _DESC_OVERRIDES.get(key, ""),
-            "value": _jsonable(value),
+            # 密钥/机器人地址只回显掩码；前端原样回传掩码时 `update_settings` 视为未改动
+            "value": mask_secret(value) if key in SECRET_KEYS else _jsonable(value),
             "type": "bool" if isinstance(default, bool)
             else "int" if isinstance(default, int)
             else "float" if isinstance(default, float)
@@ -708,6 +779,12 @@ def settings_overview() -> dict:
             "runtime": runtime,
             "note": _NOTE_OVERRIDES.get(key, ""),
         }
+        if key in SECRET_KEYS:
+            # 前端据此渲染「已设置（掩码）」提示与 password 输入框
+            item["secret"] = True
+        if key in _DEPENDS_ON:
+            # 条件可见：父开关（或空的文本父项）不满足时，前端把这一行藏起来
+            item["depends_on"] = _DEPENDS_ON[key]
         # 只读项（路径/列表类）与硬编码常量直接不进清单：它们改不了
         # （前者要改 .env 重启，后者要改代码），展示了也没用，只会让人以为能调。
         if kind != "readonly":

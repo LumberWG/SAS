@@ -4,9 +4,11 @@ import pytest
 from app.config import Settings, get_settings
 from app.data.cache import db
 from app.param_specs import (
+    MASK_MARK,
     OVERRIDE_PREFIX,
     READONLY_KEYS,
     apply_persisted_overrides,
+    mask_secret,
     reset_settings,
     settings_overview,
     update_settings,
@@ -164,6 +166,107 @@ def test_min_value_guard():
     """数值下限集中在校验层，各入口不再各写一份。"""
     with pytest.raises(ValueError):
         update_settings({"paper_large_cap_yi": 0})
+
+
+@pytest.fixture
+def _llm_key_isolate():
+    """`llm_api_key` 不在自动隔离的 _KEYS 里，单独兜住，别把开发库的密钥写坏。"""
+    s = get_settings()
+    before = s.llm_api_key
+    reset_settings(["llm_api_key"])
+    yield s
+    reset_settings(["llm_api_key"])
+    s.llm_api_key = before
+
+
+def test_secret_values_are_masked_in_overview(_llm_key_isolate):
+    """密钥 / 机器人地址在接口里只回显掩码 —— 站点公网可达时明文等于公开。"""
+    s = _llm_key_isolate
+    s.llm_api_key = "sk-abcdefghijklmnop"
+    items = {i["key"]: i for g in settings_overview()["groups"] for i in g["items"]}
+    item = items["llm_api_key"]
+    assert item["secret"] is True
+    assert item["value"].endswith("mnop")
+    assert "defghij" not in item["value"]
+    assert MASK_MARK in item["value"]
+
+
+def test_masked_value_is_ignored_on_update(_llm_key_isolate):
+    """前端把掩码原样回传时视为「未修改」，不能把密钥写成 `sk-****mnop`。"""
+    s = _llm_key_isolate
+    s.llm_api_key = "sk-real-key-abcdef"
+    update_settings({"llm_api_key": mask_secret(s.llm_api_key)})
+    assert s.llm_api_key == "sk-real-key-abcdef"
+
+
+def test_secret_can_be_cleared_explicitly(_llm_key_isolate):
+    """显式传空串 = 清空（掩码逻辑只拦带 `****` 的回传，不拦真正的空值）。"""
+    s = _llm_key_isolate
+    s.llm_api_key = "sk-real-key-abcdef"
+    update_settings({"llm_api_key": ""})
+    assert s.llm_api_key == ""
+
+
+def test_depends_on_forms_valid_tree():
+    """条件可见的父键必须存在、本身可编辑，且不能成环。
+
+    前端只认 `depends_on` 一条关系（父为开关看真假、父为文本看非空），
+    所以这里守住「父键合法 + 单链无环」，避免某个键永远显示不出来。
+    """
+    items = {i["key"]: i for g in settings_overview()["groups"] for i in g["items"]}
+    parents = {k: it["depends_on"] for k, it in items.items() if it.get("depends_on")}
+    assert parents, "至少应有做T / LLM 这类条件项"
+    for child, parent in parents.items():
+        assert parent in items, f"{child} 的父键 {parent} 不在可编辑清单里"
+        seen = {child}
+        cursor = parent
+        while cursor in parents:
+            assert cursor not in seen, f"条件可见成环: {child}"
+            seen.add(cursor)
+            cursor = parents[cursor]
+
+    # 做T：总开关关着时 8 个子项都不该显示
+    t_children = [k for k, p in parents.items() if p == "paper_t_active"]
+    assert "paper_t_size" in t_children and len(t_children) == 8
+
+
+def test_reset_is_audited(tmp_path, monkeypatch):
+    """还原要留痕：谁、什么时候、还原了哪几项。"""
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+
+    audit_file = tmp_path / "audit.jsonl"
+    monkeypatch.setattr("app.audit.audit_path", lambda: audit_file)
+
+    with TestClient(app) as client:
+        r = client.post("/api/settings/reset", json={"keys": ["paper_max_positions"]})
+        assert r.status_code == 200
+
+    lines = audit_file.read_text(encoding="utf-8").splitlines()
+    assert lines, "还原没有写审计日志"
+    import json
+
+    entry = json.loads(lines[-1])
+    assert entry["action"] == "reset"
+    assert "paper_max_positions" in entry["keys"]
+
+
+def test_api_token_guard(monkeypatch):
+    """配了 API_TOKEN 后所有业务接口都要令牌，健康检查放行（部署脚本探活用）。"""
+    from fastapi.testclient import TestClient
+
+    from app.main import app
+
+    monkeypatch.setattr(get_settings(), "api_token", "tkn-123")
+
+    with TestClient(app) as client:
+        assert client.get("/api/settings").status_code == 401
+        ok = client.get("/api/settings", headers={"X-API-Token": "tkn-123"})
+        assert ok.status_code == 200
+        bearer = client.get("/api/settings", headers={"Authorization": "Bearer tkn-123"})
+        assert bearer.status_code == 200
+        assert client.get("/api/health").status_code == 200
 
 
 def test_queue_filter_shares_same_write_layer():

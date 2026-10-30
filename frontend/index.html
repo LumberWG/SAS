@@ -5,17 +5,20 @@
     <link rel="icon" type="image/svg+xml" href="/vite.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="description" content="SAS - A股智能分析系统，仅供学习研究，不构成投资建议" />
-    <meta name="color-scheme" content="dark" />
-    <meta name="theme-color" content="#0A0C10" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="theme-color" content="#F5F6F9" />
     <title>SAS · A股智能分析系统</title>
     <!-- 首帧前恢复上次选的主题，避免先闪一下深色再切浅色（键名与 src/stores/theme.ts 一致） -->
     <script>
-      try {
-        var savedTheme = localStorage.getItem('sas-theme')
-        if (savedTheme) document.documentElement.dataset.theme = savedTheme
-      } catch (e) {
-        /* localStorage 不可用（隐私模式）时用默认主题 */
-      }
+      (function () {
+        var fallback = 'light' // 与 src/stores/theme.ts 的默认值保持一致
+        try {
+          var saved = localStorage.getItem('sas-theme')
+          document.documentElement.dataset.theme = saved || fallback
+        } catch (e) {
+          document.documentElement.dataset.theme = fallback
+        }
+      })()
     </script>
     <!-- 字体：Inter（拉丁） + Noto Sans SC（中文） + JetBrains Mono（数字等宽） -->
     <link rel="preconnect" href="https://fonts.googleapis.com" />

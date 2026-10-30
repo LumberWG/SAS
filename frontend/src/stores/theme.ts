@@ -68,7 +68,8 @@ function readStored(): ThemeKey {
   } catch {
     /* 隐私模式下 localStorage 不可用：用默认主题 */
   }
-  return 'dark'
+  // 默认给浅色：白天办公/投屏更常看，深色是主动选择
+  return 'light'
 }
 
 export const useThemeStore = defineStore('theme', {

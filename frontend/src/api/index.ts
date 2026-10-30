@@ -3,9 +3,19 @@
  */
 import axios from 'axios'
 
+import { useAuthStore } from '../stores/auth'
+
 const http = axios.create({
   baseURL: '/api',
   timeout: 30000,
+})
+
+// ---- 访问令牌：后端配了 API_TOKEN 时，所有请求都要带上 ----
+// 令牌只存本机 localStorage；没配令牌的实例（本机开发）这个头为空，后端也不校验。
+http.interceptors.request.use((config) => {
+  const token = localStorage.getItem('sas-api-token')
+  if (token) config.headers.set('X-API-Token', token)
+  return config
 })
 
 // ---- GET 响应缓存（TTL）：减少页面切换 / 轮询的重复请求与后端压力 ----
@@ -51,6 +61,18 @@ http.interceptors.response.use((response) => {
     _getCache.set(_cacheKey(cfg), { ts: Date.now(), data: response.data })
   }
   return response
+})
+
+// 401 = 后端配了 API_TOKEN 但本机没带/带错：弹令牌输入框，而不是只报"请求失败"
+http.interceptors.response.use(undefined, (error) => {
+  if (error?.response?.status === 401) {
+    try {
+      useAuthStore().markNeeded()
+    } catch {
+      /* store 尚未就绪（极早期请求）：忽略，下一次请求仍会触发 */
+    }
+  }
+  return Promise.reject(error)
 })
 
 // 每个响应都带 disclaimer 字段（后端统一注入），页面顶栏展示
@@ -489,6 +511,10 @@ export interface ParamItem {
   /** 渲染控件：bool 开关 / number 数字框 / text 文本框 / readonly 只读 */
   kind: 'bool' | 'number' | 'text' | 'readonly'
   runtime: boolean
+  /** 敏感项（API Key / 机器人地址）：`value` 是掩码，原样回传视为未修改 */
+  secret?: boolean
+  /** 条件可见：父键。父为开关时开则显示；父为文本/数字时空值则隐藏 */
+  depends_on?: string
   /** 完整说明（来自 config.py 注释），只放在 tooltip 里 */
   desc?: string
   note: string

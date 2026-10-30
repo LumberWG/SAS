@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.api import (
@@ -25,6 +26,40 @@ logger = logging.getLogger("sas")
 
 #: 前端生产构建产物目录（cpolar 单端口部署时由后端托管）
 FRONTEND_DIST = BASE_DIR / "frontend" / "dist"
+
+#: 不校验访问令牌的接口：健康检查（部署脚本/监控探活）不含业务数据
+TOKEN_EXEMPT_PATHS = frozenset({"/api/health"})
+
+
+async def _token_guard(request: Request, call_next):
+    """访问令牌守卫：`.env` 里配了 `API_TOKEN` 才启用。
+
+    为什么需要：站点经 cpolar 隧道公网可达，而设置接口能读配置（含 LLM 模型名）、
+    改交易开关、还原全部参数。没有令牌时默认不校验，保证本机开发零配置。
+    令牌只从 `.env` 读，且列在 `READONLY_KEYS` 里，不会被 `GET /api/settings` 回显。
+    """
+    token = (get_settings().api_token or "").strip()
+    path = request.url.path
+    if (
+        not token
+        or request.method == "OPTIONS"          # CORS 预检不带自定义头
+        or not path.startswith("/api")
+        or path in TOKEN_EXEMPT_PATHS
+    ):
+        return await call_next(request)
+
+    supplied = request.headers.get("x-api-token", "").strip()
+    if not supplied:
+        auth = request.headers.get("authorization", "")
+        if auth[:7].lower() == "bearer ":
+            supplied = auth[7:].strip()
+    # 定长比较，避免按字节泄露时序
+    if not hmac.compare_digest(supplied, token):
+        return JSONResponse(
+            status_code=401,
+            content={"detail": "需要访问令牌：请提供 X-API-Token 请求头（或在页面上输入）"},
+        )
+    return await call_next(request)
 
 
 @asynccontextmanager
@@ -93,6 +128,9 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    # 访问令牌守卫（API_TOKEN 为空时直接放行，本机开发零配置）
+    app.middleware("http")(_token_guard)
 
     # 路由注册（各模块统一挂 /api 前缀）
     app.include_router(market.router, prefix="/api")

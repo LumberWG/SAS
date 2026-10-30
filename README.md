@@ -19,19 +19,31 @@
 
 ## 系统设置
 
-`/settings` 页把散在四处的配置拉成一张表：`.env`/`config.py`（87 项）、`app_state` 运行时覆盖、页面上各业务开关、以及少量硬编码常量（可交易板块前缀、巨无霸黑名单、回测默认止损止盈、整手股数）。
+`/settings` 页把散在四处的配置拉成一张表：`.env`/`config.py`（88 项）、`app_state` 运行时覆盖、页面上各业务开关、以及少量硬编码常量（可交易板块前缀、巨无霸黑名单、回测默认止损止盈、整手股数）。
 
-页面上**只列可编辑的 78 项**。以下 9 项都**完全不显示**（`READONLY_KEYS`）：`db_path`、`kline_dir`、`cors_origins`、`data_no_proxy_domains`、`auto_scan_strategies` 与 `app_name`（只在启动时用于 `FastAPI(title=)`，改它连前端标题都不变）、`debug`（全仓库无人读取的历史字段）、`disclaimer`（接口 JSON 统一注入的文案常量，不是配置）、`notify_email`（`EmailNotifier` 目前只打日志并返回 False，开了反而多记一条渠道失败），以及剩余硬编码常量（`LOT_SIZE`、板块前缀、巨无霸名单、回测默认止盈止损）。理由一致：改不了或改了没效果，展示了只会让人以为能调。
+页面上**只列可编辑的 78 项**。以下 10 项都**完全不显示**（`READONLY_KEYS`）：`api_token`（访问令牌，回显等于把钥匙挂在门上）、`db_path`、`kline_dir`、`cors_origins`、`data_no_proxy_domains`、`auto_scan_strategies` 与 `app_name`（只在启动时用于 `FastAPI(title=)`，改它连前端标题都不变）、`debug`（全仓库无人读取的历史字段）、`disclaimer`（接口 JSON 统一注入的文案常量，不是配置）、`notify_email`（`EmailNotifier` 目前只打日志并返回 False，开了反而多记一条渠道失败），以及剩余硬编码常量（`LOT_SIZE`、板块前缀、巨无霸名单、回测默认止盈止损）。理由一致：改不了或改了没效果，展示了只会让人以为能调。
 
 > 评分阈值（`factor_buy_threshold` / `factor_sell_threshold`）与四项费率（`trade_fee_*`）**已从硬编码挪进配置**：前者决定 buy/sell 判级，后者被回测与实盘共用。整手股数（`LOT_SIZE=100`）仍固定——改了会下出非法委托。
 
-- **外观主题（页面顶部）**：石墨黑 / 深海蓝 / 象牙白 / 暖沙四选一，点一下即时生效。这是**纯前端偏好**（存 `localStorage`），不进 `app_state`、不影响后端与其它电脑 —— 显示习惯不该混进业务参数表
+- **外观主题（顶栏右侧下拉）**：位于「未保存」指标右边、分隔线之前；石墨黑 / 深海蓝 / 象牙白 / 暖沙，**默认象牙白（浅色）**，选完即时生效。按钮与每个菜单项左侧都保留四格预览色（页面底 / 卡片 / 主色 / 文字），收起时也能看出当前配色。
+  这是**纯前端偏好**（存 `localStorage`），不进 `app_state`、不影响后端与其它电脑 —— 显示习惯不该混进业务参数表
+- **条件可见**：子参数依赖父开关时默认隐藏（例：`paper_t_active` 关着时，8 个做T 参数不显示；
+  `llm_enabled` 关着时，接口地址/密钥/模型/超时都不显示）。关系在 `param_specs._DEPENDS_ON` 里声明，
+  父项为开关则「开=显示」、为文本则「非空=显示」，支持套娃；前端按**草稿值**实时显隐
+  （打开做T 开关的那一下，下面参数立刻出现，不用等保存），分组标题会标「随开关隐藏 N」
 - **两级布局（均衡分组）**：左侧竖排导航 8 个分组——连接与扫描 9 / 选股与自选 11 / 账户与费率 7 / 交易执行 13 / 仓位与轮动 8 / 风控与止损 11 / 做T 与择时 11 / 调度与 LLM 8，每项标该组总数与已覆盖数。之所以不做平铺 tab：按 `paper_` 前缀天然会变成「一组 50 项、另一组 1 项」。布局由 `param_specs._LAYOUT` 按业务语义声明（分组 → 组内小节 → 键），新增字段没收录时按前缀兜底进对应组的「其他」小节
 - **组内小节**：每个分组再切成 2~5 个语义小节（如「风控与止损」= 买点切入 / 固定止损止盈 / ATR 与移动保护），小节标题右侧带一句说明；搜索时跨全部分组按小节分段展示命中结果
-- **可编辑**：开关项点一下、数字项直接输，改完点顶栏的「保存 (N)」（改动后页面底部也会浮出「有 N 项未保存 · 保存并生效 / 放弃」条，往下翻几屏也能保存）；每行显示**短标签 + 完整 key + 当前生效值**，**来源**（`运行时` = app_state 覆盖 > `.env` > `默认`）以胶囊标记，改动行高亮，可单行撤销、整组「本组还原」或全局「还原」为 `.env` 值
+- **可编辑**：开关项点一下、数字项直接输，改完点顶栏的「保存 (N)」（改动后页面底部也会浮出「有 N 项未保存 · 保存并生效 / 放弃」条，往下翻几屏也能保存）；每行是「固定列宽（104px）右对齐的短标签 + 紧挨着的控件 + 靠右的来源胶囊」，标签与输入框之间不再撑出一大段空白；完整 key / 说明 / 当前值都在行 tooltip 里，**来源**（`运行时` = app_state 覆盖 > `.env` > `默认`）以胶囊标记，改动行高亮，可单行撤销、整组「本组还原」或全局「还原」为 `.env` 值
 - **短标签 + tooltip**：卡片里只放标准短名（`固定止损`、`买单队列上限`、`ATR 止损倍数`，见 `param_specs._SHORT_LABELS`，最长 10 字），`config.py` 里那整句注释作为 `desc` 放进行悬停提示，连同完整 key、当前值、待保存值一起显示；有跨页补充说明的行在标签右侧带一个黄色提示点
 - **写模型**：改 `app_state` 覆盖层 + 就地改 `Settings` 单例，**下一个 tick / 下一轮扫描即生效**，重启由启动流程重放，不会丢
 - **只读项**：路径与列表类（`kline_dir`、`db_path`、`cors_origins` 等）在进程启动时就被静态挂载 / CORS / 缓存目录捕获，`POST /api/settings` 直接拒绝（400），`GET /api/settings` 也不返回；要改请改 `.env` 后重启。`app_name`、`debug` 同理不进清单
+- **还原（二次确认）**：顶栏「还原」= 还原**全部**可编辑项，组头「本组还原」= 只还原本组；
+  两者都弹确认框，写明「N 项 + 目标值来自本机 `.env`（无 `.env` 时等于代码默认）+ 不可撤销」。
+  早先「有未保存改动就只还原那几项、否则还原全部」的隐式分支已去掉 —— 同一个按钮两种行为容易误点
+- **敏感项脱敏**：`llm_api_key`、`notify_webhook_url` 在接口里只返回掩码（`sk-****abcd`），行尾带「密钥」标记；
+  前端把掩码原样回传时后端视为「未修改」，输入新值才覆盖，传空串才是清空
+- **审计**：每次保存/还原追加一行 JSON 到 `data/logs/settings_audit_YYYYMMDD.jsonl`
+  （`ts / action / keys / values（密钥只留掩码）/ ip / ua`）—— 多环境部署后「谁还原了什么」只能靠它复盘
 - 支持按标签 / key / 值 / 说明搜索（有筛选条件时跨全部分组，左栏同步显示每组命中数），筛「只看已覆盖」；接口 `GET /api/settings`、`POST /api/settings`、`POST /api/settings/reset`
 
 ## 回测参数可调与做T引擎（心得策略）
@@ -183,9 +195,24 @@ Restart-Service cpolar   # 管理员 PowerShell
 - **CLI 进程 vs service 隧道**：`cpolar start <name>` 命令行启动的是独立进程，
   能连通但**不在 Web UI/dashboard 列表中显示**，进程结束即断。要持久化+列表可见，
   必须用 yml + service 方式（本文档方式）
-- 安全：公网暴露期间任何人可访问；建议在 dashboard 配置访问认证，且不要在公网环境配置真实 LLM Key
+- 安全：公网暴露期间任何人可访问 —— 必须按下一节配 `API_TOKEN`，否则等同于把设置接口开放给公网
 - 数据源：服务器在本机，A股数据源直连不受穿透影响
 - 调度任务：自动盯盘（盘中建议/收盘选股）依赖后端进程存活，关机或关闭后端后当天任务不执行
+
+### 6. 访问令牌（公网部署必配）
+
+`backend/.env` 里设 `API_TOKEN=<随机串>` 后，所有 `/api/*` 请求都要带 `X-API-Token`
+（或 `Authorization: Bearer <token>`），`/api/health` 例外（部署脚本与监控探活用）。
+**留空 = 不校验**，本机开发零负担；但经 cpolar/云主机公开的实例必须配 ——
+否则任何拿到地址的人都能读配置、改交易开关、一键还原全部参数。
+
+```bash
+python -c "import secrets; print(secrets.token_urlsafe(24))"   # 生成一个
+```
+
+- 前端：任意请求收到 401 会弹出令牌输入框，令牌只存本机浏览器 `localStorage`，换电脑重新输入
+- 部署脚本：先 `$env:SAS_API_TOKEN = '<token>'` 再跑 `deploy.ps1`，否则业务探活会显示 401
+- 令牌列在 `READONLY_KEYS`，不会被 `GET /api/settings` 回显；改它需要改 `.env` 并重启
 
 ## 技术栈
 
@@ -480,7 +507,7 @@ SAS/
 
 配色/字体/组件样式都走令牌：**改主题只改 `style.css` 里的变量块**。
 
-- **主题（四套，设置页可切）**：`dark` 石墨黑（默认）/ `midnight` 深海蓝 / `light` 象牙白 / `sand` 暖沙。实现方式是 `src/style.css` 里按 `[data-theme=...]` 定义 `--c-*`（RGB 三元组），`tailwind.config.js` 把颜色接成 `rgb(var(--c-*) / <alpha-value>)` —— 所以 `bg-base-800`、`text-content-muted` 这些语义类**换主题自动跟着变**，模板里不出现色值字面量。切换入口在「系统设置 → 外观主题」，存 `localStorage`（显示偏好，不进后端配置）；`index.html` 里有一小段内联脚本在首帧前恢复主题，避免先闪深色。
+- **主题（四套，设置页下拉切换）**：`light` 象牙白（默认）/ `dark` 石墨黑 / `midnight` 深海蓝 / `sand` 暖沙。实现方式是 `src/style.css` 里按 `[data-theme=...]` 定义 `--c-*`（RGB 三元组），`tailwind.config.js` 把颜色接成 `rgb(var(--c-*) / <alpha-value>)` —— 所以 `bg-base-800`、`text-content-muted` 这些语义类**换主题自动跟着变**，模板里不出现色值字面量。切换入口是「系统设置」顶栏的下拉框，选择存 `localStorage`（显示偏好，不进后端配置）；`:root` 就是浅色（默认），`index.html` 里有一小段内联脚本在首帧前把 `data-theme` 补上，避免先闪默认色再切。
 - **色板**：三级表面 `base-900`（页面底）→ `base-800`（卡片）→ `base-700`（悬浮/输入）→ `base-600`（边框），文字三阶 `content / muted / faint`，强调色只有 `primary` 一支；红涨绿跌 `up`/`down` 只用于数据本身。层次靠明度与 1px 边框，不叠加光晕。浅色主题下 `primary-light` 用作强调文字，所以取的是比主色更深的蓝。
 - **字体**（`index.html` + `fontFamily`）：Inter（拉丁）+ Noto Sans SC（中文）+ JetBrains Mono（数字，`font-num` 走 `tabular-nums`，行情跳动时列宽不抖）。字号阶梯：`display 28` / `heading 22` / `subheading 16` / `body 14` / `label 13` / `caption 12`；模板里其余字号（`text-[13.5px]` 这类）2026-10 已整体上调约 12%，避免满屏 11px 小字。
 - **组件类**（`src/style.css`）：`.glass-card`（卡片，hover 只亮边框，不再整页上浮）、`.glass-card-interactive`（确实可点的卡片才位移）、`.panel/.panel-hd`、`.btn` + `.btn-primary/-outline/-ghost/-danger/-primary-soft/-sm/-xs`、`.chip*`、`.field`、`.seg/.seg-item`（页内 tab）、`.table-shell/.table-head/.table-cell`、`.eyebrow`。

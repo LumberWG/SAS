@@ -16,6 +16,9 @@
 import { computed, onMounted, ref } from 'vue'
 import { Info, RefreshCw, RotateCcw, Save, Search } from 'lucide-vue-next'
 
+import ConfirmDialog from '../components/ConfirmDialog.vue'
+import ThemeSelect from '../components/ThemeSelect.vue'
+
 import {
   getSettingsOverview,
   resetSettings,
@@ -24,7 +27,6 @@ import {
   type ParamItem,
   type SettingsOverview,
 } from '../api'
-import { THEMES, useThemeStore, type ThemeKey } from '../stores/theme'
 
 const data = ref<SettingsOverview | null>(null)
 const loading = ref(false)
@@ -35,11 +37,9 @@ const keyword = ref('')
 const activeGroup = ref('')
 const onlyChanged = ref(false)
 
-/** 外观主题：本地偏好，存 localStorage（不进 app_state，也不影响后端） */
-const theme = useThemeStore()
-function pickTheme(key: ThemeKey) {
-  theme.set(key)
-  toast.value = `已切换为「${theme.meta.name}」主题`
+/** 主题切换的反馈（真正的切换在 ThemeSelect 组件里做，存 localStorage） */
+function onThemeChange(name: string) {
+  toast.value = `已切换为「${name}」主题`
   window.setTimeout(() => (toast.value = ''), 2000)
 }
 
@@ -130,13 +130,47 @@ function matches(it: ParamItem): boolean {
   )
 }
 
-/** 左侧导航：每组的总数 / 当前筛选命中数 / 已覆盖数 / 未保存数 */
+/** 全部参数索引：条件可见要顺着 `depends_on` 往回找父项 */
+const itemByKey = computed(() => {
+  const map: Record<string, ParamItem> = {}
+  for (const g of data.value?.groups ?? []) for (const it of g.items) map[it.key] = it
+  return map
+})
+
+/** 父项当前是否满足：开关看真假，文本/数字看是否非空 */
+function parentSatisfied(parentKey: string): boolean {
+  const parent = itemByKey.value[parentKey]
+  if (!parent) return true
+  const value = draft.value[parentKey]
+  if (parent.kind === 'bool') return Boolean(value)
+  return String(value ?? '').trim() !== ''
+}
+
+/**
+ * 是否因父开关关闭而隐藏。
+ *
+ * 用**草稿值**判断（不是服务端值）：打开「做T 总开关」的那一下，下面 8 个参数
+ * 就应该立刻出现，而不是等保存后才刷新。支持套娃（逐级向上检查），带环保护。
+ */
+function isHidden(it: ParamItem): boolean {
+  let cursor: ParamItem | undefined = it
+  const seen = new Set<string>()
+  while (cursor?.depends_on) {
+    if (seen.has(cursor.key)) break
+    seen.add(cursor.key)
+    if (!parentSatisfied(cursor.depends_on)) return true
+    cursor = itemByKey.value[cursor.depends_on]
+  }
+  return false
+}
+
+/** 左侧导航：每组可见数 / 当前筛选命中数 / 已覆盖数 / 未保存数 */
 const navGroups = computed(() =>
   (data.value?.groups ?? []).map((g) => ({
     name: g.name,
     desc: g.desc ?? '',
-    total: g.items.length,
-    matched: g.items.filter((it) => matches(it)).length,
+    total: g.items.filter((it) => !isHidden(it)).length,
+    matched: g.items.filter((it) => !isHidden(it) && matches(it)).length,
     covered: g.items.filter((it) => it.source === 'app_state').length,
     dirty: g.items.filter((it) => isDirty(it)).length,
   })),
@@ -151,10 +185,16 @@ const visibleGroups = computed(() => {
       name: g.name,
       desc: g.desc ?? '',
       total: g.items.length,
+      hidden: g.items.filter((it) => isHidden(it)).length,
       covered: g.items.filter((it) => it.source === 'app_state').length,
       dirty: g.items.filter((it) => isDirty(it)).length,
       subgroups: subsOf(g)
-        .map((sg) => ({ name: sg.name, desc: sg.desc ?? '', items: sg.items.filter((it) => matches(it)) }))
+        .map((sg) => ({
+          name: sg.name,
+          desc: sg.desc ?? '',
+          // 父开关关着 → 整行隐藏；命中筛选后为空的小节也会被下面过滤掉
+          items: sg.items.filter((it) => !isHidden(it) && matches(it)),
+        }))
         .filter((sg) => sg.items.length),
     }))
     .filter((g) => g.subgroups.length)
@@ -206,13 +246,20 @@ async function save() {
   }
 }
 
-async function resetKeys(keys: string[]) {
-  if (!keys.length) return
+/**
+ * 还原：`keys` 为空数组 = 还原全部可编辑项（后端语义）。
+ *
+ * 不再有「有未保存改动就只还原那几项」的隐式分支 —— 那让同一个按钮两种行为，
+ * 误点就等于静默清掉全局配置。现在两种范围各走各的按钮，且都要过确认框。
+ */
+async function resetKeys(keys: string[] | null) {
   saving.value = true
   error.value = ''
   try {
-    hydrate(await resetSettings(keys))
-    toast.value = `已还原 ${keys.length} 项为 .env 值`
+    const res = await resetSettings(keys ?? [])
+    hydrate(res)
+    const count = res.reset?.length ?? 0
+    toast.value = `已还原 ${count} 项为 .env / 环境变量值`
     window.setTimeout(() => (toast.value = ''), 2500)
   } catch (e: unknown) {
     error.value = e instanceof Error ? e.message : '还原失败'
@@ -221,11 +268,38 @@ async function resetKeys(keys: string[]) {
   }
 }
 
+// ---- 还原确认：范围和后果必须写在确认框里 ----
+const confirmOpen = ref(false)
+const confirmTitle = ref('')
+const confirmMessage = ref('')
+const confirmHint = ref('')
+/** null = 全部可编辑项；数组 = 指定键 */
+const confirmKeys = ref<string[] | null>(null)
+
+function askResetAll() {
+  confirmTitle.value = '还原全部参数'
+  confirmMessage.value = `将 ${coveredTotal.value} 项已覆盖参数还原为 .env / 环境变量值`
+  confirmHint.value =
+    '包含 API Key、通知地址、交易开关等；目标值取自本机 .env，没有 .env 的机器上等于代码默认值。还原后不可撤销（只能重新配置）。'
+  confirmKeys.value = null
+  confirmOpen.value = true
+}
+
 /** 整组还原：只还原该组里被 app_state 覆盖过的项（没覆盖过的本来就是默认值） */
-function resetGroup(name: string) {
+function askResetGroup(name: string) {
   const g = (data.value?.groups ?? []).find((x) => x.name === name)
   const keys = (g?.items ?? []).filter((it) => it.source === 'app_state').map((it) => it.key)
-  if (keys.length) resetKeys(keys)
+  if (!keys.length) return
+  confirmTitle.value = `还原「${name}」`
+  confirmMessage.value = `将本组 ${keys.length} 项已覆盖参数还原为 .env / 环境变量值`
+  confirmHint.value = '只影响本组；还原后不可撤销。'
+  confirmKeys.value = keys
+  confirmOpen.value = true
+}
+
+async function confirmReset() {
+  confirmOpen.value = false
+  await resetKeys(confirmKeys.value)
 }
 
 /** 单行还原：只是把草稿拉回生效值（真正落库走「还原」按钮） */
@@ -286,6 +360,9 @@ onMounted(load)
             <span class="text-[11.5px] text-content-faint">未保存</span>
           </div>
 
+          <!-- 主题：下拉选择，色块保留在按钮与选项里 -->
+          <ThemeSelect @change="onThemeChange" />
+
           <div class="mx-0.5 hidden h-6 w-px bg-base-600/60 sm:block"></div>
 
           <button
@@ -300,8 +377,8 @@ onMounted(load)
           <button
             class="btn btn-danger"
             :disabled="saving || !coveredTotal"
-            title="把所有已覆盖项还原为 .env / 环境变量里的值"
-            @click="resetKeys(dirtyKeys.length ? dirtyKeys : [])"
+            title="把所有已覆盖项还原为 .env / 环境变量里的值（会二次确认）"
+            @click="askResetAll"
           >
             <RotateCcw class="h-3.5 w-3.5" />还原
           </button>
@@ -323,50 +400,6 @@ onMounted(load)
         {{ error }}
       </div>
     </div>
-
-    <!-- 外观主题：纯前端偏好（localStorage），换主题即时生效、不动后端配置 -->
-    <section class="rounded-xl border border-base-600/70 bg-base-800/70 p-3">
-      <header class="mb-2.5 flex flex-wrap items-center gap-x-2 gap-y-1">
-        <span class="h-1.5 w-1.5 rounded-full bg-primary"></span>
-        <h3 class="panel-title">外观主题</h3>
-        <span class="text-[13.5px] text-content-faint">
-          只影响当前浏览器显示，不写入后端配置；换电脑会回到默认主题
-        </span>
-        <span class="flex-1"></span>
-        <span class="chip chip-muted">当前：{{ theme.meta.name }}</span>
-      </header>
-      <div class="grid grid-cols-2 gap-2 md:grid-cols-4">
-        <button
-          v-for="t in THEMES"
-          :key="t.key"
-          type="button"
-          class="rounded-lg border p-2 text-left transition-colors"
-          :class="
-            theme.current === t.key
-              ? 'border-primary/60 bg-primary/[0.08]'
-              : 'border-base-600 hover:border-base-500'
-          "
-          @click="pickTheme(t.key)"
-        >
-          <div class="flex gap-1">
-            <span
-              v-for="(sw, i) in t.swatch"
-              :key="i"
-              class="h-6 flex-1 rounded border border-black/10"
-              :style="{ backgroundColor: sw }"
-            ></span>
-          </div>
-          <div class="mt-1.5 flex items-center gap-1.5">
-            <span
-              class="text-[14.5px] font-medium"
-              :class="theme.current === t.key ? 'text-primary-light' : 'text-content'"
-            >{{ t.name }}</span>
-            <span v-if="theme.current === t.key" class="chip chip-primary">使用中</span>
-          </div>
-          <p class="mt-0.5 text-[13px] leading-snug text-content-faint">{{ t.desc }}</p>
-        </button>
-      </div>
-    </section>
 
     <!-- 左导航 + 右侧小节卡片 -->
     <div class="grid items-start gap-3 lg:grid-cols-[232px_minmax(0,1fr)]">
@@ -470,13 +503,20 @@ onMounted(load)
             <span v-if="g.dirty" class="rounded bg-warn/15 px-1.5 py-0.5 text-[11.5px] text-warn">
               已改未存 {{ g.dirty }}
             </span>
+            <span
+              v-if="g.hidden"
+              class="rounded bg-base-600/40 px-1.5 py-0.5 text-[11.5px] text-content-faint"
+              title="父开关关闭，这些参数暂时不显示（打开开关即可看到）"
+            >
+              随开关隐藏 {{ g.hidden }}
+            </span>
             <span class="min-w-0 flex-1 truncate text-[12.5px] text-content-faint">{{ g.desc }}</span>
             <button
               v-if="g.covered"
               class="btn btn-xs btn-danger shrink-0"
               :disabled="saving"
-              title="把本组已覆盖的项还原为 .env 值"
-              @click="resetGroup(g.name)"
+              title="把本组已覆盖的项还原为 .env 值（会二次确认）"
+              @click="askResetGroup(g.name)"
             >
               <RotateCcw class="h-2.5 w-2.5" />本组还原
             </button>
@@ -491,16 +531,29 @@ onMounted(load)
             <div class="flex flex-wrap items-center gap-x-2 border-b border-base-600/30 bg-base-700/20 px-2.5 py-1.5">
               <span class="h-3 w-0.5 rounded-full bg-primary/70"></span>
               <span class="text-[13px] font-medium text-content">{{ sg.name }}</span>
-              <span class="min-w-0 flex-1 truncate text-[11.5px] text-content-faint">{{ sg.desc }}</span>
-              <span class="shrink-0 font-num text-[11.5px] text-content-faint">{{ sg.items.length }}</span>
+              <!-- 条数紧跟描述文字，不放行尾（放最右端像是另一列数据，难认） -->
+              <span class="flex min-w-0 flex-1 items-baseline gap-1.5">
+                <span class="truncate text-[11.5px] text-content-faint">{{ sg.desc }}</span>
+                <span
+                  class="ml-4 shrink-0 font-num text-[11.5px] text-content-faint"
+                  :title="`本小节共 ${sg.items.length} 项参数${searching ? '（已按关键词过滤）' : ''}`"
+                >【{{ sg.items.length }}项】</span>
+              </span>
             </div>
 
-            <!-- 参数行：短名 + 控件一行一个；完整说明 / key / 当前值 / 待保存值都在 tooltip -->
-            <div class="grid grid-cols-1 gap-x-4 p-1.5 md:grid-cols-2 2xl:grid-cols-3">
+            <!--
+              参数行：标签固定列宽 + 控件紧挨着 + 来源胶囊（默认/.env/运行时）紧跟控件。
+              控件统一放进 112px 的槽（数字框/文本框同宽），胶囊起点就对齐了；
+              别再用 ml-auto 把胶囊推到行尾——宽格子下输入框和「默认」之间会空出一大段。
+
+              列数用 auto-fill 而不是固定断点：一行塞得下几个就排几个（宽屏 3 个，
+              再宽自动到 4），窄屏自动落到 1~2，不会因为写死 3 列把行撑出横向溢出。
+            -->
+            <div class="grid grid-cols-[repeat(auto-fill,minmax(296px,1fr))] gap-x-2 p-1.5">
               <div
                 v-for="it in sg.items"
                 :key="it.key"
-                class="flex h-9 items-center gap-1.5 rounded-md px-2 transition-colors"
+                class="flex h-9 min-w-0 items-center gap-1.5 rounded-md px-1.5 transition-colors"
                 :class="
                   isDirty(it)
                     ? 'bg-primary/[0.10] ring-1 ring-inset ring-primary/25'
@@ -513,60 +566,72 @@ onMounted(load)
                   :class="isDirty(it) ? 'bg-primary' : 'bg-transparent'"
                 ></span>
                 <span
-                  class="min-w-0 flex-1 truncate text-[13.5px]"
+                  class="w-[92px] shrink-0 truncate text-right text-[13.5px] leading-tight"
                   :class="isDirty(it) ? 'font-medium text-primary-light' : 'text-content-muted'"
                 >{{ it.label }}</span>
-                <Info v-if="it.note" class="h-3 w-3 shrink-0 text-warn/70" />
 
-                <span
-                  class="shrink-0 rounded-full border px-1 py-px text-[11px] leading-none"
-                  :class="sourceMeta[it.source]?.cls ?? 'text-content-faint'"
-                >{{ sourceMeta[it.source]?.text ?? it.source }}</span>
+                <!-- 控件槽：统一 112px，数字框/文本框同宽，右侧来源胶囊才能纵向对齐 -->
+                <span class="flex w-[112px] shrink-0 items-center gap-1.5">
+                  <!-- 开关（补「开/关」字样，免得槽里空一大截） -->
+                  <template v-if="it.kind === 'bool'">
+                    <button
+                      type="button"
+                      class="relative h-4 w-8 shrink-0 rounded-full transition-colors"
+                      :class="draft[it.key] ? 'bg-primary' : 'bg-base-600'"
+                      :title="draft[it.key] ? '点击关闭' : '点击开启'"
+                      @click="draft[it.key] = !draft[it.key]"
+                    >
+                      <span
+                        class="absolute top-0.5 h-3 w-3 rounded-full bg-white transition-all"
+                        :class="draft[it.key] ? 'left-[18px]' : 'left-0.5'"
+                      ></span>
+                    </button>
+                    <span class="text-[11.5px] text-content-faint">{{ draft[it.key] ? '开' : '关' }}</span>
+                  </template>
 
-                <!-- 开关 -->
-                <button
-                  v-if="it.kind === 'bool'"
-                  type="button"
-                  class="relative h-4 w-8 shrink-0 rounded-full transition-colors"
-                  :class="draft[it.key] ? 'bg-primary' : 'bg-base-600'"
-                  :title="draft[it.key] ? '点击关闭' : '点击开启'"
-                  @click="draft[it.key] = !draft[it.key]"
-                >
+                  <!-- 数字 -->
+                  <input
+                    v-else-if="it.kind === 'number'"
+                    v-model.number="draft[it.key]"
+                    type="number"
+                    step="any"
+                    class="field field-num h-7 w-full px-1.5 text-[13.5px]"
+                    :class="isDirty(it) ? 'border-primary/60' : 'border-base-600'"
+                  />
+
+                  <!-- 文本（密钥类显示掩码，直接输入新值即可覆盖） -->
+                  <input
+                    v-else-if="it.kind === 'text'"
+                    v-model="draft[it.key]"
+                    :type="it.secret ? 'password' : 'text'"
+                    :placeholder="it.secret ? '未设置' : ''"
+                    class="field field-num h-7 w-full px-1.5 text-[13.5px]"
+                    :class="isDirty(it) ? 'border-primary/60' : 'border-base-600'"
+                  />
+
+                  <span v-else class="text-[11.5px] text-content-faint">需重启</span>
+                </span>
+
+                <span class="ml-1 flex shrink-0 items-center gap-1">
                   <span
-                    class="absolute top-0.5 h-3 w-3 rounded-full bg-white transition-all"
-                    :class="draft[it.key] ? 'left-[18px]' : 'left-0.5'"
-                  ></span>
-                </button>
-
-                <!-- 数字 -->
-                <input
-                  v-else-if="it.kind === 'number'"
-                  v-model.number="draft[it.key]"
-                  type="number"
-                  step="any"
-                  class="field field-num h-7 w-[80px] shrink-0 px-1.5 text-[13.5px]"
-                  :class="isDirty(it) ? 'border-primary/60' : 'border-base-600'"
-                />
-
-                <!-- 文本 -->
-                <input
-                  v-else-if="it.kind === 'text'"
-                  v-model="draft[it.key]"
-                  type="text"
-                  class="field field-num h-7 w-[120px] shrink-0 px-1.5 text-[13.5px]"
-                  :class="isDirty(it) ? 'border-primary/60' : 'border-base-600'"
-                />
-
-                <span v-else class="shrink-0 text-[11.5px] text-content-faint">需重启</span>
-
-                <button
-                  v-if="isDirty(it)"
-                  class="shrink-0 rounded p-0.5 text-content-faint transition-colors hover:text-primary"
-                  title="撤销这一行的改动（不写库）"
-                  @click="revertRow(it)"
-                >
-                  <RotateCcw class="h-3 w-3" />
-                </button>
+                    v-if="it.secret"
+                    class="rounded-full bg-warn/15 px-1 py-px text-[11px] leading-none text-warn"
+                    title="敏感项：接口只回显掩码（sk-****abcd），输入新值才会覆盖"
+                  >密钥</span>
+                  <Info v-if="it.note" class="h-3 w-3 text-warn/70" />
+                  <span
+                    class="rounded-full border px-1 py-px text-[11px] leading-none"
+                    :class="sourceMeta[it.source]?.cls ?? 'text-content-faint'"
+                  >{{ sourceMeta[it.source]?.text ?? it.source }}</span>
+                  <button
+                    v-if="isDirty(it)"
+                    class="rounded p-0.5 text-content-faint transition-colors hover:text-primary"
+                    title="撤销这一行的改动（不写库）"
+                    @click="revertRow(it)"
+                  >
+                    <RotateCcw class="h-3 w-3" />
+                  </button>
+                </span>
               </div>
             </div>
           </div>
@@ -576,8 +641,10 @@ onMounted(load)
           v-if="!visibleGroups.length"
           class="rounded-xl border border-dashed border-base-600/60 bg-base-800/40 px-4 py-10 text-center"
         >
-          <p class="text-[13.5px] text-content-muted">没有匹配的参数</p>
-          <p class="mt-1 text-[12.5px] text-content-faint">换个关键词，或点左栏分组回到分组视图</p>
+          <p class="text-[13.5px] text-content-muted">没有可显示的参数</p>
+          <p class="mt-1 text-[12.5px] text-content-faint">
+            可能被总开关隐藏（如「做T 总开关」关着时其参数不显示），或换个关键词 / 左栏分组再看
+          </p>
         </div>
 
         <p class="flex items-center gap-1 px-1 text-[11.5px] text-content-faint">
@@ -609,5 +676,18 @@ onMounted(load)
         </div>
       </div>
     </Teleport>
+
+    <!-- 还原确认：范围、目标值与不可撤销性都写在框里（原来点一下就静默清空） -->
+    <ConfirmDialog
+      :open="confirmOpen"
+      :title="confirmTitle"
+      :message="confirmMessage"
+      :hint="confirmHint"
+      confirm-text="确认还原"
+      tone="down"
+      :loading="saving"
+      @confirm="confirmReset"
+      @cancel="confirmOpen = false"
+    />
   </div>
 </template>

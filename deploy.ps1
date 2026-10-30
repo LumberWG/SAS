@@ -21,6 +21,11 @@ if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administra
 # 静默部署（计划任务 SASDeploy）没有窗口，输出同时落盘，事后可查
 $Root   = Split-Path -Parent $MyInvocation.MyCommand.Path
 $LogDir = Join-Path $Root 'data\logs'
+
+# 后端若在 .env 里配了 API_TOKEN，探活请求要带上令牌，否则会误报 401。
+# 用法：先在当前会话 $env:SAS_API_TOKEN = '<token>'，未设置则不带任何头。
+$ApiHeaders = @{}
+if ($env:SAS_API_TOKEN) { $ApiHeaders['X-API-Token'] = $env:SAS_API_TOKEN }
 if (-not (Test-Path $LogDir)) { New-Item -ItemType Directory -Path $LogDir -Force | Out-Null }
 try { Start-Transcript -Path (Join-Path $LogDir 'deploy.log') -Append -Force | Out-Null } catch { }
 
@@ -113,7 +118,7 @@ $health = $null
 for ($i = 0; $i -lt 12; $i++) {
     Start-Sleep -Seconds 5
     try {
-        $r = Invoke-WebRequest -Uri "http://127.0.0.1:8000/api/health" -UseBasicParsing -TimeoutSec 10
+        $r = Invoke-WebRequest -Uri "http://127.0.0.1:8000/api/health" -UseBasicParsing -TimeoutSec 10 -Headers $ApiHeaders
         $health = $r.StatusCode
         break
     } catch {
@@ -136,7 +141,7 @@ $bizPaths = @("/api/paper/account", "/api/screening/strategies", "/api/analysis/
 $bizOk = $true
 foreach ($p in $bizPaths) {
     try {
-        $sw = Measure-Command { $br = Invoke-WebRequest -Uri ("http://127.0.0.1:8000" + $p) -UseBasicParsing -TimeoutSec 15 }
+        $sw = Measure-Command { $br = Invoke-WebRequest -Uri ("http://127.0.0.1:8000" + $p) -UseBasicParsing -TimeoutSec 15 -Headers $ApiHeaders }
         if ($br.StatusCode -ge 500) {
             $bizOk = $false
             Write-Host ("Business  : {0} -> HTTP {1} [DEGRADED]" -f $p, $br.StatusCode) -ForegroundColor Yellow
