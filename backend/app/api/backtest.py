@@ -16,8 +16,15 @@ import uuid
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
+from app.analysis.factors import BUY_THRESHOLD
 from app.api.utils import with_disclaimer
-from app.backtest.pipeline import PipelineParams, run_pipeline
+from app.backtest.pipeline import (
+    STOP_LOSS_RATIO,
+    TAKE_PROFIT_RATIO,
+    PipelineParams,
+    run_pipeline,
+)
+from app.config import get_settings
 from app.data.cache import db
 
 logger = logging.getLogger("sas.api.backtest")
@@ -130,6 +137,82 @@ async def _execute(job_id: str, params: PipelineParams) -> None:
             error=str(exc),
             elapsed=round(time.time() - job["created"], 1),
         )
+
+
+@router.get("/defaults")
+def backtest_defaults() -> dict:
+    """回测参数的**线上默认值**（前端表单直接用具体数字展示，不再显示「默认」占位）。
+
+    ``PipelineParams`` 里为 ``None`` 的字段表示「沿用线上配置」，真正的数值分散在
+    ``Settings.paper_*`` 与几个硬编码常量里（见 ``pipeline._simulate`` 开头的解析）。
+    这里统一算一次吐给前端，避免前端再抄一份默认值导致漂移。
+
+    约定：默认「关闭/不限」的参数返回 ``0``，前端在值为 0 时**不提交**该字段
+    （与 ``PipelineParams`` 的 None 语义等价）。``bool`` 参数返回 ``False``。
+    """
+    s = get_settings()
+    return with_disclaimer({
+        "defaults": {
+            # 基础
+            "initial_capital": float(s.paper_initial_capital),
+            "max_positions": int(s.paper_max_positions),
+            "universe_size": 500,
+            "board_prefixes": [],
+            "watch_cap": 60,
+            "add_per_day": 50,
+            # 选股 / 买入（0 = 不启用该过滤）
+            "rebalance_days": 1,
+            "buy_threshold": float(BUY_THRESHOLD),
+            "buy_top_pct": 0.0,
+            "max_open_gain": 0.0,
+            "max_gain_5d": 0.0,
+            "min_volume_ratio": 0.0,
+            "min_turnover_rate": 0.0,
+            "invert_score": False,
+            # 五段式③⑤（0 = 不启用）
+            "queue_top_m": 0,
+            "entry_max_chase": 0.0,
+            "entry_pullback": 0.0,
+            "entry_window_minutes": 0,
+            # 止损 / 止盈
+            "stop_loss": float(STOP_LOSS_RATIO),
+            "take_profit": float(TAKE_PROFIT_RATIO),
+            "max_hold_days": 0,
+            "stop_atr_mult": 0.0,
+            "stop_atr_min": 0.03,
+            "stop_atr_max": 0.15,
+            "stop_confirm_close": False,
+            "partial_tp_at": 0.0,
+            "partial_tp_ratio": 0.5,
+            # 移动 / 保本
+            "breakeven_trigger": 0.0,
+            "trail_pct": 0.0,
+            "trail_arm": 0.0,
+            # 大盘择时
+            "regime_ma": 0,
+            "regime_fast_ma": 20,
+            "weak_exposure": 0.0,
+            "regime_flat_below": False,
+            # 仓位 / 评分 / 轮动
+            "max_total_exposure": float(s.paper_max_total_exposure),
+            "single_position_ratio": 0.20,
+            "full_score": float(s.paper_full_score),
+            "half_score": float(s.paper_half_score),
+            "rotation_enabled": bool(s.paper_rotation_enabled),
+            "rotation_gap": float(s.paper_rotation_gap),
+            "rotation_min_score": float(s.paper_rotation_min_score),
+            # 做T（0 / False = 关闭）
+            "t_active": False,
+            "t_size": 0.0,
+            "t_up_sell": 0.0,
+            "t_up_buyback": 0.0,
+            "t_down_add": 0.0,
+            "t_down_full": 0.0,
+            "t_rebound_sell": 0.0,
+            "t_limit_sell_half": False,
+            "t_crash_guard": 0.0,
+        }
+    })
 
 
 @router.post("/run")

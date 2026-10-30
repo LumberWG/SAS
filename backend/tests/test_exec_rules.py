@@ -21,6 +21,18 @@ def trader() -> LiveTrader:
     return LiveTrader()
 
 
+@pytest.fixture(autouse=True)
+def _disable_large_cap(monkeypatch):
+    """默认关闭大盘股过滤：本文件其它用例用真实代码跑准入闸门。
+
+    过滤规则读本机真实快照的 ``total_mv``，开着的话「盟固利」这类千亿票会先被市值
+    拦掉，掩盖被测的池子/名称规则。规则本身在 ``TestLargeCapGate`` 里单独覆盖。
+    """
+    from app.paper import engine as paper_engine
+
+    monkeypatch.setattr(paper_engine, "large_cap_rule", lambda: (False, 0.0))
+
+
 # ---------------- 股票池口径：北交所 / 名称可信度 ----------------
 @pytest.mark.parametrize("code", ["920174", "430047", "830799", "871981", "400001"])
 def test_bj_codes_excluded(code):
@@ -111,3 +123,48 @@ def test_pool_rejects_out_of_top_n(trader, monkeypatch):
     assert ok, why
     ok, why = trader.engine._buy_allowed("301487", "盟固利")
     assert not ok and "成交额" in why
+
+
+# ---------------- 大盘股过滤（「③ 交易队列」页开关） ----------------
+class TestLargeCapGate:
+    """总市值阈值：默认开（> 阈值不进队列），关掉才放行。
+
+    银行/石油这类巨无霸短线弹性差，且会被评分仓位放大成账户级风险；但用户可能
+    想看它们的信号，所以做成开关 + 可调阈值，而不是写死在黑名单里。
+    """
+
+    def test_blocks_above_threshold(self, trader, monkeypatch):
+        from app.paper import engine as paper_engine
+
+        monkeypatch.setattr(paper_engine, "large_cap_rule", lambda: (True, 100 * 1e8))
+        monkeypatch.setattr(paper_engine, "_market_cap_map", lambda: {"600621": 120 * 1e8})
+        ok, why = trader.engine._buy_allowed("600621", "华鑫股份")
+        assert not ok and "大盘股" in why
+
+    def test_allows_below_threshold(self, trader, monkeypatch):
+        from app.paper import engine as paper_engine
+
+        monkeypatch.setattr(paper_engine, "large_cap_rule", lambda: (True, 100 * 1e8))
+        monkeypatch.setattr(paper_engine, "_market_cap_map", lambda: {"600621": 80 * 1e8})
+        monkeypatch.setattr(trader.engine, "_top_amount_codes", lambda: None)
+        ok, why = trader.engine._buy_allowed("600621", "华鑫股份")
+        assert ok, why
+
+    def test_switch_off_allows_large_cap(self, trader, monkeypatch):
+        from app.paper import engine as paper_engine
+
+        monkeypatch.setattr(paper_engine, "large_cap_rule", lambda: (False, 100 * 1e8))
+        monkeypatch.setattr(paper_engine, "_market_cap_map", lambda: {"600621": 2000 * 1e8})
+        monkeypatch.setattr(trader.engine, "_top_amount_codes", lambda: None)
+        ok, why = trader.engine._buy_allowed("600621", "华鑫股份")
+        assert ok, why
+
+    def test_missing_market_cap_does_not_block(self, trader, monkeypatch):
+        """市值取不到（快照抖动）时不拦——数据缺失不该让交易整轮停摆。"""
+        from app.paper import engine as paper_engine
+
+        monkeypatch.setattr(paper_engine, "large_cap_rule", lambda: (True, 100 * 1e8))
+        monkeypatch.setattr(paper_engine, "_market_cap_map", lambda: {})
+        monkeypatch.setattr(trader.engine, "_top_amount_codes", lambda: None)
+        ok, why = trader.engine._buy_allowed("600621", "华鑫股份")
+        assert ok, why

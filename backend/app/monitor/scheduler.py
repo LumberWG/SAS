@@ -343,15 +343,20 @@ class MarketScheduler:
         ]
         scored.sort(key=lambda x: x[0], reverse=True)
 
+        from app.data.scope import is_tradable
+
         existing = {item["code"] for item in db.list_watchlist()}
         added = []
         for _score, hit in scored[:top_n]:
             code = hit["code"]
+            name = hit.get("name", "")
             if code in existing:
                 continue
-            db.add_watch(
-                code, hit.get("name", ""), note="自动加入(收盘选股)", source="auto"
-            )
+            # 与选股中心同一范围口径：科创板/北交所/ST/巨无霸不进自选
+            # （写进去的票买不了，只会在建议与交易池面板里长期占位）
+            if not is_tradable(code, name)[0]:
+                continue
+            db.add_watch(code, name, note="自动加入(收盘选股)", source="auto")
             existing.add(code)
             added.append(f"{code} {hit.get('name', '')}")
 

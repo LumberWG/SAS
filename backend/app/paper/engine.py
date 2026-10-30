@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -37,6 +38,57 @@ from app.data.cache import db
 from app.data.service import get_kline_cached
 
 logger = logging.getLogger("sas.paper")
+
+# ---- 大盘股过滤（「③ 交易队列」页开关，运行时存 app_state）----
+_MV_CACHE: tuple[float, dict[str, float]] | None = None
+_MV_TTL = 60.0      # 秒：市值随价格变动，60s 刷一次足够，不必每个 tick 重建
+
+
+def _market_cap_map() -> dict[str, float]:
+    """``code → 总市值(元)``，取自实时快照的 ``total_mv``；取不到返回空字典。
+
+    空字典时下游按「不拦」处理——数据源抖动不应该让交易整轮停摆。
+    """
+    global _MV_CACHE
+    now = time.time()
+    if _MV_CACHE is not None and now - _MV_CACHE[0] < _MV_TTL:
+        return _MV_CACHE[1]
+    out: dict[str, float] = {}
+    try:
+        from app.data.snapshot_store import snapshot_store
+
+        snap = snapshot_store.peek_snapshot()
+        if snap is not None and not snap.empty and "total_mv" in snap.columns:
+            mv = pd.to_numeric(snap["total_mv"], errors="coerce")
+            for code, val in zip(snap["code"], mv):
+                if val == val and val > 0:      # 排除 NaN / 0
+                    out[str(code).zfill(6)] = float(val)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("市值表构建失败（本轮不限制大市值）: %s", exc)
+        return {}
+    _MV_CACHE = (now, out)
+    return out
+
+
+def large_cap_rule() -> tuple[bool, float]:
+    """运行时的大盘股规则：``(是否启用, 阈值元)``。
+
+    默认取配置（``paper_exclude_large_cap=True`` / ``paper_large_cap_yi=100``），
+    页面上改过之后以 ``app_state`` 为准（重启保留）。读取失败退回配置，绝不抛错。
+    """
+    s = get_settings()
+    enabled = bool(getattr(s, "paper_exclude_large_cap", True))
+    limit_yi = float(getattr(s, "paper_large_cap_yi", 100.0) or 0.0)
+    try:
+        raw_on = db.get_state("paper_exclude_large_cap")
+        if raw_on is not None:
+            enabled = str(raw_on).strip().lower() not in ("0", "false", "")
+        raw_limit = db.get_state("paper_large_cap_yi")
+        if raw_limit is not None:
+            limit_yi = float(raw_limit)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("读大盘股开关失败，用配置值: %s", exc)
+    return enabled, limit_yi * 1e8
 
 # ---- 费用参数（A 股标准费率，个人可调） ----
 FEE_COMMISSION_RATE = 2.5 / 10000   # 佣金万2.5，双向
@@ -191,17 +243,30 @@ class PaperEngine:
         return codes
 
     def _buy_allowed(self, code: str, name: str) -> tuple[bool, str]:
-        """下单前的准入检查：板块范围 / 北交所 / 名称可信度 / 成交额 TopN 池。
+        """下单前的准入检查：板块范围 / 北交所 / 大市值 / 名称可信度 / 成交额 TopN 池。
 
         板块范围与选股 scanner 统一口径（app.data.scope.is_tradable）：只做
-        沪深主板+创业板，排除科创板(688)/北交所(92,43,83,87,88)/B股/ST/巨无霸。
+        沪深主板+创业板，排除科创板(688)/北交所(92,43,83,87,88)/B股/ST。
+
+        大市值两套口径合并到「③ 交易队列」的一个开关上：
+        - 开关**开**（默认）：`is_tradable` 的巨无霸黑名单生效，且 ``总市值 > 阈值``
+          （默认 100 亿）的票一律不进买入队列；
+        - 开关**关**：黑名单与市值阈值同时失效（此时才允许买银行/石油这类票）。
         """
         code = str(code or "").zfill(6)
         if getattr(self.settings, "paper_exclude_bj", False) and _is_bj(code):
             return False, "北交所股票已排除（PAPER_EXCLUDE_BJ）"
         from app.data.scope import is_tradable
-        if not is_tradable(code, name)[0]:
+        large_on, large_limit = large_cap_rule()
+        if not is_tradable(code, name, exclude_giant=large_on)[0]:
             return False, "不在沪深主板+创业板范围（scope 过滤）"
+        if large_on and large_limit > 0:
+            cap = _market_cap_map().get(code)
+            if cap is not None and cap > large_limit:
+                return False, (
+                    f"总市值 {cap / 1e8:.0f}亿 > {large_limit / 1e8:.0f}亿"
+                    "（大盘股已排除，可在交易队列页关闭）"
+                )
         if not _name_ok(name, code):
             return False, "名称缺失或乱码，拒绝下单（股票池可能不完整）"
         pool = self._top_amount_codes()
@@ -218,13 +283,16 @@ class PaperEngine:
         """
         code = str(getattr(rec, "code", "") or "")
         name = str(getattr(rec, "name", "") or code)
+        # 先判**永久性**拒绝（范围/大市值/名称/池子），再判临时性的「大盘弱势」：
+        # 否则弱势期间所有票都显示「大盘弱势」，交易池面板看不出 688 这类票
+        # 其实是因为「不在可交易范围」被拒的（真实原因被临时闸门盖住）。
+        allowed, why = self._buy_allowed(code, name)
+        if not allowed:
+            return False, why
         if market_weak:
             return False, "大盘弱势，暂停买入"
         if code in positions:
             return False, "已持仓"
-        allowed, why = self._buy_allowed(code, name)
-        if not allowed:
-            return False, why
         max_positions = self.settings.paper_max_positions
         if len(positions) >= max_positions:
             return False, f"持仓已满({max_positions}只)"

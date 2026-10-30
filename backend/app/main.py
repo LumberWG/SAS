@@ -13,7 +13,7 @@ from fastapi.staticfiles import StaticFiles
 
 from app.api import (
     advisory, analysis, backtest, market, monitor, paper, scope, screening,
-    strategies, watchlist,
+    settings as settings_api, strategies, watchlist,
 )
 from app.config import BASE_DIR, get_settings
 
@@ -97,6 +97,7 @@ def create_app() -> FastAPI:
     app.include_router(advisory.router, prefix="/api")
     app.include_router(paper.router, prefix="/api")
     app.include_router(scope.router, prefix="/api")
+    app.include_router(settings_api.router, prefix="/api")
 
     @app.get("/api/health")
     def health() -> dict:

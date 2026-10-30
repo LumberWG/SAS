@@ -49,6 +49,62 @@ def _names_from_pool(codes: list[str]) -> dict[str, str]:
         return {}
 
 
+def _names_from_snapshot(codes: list[str]) -> dict[str, str]:
+    """从实时快照补名称：股票池按板块过滤（科创板/北交所在池外），只有快照是全市场。"""
+    if not codes:
+        return {}
+    try:
+        snap = snapshot_store.peek_snapshot()
+        if snap is None or snap.empty or "code" not in snap.columns or "name" not in snap.columns:
+            return {}
+        want = snap[snap["code"].astype(str).isin(set(codes))]
+        return {
+            str(r["code"]): str(r["name"])
+            for _, r in want.iterrows()
+            if r["name"] and str(r["name"]) != str(r["code"])
+        }
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("快照补名称失败: %s", exc)
+        return {}
+
+
+def _resolve_names(codes: list[str]) -> dict[str, str]:
+    """股票池优先、快照兜底的名称解析（两级都查不到就不返回该 code）。"""
+    out = _names_from_pool(codes)
+    missing = [c for c in codes if not out.get(c) or out.get(c) == c]
+    if missing:
+        out.update(_names_from_snapshot(missing))
+    return {c: n for c, n in out.items() if n and n != c}
+
+
+def _backfill_names(items: list[dict]) -> None:
+    """把名称缺失（空串 或 等于代码）的自选股就地补齐，并写回库。
+
+    ``name == code`` 是历史遗留：早期批量加自选时股票池查不到名称就把代码当名称写进库
+    （科创板 688/北交所 920 不在池内），接口不修前端就只能显示一串数字。
+    """
+    from app.data.scope import clean_name
+
+    def broken(code: str, name) -> bool:
+        """空 / 等于代码 / GBK 乱码（clean_name 会把它退化成代码）都算名称坏了。"""
+        s = str(name or "")
+        return (not s) or s == str(code) or clean_name(code, s) != s
+
+    bad = [i for i in items if broken(str(i["code"]), i.get("name"))]
+    if not bad:
+        return
+    names = _resolve_names([str(i["code"]) for i in bad])
+    for it in bad:
+        name = names.get(str(it["code"]))
+        if not name:
+            continue
+        it["name"] = name
+        try:  # 回写一次，后续列表不必再查
+            db.add_watch(str(it["code"]), name, it.get("note") or "", it.get("source") or "auto")
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("自选股名称回写失败 %s: %s", it.get("code"), exc)
+
+
 def _attach_quotes(items: list[dict]) -> None:
     """合并内存快照的实时价（不触发冷启动刷新）。"""
     snapshot_map: dict[str, dict] = {}
@@ -63,6 +119,9 @@ def _attach_quotes(items: list[dict]) -> None:
                     "price": None if pd_isna(getattr(row, "price", None)) else float(row.price),
                     "pct_change": None if pd_isna(getattr(row, "pct_change", None)) else float(row.pct_change),
                     "amount": None if pd_isna(getattr(row, "amount", None)) else float(row.amount),
+                    "turnover_rate": None
+                    if pd_isna(getattr(row, "turnover_rate", None))
+                    else float(row.turnover_rate),
                 }
     except Exception as exc:  # noqa: BLE001
         logger.warning("自选股行情合并跳过（%s），返回静态列表", exc)
@@ -71,6 +130,8 @@ def _attach_quotes(items: list[dict]) -> None:
         quote = snapshot_map.get(item["code"], {})
         item["price"] = quote.get("price")
         item["pct_change"] = quote.get("pct_change")
+        item["amount"] = quote.get("amount")
+        item["turnover_rate"] = quote.get("turnover_rate")
 
 
 @router.get("")
@@ -82,6 +143,7 @@ async def list_watchlist(
         raise HTTPException(status_code=400, detail=f"source 只能是 {VALID_SOURCES}")
 
     items = await asyncio.to_thread(db.list_watchlist, source)
+    await asyncio.to_thread(_backfill_names, items)   # 名称缺失的顺手补齐并回写
     _attach_quotes(items)
 
     all_items = items if source is None else await asyncio.to_thread(db.list_watchlist)
@@ -102,7 +164,7 @@ async def add_watch_batch(payload: WatchBatchRequest) -> dict:
     if not codes:
         return with_disclaimer({"added": 0, "codes": []})
 
-    names = await asyncio.to_thread(_names_from_pool, codes)
+    names = await asyncio.to_thread(_resolve_names, codes)
     items = [(code, names.get(code, code)) for code in dict.fromkeys(codes)]
     added = await asyncio.to_thread(db.add_watch_many, items, payload.source, payload.note)
     return with_disclaimer({

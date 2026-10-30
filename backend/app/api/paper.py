@@ -5,7 +5,7 @@ import logging
 from dataclasses import asdict
 from typing import Literal
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
 from app.api.utils import with_disclaimer
@@ -34,6 +34,51 @@ class OrderBody(BaseModel):
     shares: int | None = None      # 买入/卖出股数（卖出留空=全部）
     amount: float | None = None    # 买入金额（元），优先于 shares
     name: str = ""
+
+
+class QueueFilterBody(BaseModel):
+    """交易队列的大盘股过滤设置（「③ 三选 · 交易队列」页的开关）。"""
+
+    exclude_large_cap: bool
+    large_cap_yi: float = 100.0    # 总市值阈值（亿元），> 该值不进队列
+
+
+def _queue_filter_state() -> dict:
+    """当前生效的大盘股规则 + 影响面（会挡掉多少只）。"""
+    from app.paper.engine import _market_cap_map, large_cap_rule
+
+    enabled, limit = large_cap_rule()
+    caps = _market_cap_map()
+    blocked = (
+        sum(1 for v in caps.values() if v > limit) if enabled and limit > 0 else 0
+    )
+    return {
+        "exclude_large_cap": bool(enabled),
+        "large_cap_yi": round(limit / 1e8, 2),
+        "excluded_count": int(blocked),
+        "universe": len(caps),
+        "basis": "总市值(total_mv)",
+    }
+
+
+@router.get("/queue-filter")
+def get_queue_filter() -> dict:
+    """读取交易队列的大盘股过滤设置（默认开：总市值 > 100 亿不进队列）。"""
+    return with_disclaimer(_queue_filter_state())
+
+
+@router.post("/queue-filter")
+def set_queue_filter(body: QueueFilterBody) -> dict:
+    """修改大盘股过滤设置：写 app_state（重启保留），立即对下一轮扫描/下单生效。"""
+    if body.large_cap_yi <= 0:
+        raise HTTPException(status_code=400, detail="市值阈值需大于 0（亿元）")
+    db.set_state("paper_exclude_large_cap", "1" if body.exclude_large_cap else "0")
+    db.set_state("paper_large_cap_yi", str(float(body.large_cap_yi)))
+    logger.info(
+        "交易队列大盘股过滤更新: exclude=%s limit=%.0f亿",
+        body.exclude_large_cap, body.large_cap_yi,
+    )
+    return with_disclaimer(_queue_filter_state())
 
 
 @router.get("/account")

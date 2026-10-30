@@ -171,6 +171,11 @@ class Settings(BaseSettings):
     # 排除北交所（920/43/83/87/4/8 开头）：日波动 5~10%，固定 8% 止损≈1×ATR，
     # 会被正常噪声打掉；且 Top300 成交额池里几乎不会出现
     paper_exclude_bj: bool = True
+    # 大盘股过滤（「③ 三选 · 交易队列」页有开关）：总市值 > paper_large_cap_yi（亿元）
+    # 的票默认不进买入队列——银行/石油/白酒这类巨无霸短线弹性差，也吃不动评分仓位的弹性。
+    # 页面上的开关与数值写进 app_state 覆盖这里的默认值（不用改 .env，重启后仍保留）。
+    paper_exclude_large_cap: bool = True
+    paper_large_cap_yi: float = 100.0
     # 止损距离 = max(固定 8%, N×ATR%)，上限 paper_atr_stop_max。
     # 0=关闭（沿用固定 8%）；高波动票自动放宽，与回测里 e30_a15 的机制一致
     paper_atr_stop_mult: float = 2.0

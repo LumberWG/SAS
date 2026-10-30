@@ -56,18 +56,22 @@ def clean_name(code: str, name) -> str:
     return s
 
 
-def is_tradable(code: str, name: str = "") -> tuple[bool, str]:
+def is_tradable(code: str, name: str = "", *, exclude_giant: bool = True) -> tuple[bool, str]:
     """判断是否在项目可交易范围。
 
     返回 ``(是否可交易, 原因)``，原因用于诊断（board_excluded / giant / st /
     invalid / ok）。
+
+    ``exclude_giant=False`` 时不再按 :data:`GIANT_CODES` 剔除巨无霸——供
+    「③ 交易队列」页的大盘股开关的「关闭」态使用（关闭 = 允许买大市值票）。
+    默认 ``True``，回测与历史脚本口径不变。
     """
     c = str(code)
     if not (c.isdigit() and len(c) == 6):
         return False, "invalid"
     if not c.startswith(MAIN_BOARD_PREFIXES):
         return False, "board_excluded"
-    if c in GIANT_CODES:
+    if exclude_giant and c in GIANT_CODES:
         return False, "giant"
     if _ST_RE.search(str(name or "")):
         return False, "st"

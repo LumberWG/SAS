@@ -139,10 +139,29 @@ class Recommender:
     # 批量分析（盘中/开盘调用）
     # ------------------------------------------------------------------
     async def analyze_watchlist(self) -> list[Recommendation]:
-        """分析全部自选股（并发受信号量限制）。"""
+        """分析全部自选股（并发受信号量限制）。
+
+        范围外的票（科创板 688 / 北交所 / ST / 巨无霸）先剔掉再分析：它们本来就买不了，
+        留在分析里只会在「建议买入」和「交易池 · 切入点判定」里长期占位
+        （曾出现 54 只 688 常驻面板，且被大盘弱势闸门挡成「暂停买入」，看不出真实原因）。
+        已持仓的例外——仍然需要卖出建议。
+        """
+        from app.data.scope import is_tradable
+        from app.paper.engine import large_cap_rule
+
         watchlist = await asyncio.to_thread(db.list_watchlist)
         if not watchlist:
             return []
+        held = {p["code"] for p in await asyncio.to_thread(db.list_paper_positions)}
+        large_on, _limit = large_cap_rule()
+        before = len(watchlist)
+        watchlist = [
+            row for row in watchlist
+            if str(row["code"]) in held
+            or is_tradable(str(row["code"]), str(row.get("name") or ""), exclude_giant=large_on)[0]
+        ]
+        if len(watchlist) < before:
+            logger.info("自选分析跳过 %d 只范围外股票（科创板/北交所/ST/大盘股）", before - len(watchlist))
 
         # 实时价与市场情绪：一轮只取一次，供全部股票复用
         quotes, sentiment = await asyncio.gather(

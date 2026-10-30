@@ -294,11 +294,20 @@ class Scanner:
             before = len(pool)
             if "name" not in pool.columns:
                 pool["name"] = pool["code"]
+            # 巨无霸黑名单与「交易队列」页的大盘股开关同一口径：开关关闭时黑名单也放开，
+            # 否则页面上关掉开关，候选池里仍然永远看不到银行/石油，开关等于没用
+            from app.paper.engine import large_cap_rule  # 延迟导入避免循环依赖
+
+            large_on, large_limit = large_cap_rule()
             keep = [
-                is_tradable(str(c), str(n))[0]
+                is_tradable(str(c), str(n), exclude_giant=large_on)[0]
                 for c, n in zip(pool["code"].astype(str), pool["name"].astype(str))
             ]
             pool = pool[pd.Series(keep, index=pool.index)].reset_index(drop=True)
+            # 总市值阈值（默认 100 亿）同样作用于候选池，避免大市值票占掉二选名额
+            if large_on and large_limit > 0 and "total_mv" in pool.columns:
+                mv = pd.to_numeric(pool["total_mv"], errors="coerce")
+                pool = pool[mv.isna() | (mv <= large_limit)].reset_index(drop=True)
             task.excluded_by_scope = before - len(pool)
             if task.excluded_by_scope:
                 logger.info(
@@ -436,14 +445,23 @@ class Scanner:
         # 一只股票命中多个策略时只取一次，避免 TopN 名额被同一只股票吃掉
         items: list[tuple[str, str]] = []
         seen: set[str] = set()
+        skipped = 0
         for hit in ranked:
             code = str(hit.get("code") or "")
+            name = str(hit.get("name") or code)
             if not code or code in seen:
                 continue
             seen.add(code)
-            items.append((code, str(hit.get("name") or code)))
+            # 兜底再判一次范围：候选池正常已过滤，但显式 codes / 盘后选股等路径
+            # 可能把科创板(688)/北交所/ST 带进来，写进自选后会长期占着二选名额
+            if not is_tradable(code, name)[0]:
+                skipped += 1
+                continue
+            items.append((code, name))
             if len(items) >= limit:
                 break
+        if skipped:
+            logger.info("程序自选跳过 %d 只范围外股票（科创板/北交所/ST/巨无霸）", skipped)
         added = db.add_watch_many(items, source="auto", note="自动加入(扫描命中)")
         if added:
             logger.info("程序自选新增 %d 只（本轮命中 Top %d）", added, limit)

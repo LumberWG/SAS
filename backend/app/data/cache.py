@@ -444,6 +444,9 @@ class Database:
         来源优先级：已存在于「手动自选」的记录不会被程序自选覆盖，
         避免扫描把用户主动关注的股票降级为程序自选。
         """
+        from app.data.scope import clean_name
+
+        name = clean_name(code, name)      # 入库即清洗，避免 GBK 乱码写进库
         with self._lock, self._connect() as conn:
             conn.execute(
                 "INSERT INTO watchlist(code, name, note, source, created_at) "
@@ -461,6 +464,9 @@ class Database:
         """批量加入自选股，返回真正新增的条数（已存在的手动自选不计入）。"""
         if not items:
             return 0
+        from app.data.scope import clean_name
+
+        items = [(c, clean_name(c, n)) for c, n in items]   # 入库即清洗乱码名称
         added = 0
         with self._lock, self._connect() as conn:
             for code, name in items:

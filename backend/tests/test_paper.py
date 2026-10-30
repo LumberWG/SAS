@@ -26,11 +26,15 @@ def _disable_pool_gate(monkeypatch):
     闸门本身由 ``tests/test_exec_rules.py`` 与回测 regime 用例覆盖。
     """
     from app.config import get_settings
+    from app.paper import engine as paper_engine
 
     settings = get_settings()
     monkeypatch.setattr(settings, "paper_pool_top_n", 0, raising=False)
     monkeypatch.setattr(settings, "paper_regime_ma", 0, raising=False)
     monkeypatch.setattr(settings, "paper_regime_weak_pause", False, raising=False)
+    # 同理关闭「大盘股过滤」：它读本机真实快照的 total_mv，用例里的票（000001/600036 等）
+    # 在真实市值下都会被判成大盘股而跳过。规则本身由 tests/test_exec_rules.py 覆盖。
+    monkeypatch.setattr(paper_engine, "large_cap_rule", lambda: (False, 0.0))
 
 
 class TestKlineWarmup:
