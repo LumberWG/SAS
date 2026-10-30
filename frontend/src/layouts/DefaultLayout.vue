@@ -12,6 +12,7 @@ import {
   Layers,
   LayoutDashboard,
   Lightbulb,
+  Settings,
   ShieldAlert,
   Wallet,
 } from 'lucide-vue-next'
@@ -42,8 +43,11 @@ const navGroups = [
     ],
   },
   {
-    title: '复盘',
-    items: [{ path: '/backtest', title: '回测中心', icon: History }],
+    title: '复盘与配置',
+    items: [
+      { path: '/backtest', title: '回测中心', icon: History },
+      { path: '/settings', title: '系统设置', icon: Settings },
+    ],
   },
 ]
 

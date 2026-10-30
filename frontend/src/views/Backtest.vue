@@ -2,80 +2,36 @@
 /**
  * 回测中心：参数表单 → 提交回测 → 净值曲线 + 绩效指标 + 交易明细。
  */
-import { ref, reactive } from 'vue'
-import { Play, ChevronDown } from 'lucide-vue-next'
+import { onMounted, reactive, ref } from 'vue'
+import { Play, ChevronDown, RotateCcw } from 'lucide-vue-next'
 import VChart from 'vue-echarts'
 import { use } from 'echarts/core'
 import { CanvasRenderer } from 'echarts/renderers'
 import { LineChart } from 'echarts/charts'
 import { GridComponent, TooltipComponent } from 'echarts/components'
 
-import { runBacktest, type BacktestResult } from '../api'
+import { getBacktestDefaults, runBacktest, type BacktestResult } from '../api'
 
 use([CanvasRenderer, LineChart, GridComponent, TooltipComponent])
 
+/**
+ * 参数表单全部用**具体数值**展示（默认值来自后端 `/backtest/defaults`），
+ * 不再出现「默认」占位：留空既看不出线上到底是多少，也无法判断自己改没改。
+ *
+ * 改动高亮：比默认值大 = 红、比默认值小 = 绿、等于默认 = 常态色。
+ * 「关闭/不限」类参数（`zeroOff`）默认值就是 0，提交时值为 0 的字段直接略过，
+ * 与后端 `PipelineParams` 的 `None`（沿用线上配置）语义等价。
+ */
 const form = reactive<Record<string, any>>({
   start_date: '2025-01-01',
   end_date: '2026-10-20',
-  initial_capital: null,
-  max_positions: null,
-  universe_size: 500,
-  board_prefixes: [],
-  watch_cap: null,
-  add_per_day: null,
-  rebalance_days: null,
-  buy_threshold: null,
-  buy_top_pct: null,
-  max_open_gain: null,
-  max_gain_5d: null,
-  min_volume_ratio: null,
-  min_turnover_rate: null,
-  queue_top_m: null,
-  entry_max_chase: null,
-  entry_pullback: null,
-  entry_window_minutes: null,
-  invert_score: null,
-  stop_loss: null,
-  take_profit: null,
-  max_hold_days: null,
-  stop_atr_mult: null,
-  stop_atr_min: null,
-  stop_atr_max: null,
-  stop_confirm_close: null,
-  partial_tp_at: null,
-  partial_tp_ratio: null,
-  breakeven_trigger: null,
-  trail_pct: null,
-  trail_arm: null,
-  regime_ma: null,
-  regime_fast_ma: null,
-  weak_exposure: null,
-  regime_flat_below: null,
-  max_total_exposure: null,
-  single_position_ratio: null,
-  full_score: null,
-  half_score: null,
-  rotation_enabled: null,
-  rotation_gap: null,
-  rotation_min_score: null,
 })
+const defaults = ref<Record<string, any> | null>(null)
+const defaultsError = ref('')
 const formOpen = ref(true)
 // 参数分组改为 tab：一次只显示当前组，纵向空间从「9 组全部铺开」降到一组
 const activeGroup = ref('基础')
 
-/** 当前分组里已被填写的参数个数（留空=沿用线上默认，填了就提醒一下） */
-function groupFilledCount(g: { items: ParamDef[] }): number {
-  let n = 0
-  for (const it of g.items) {
-    const v = form[it.key]
-    if (Array.isArray(v)) {
-      if (v.length > 0) n += 1
-    } else if (v !== null && v !== undefined && v !== '') {
-      n += 1
-    }
-  }
-  return n
-}
 const result = ref<BacktestResult | null>(null)
 const loading = ref(false)
 const error = ref('')
@@ -113,7 +69,7 @@ const groups: { name: string; items: ParamDef[] }[] = [
     { key: 'queue_top_m', label: '交易队列topM', type: 'number', min: 0, max: 50, unit: '每日买单数' },
     { key: 'entry_max_chase', label: '不追高', type: 'number', step: 0.005, unit: '开盘溢价上限' },
     { key: 'entry_pullback', label: '回踩要求', type: 'number', step: 0.005, unit: '0=不限' },
-    { key: 'entry_window_minutes', label: '分钟级切入窗口', type: 'number', min: 5, max: 240, step: 5, unit: '需开分钟线' },
+    { key: 'entry_window_minutes', label: '分钟级切入窗口', type: 'number', min: 0, max: 240, step: 5, unit: '0=关闭，需开分钟线' },
   ]},
   { name: '止损/止盈', items: [
     { key: 'stop_loss', label: '止损比例', type: 'number', min: 0.01, max: 0.5, step: 0.01, unit: '成本×' },
@@ -159,11 +115,94 @@ const groups: { name: string; items: ParamDef[] }[] = [
   ]},
 ]
 
+/** 默认值就是 0（=关闭/不限）的参数：提交时值为 0 直接略过，等价于后端 None */
+const ZERO_OFF = new Set([
+  'buy_top_pct', 'max_open_gain', 'max_gain_5d', 'min_volume_ratio', 'min_turnover_rate',
+  'queue_top_m', 'entry_max_chase', 'entry_pullback', 'entry_window_minutes',
+  'stop_atr_mult', 'partial_tp_at', 'breakeven_trigger', 'trail_pct', 'trail_arm',
+  'regime_ma', 'weak_exposure',
+  't_size', 't_up_sell', 't_up_buyback', 't_down_add', 't_down_full', 't_rebound_sell',
+  't_crash_guard',
+])
+/** 大整数（金额）用宽一点的输入框 */
+const WIDE_KEYS = new Set(['initial_capital'])
+
+/** 载入线上默认值，并把表单填成具体数字 */
+async function loadDefaults() {
+  defaultsError.value = ''
+  try {
+    const d = await getBacktestDefaults()
+    defaults.value = d
+    for (const g of groups) {
+      for (const it of g.items) {
+        if (form[it.key] !== undefined && it.key !== 'board_prefixes') continue
+        form[it.key] = d[it.key] ?? (it.type === 'bool' ? false : it.type === 'multiselect' ? [] : 0)
+      }
+    }
+    if (!Array.isArray(form.board_prefixes)) form.board_prefixes = []
+  } catch (e: unknown) {
+    defaultsError.value = e instanceof Error ? e.message : '默认参数加载失败'
+  }
+}
+
+function defOf(key: string): any {
+  return defaults.value?.[key]
+}
+
+/** 是否人工改动过（与线上默认值不同） */
+function isChanged(it: ParamDef): boolean {
+  const d = defOf(it.key)
+  const v = form[it.key]
+  if (it.type === 'multiselect') return (v as string[]).length > 0
+  if (it.type === 'bool') return Boolean(v) !== Boolean(d)
+  if (v === null || v === undefined || v === '') return false
+  return Number(v) !== Number(d)
+}
+
+/** 改动方向着色：调大=红、调小=绿、未改=常态 */
+function diffTone(it: ParamDef): string {
+  if (!isChanged(it)) return 'text-content'
+  if (it.type === 'bool') return form[it.key] ? 'text-up' : 'text-down'
+  return Number(form[it.key]) > Number(defOf(it.key)) ? 'text-up' : 'text-down'
+}
+
+/** 输入框边框也跟着着色，扫一眼能看出哪几个被动过 */
+function inputTone(it: ParamDef): string {
+  const tone = diffTone(it)
+  if (tone === 'text-up') return 'border-up/50 text-up'
+  if (tone === 'text-down') return 'border-down/50 text-down'
+  return 'border-base-600 text-content'
+}
+
+function groupChangedCount(g: { items: ParamDef[] }): number {
+  return g.items.reduce((n, it) => n + (isChanged(it) ? 1 : 0), 0)
+}
+
+/** 展示用的默认值文本（标题 tooltip） */
+function defaultHint(it: ParamDef): string {
+  const d = defOf(it.key)
+  if (it.type === 'multiselect') return '默认：全市场'
+  if (it.type === 'bool') return `默认：${d ? '开' : '关'}`
+  return `默认：${d}`
+}
+
 function toggleBoard(val: string) {
   const arr = form.board_prefixes as string[]
   const i = arr.indexOf(val)
   if (i >= 0) arr.splice(i, 1)
   else arr.push(val)
+}
+
+function resetDefaults() {
+  if (!defaults.value) return
+  for (const g of groups) {
+    for (const it of g.items) {
+      const d = defaults.value[it.key]
+      form[it.key] = d ?? (it.type === 'bool' ? false : it.type === 'multiselect' ? [] : 0)
+    }
+  }
+  form.board_prefixes = []
+  error.value = ''
 }
 
 function buildPayload(): Record<string, unknown> {
@@ -174,7 +213,10 @@ function buildPayload(): Record<string, unknown> {
   for (const g of groups) {
     for (const it of g.items) {
       const v = form[it.key]
-      if (v !== null && v !== undefined && v !== '') p[it.key] = v
+      if (v === null || v === undefined || v === '') continue
+      if (it.type === 'multiselect' && (v as string[]).length === 0) continue
+      if (it.type === 'number' && ZERO_OFF.has(it.key) && Number(v) === 0) continue
+      p[it.key] = v
     }
   }
   return p
@@ -291,6 +333,8 @@ function applyPreset(p: { name: string; params: Record<string, unknown> }) {
   if (hit) activeGroup.value = hit.name
 }
 
+onMounted(loadDefaults)
+
 const equityOption = ref({})
 function buildEquityOption(data: BacktestResult) {
   const dates = data.equity_curve.map((p) => p.date)
@@ -359,56 +403,72 @@ function metricTone(v: number): string {
 
 <template>
   <div class="space-y-5">
-    <!-- 参数表单（可展开/收起） -->
-    <div class="glass-card p-5">
-      <div class="flex items-center justify-between">
-        <h3 class="text-subheading">回测参数</h3>
+    <!-- 参数表单：默认值全部写成具体数字，改过的按方向着色（大=红 / 小=绿） -->
+    <div class="glass-card p-3">
+      <div class="flex flex-wrap items-center gap-2">
+        <h3 class="text-subheading whitespace-nowrap">回测参数</h3>
+        <label class="flex items-center gap-1 text-[11px] text-content-muted">
+          开始
+          <input v-model="form.start_date" type="date" class="h-7 w-[116px] rounded border border-base-600 bg-base-700 px-1.5 font-num text-[12px] text-content outline-none focus:border-primary" />
+        </label>
+        <label class="flex items-center gap-1 text-[11px] text-content-muted">
+          结束
+          <input v-model="form.end_date" type="date" class="h-7 w-[116px] rounded border border-base-600 bg-base-700 px-1.5 font-num text-[12px] text-content outline-none focus:border-primary" />
+        </label>
+        <span class="hidden text-[11px] text-content-faint lg:inline">红=比默认大 · 绿=比默认小 · 0=不启用</span>
+        <span class="flex-1"></span>
         <button
           type="button"
-          class="flex items-center gap-1 rounded-md border border-base-600 bg-base-700 px-2.5 py-1 text-[12px] text-content-muted transition-colors hover:border-primary/60 hover:text-primary"
+          class="flex items-center gap-1 rounded border border-base-600 bg-base-700 px-2 py-1 text-[11px] text-content-muted transition-colors hover:border-primary/60 hover:text-primary"
+          @click="resetDefaults"
+        >
+          <RotateCcw class="h-3.5 w-3.5" />重置
+        </button>
+        <button
+          type="button"
+          class="flex items-center gap-1 rounded border border-base-600 bg-base-700 px-2 py-1 text-[11px] text-content-muted transition-colors hover:border-primary/60 hover:text-primary"
           @click="formOpen = !formOpen"
         >
-          <ChevronDown class="h-4 w-4 transition-transform" :class="formOpen ? 'rotate-180' : ''" />
+          <ChevronDown class="h-3.5 w-3.5 transition-transform" :class="formOpen ? 'rotate-180' : ''" />
           {{ formOpen ? '收起' : '展开' }}
         </button>
-      </div>
-      <div v-show="formOpen" class="mt-4">
-      <div class="mb-4 flex flex-wrap items-center gap-2">
-        <span class="text-[12px] text-content-muted">快速预设：</span>
         <button
-          v-for="p in presets"
-          :key="p.name"
-          type="button"
-          @click="applyPreset(p)"
-          class="rounded-md border border-base-600 bg-base-700 px-3 py-1.5 text-[12px] text-content transition-colors hover:border-primary/60 hover:text-primary"
+          class="flex items-center gap-1.5 rounded bg-gradient-to-r from-primary to-primary-light px-3 py-1 text-[12px] font-semibold text-white shadow-glow transition-all hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50"
+          :disabled="loading"
+          @click="submit"
         >
-          {{ p.name }}
+          <Play class="h-3.5 w-3.5" />
+          {{ loading ? '运行中...' : '开始回测' }}
         </button>
-        <span class="text-[11px] text-content-faint">预设只填常用项，其余留空=沿用线上默认</span>
       </div>
-      <div class="grid grid-cols-1 gap-4 md:grid-cols-3">
-        <label class="flex flex-col gap-1.5">
-          <span class="text-[11px] text-content-muted">开始日期</span>
-          <input v-model="form.start_date" type="date" class="rounded-lg border border-base-600 bg-base-700 px-3 py-2 text-[13px] text-content outline-none focus:border-primary" />
-        </label>
-        <label class="flex flex-col gap-1.5">
-          <span class="text-[11px] text-content-muted">结束日期</span>
-          <input v-model="form.end_date" type="date" class="rounded-lg border border-base-600 bg-base-700 px-3 py-2 text-[13px] text-content outline-none focus:border-primary" />
-        </label>
-        <div class="flex flex-col justify-center gap-1 rounded-lg border border-base-600/60 bg-base-700/40 px-3 py-2">
-          <span class="text-[11px] text-content-muted">自动执行（无需选策略）</span>
-          <span class="text-[12px] text-content">全策略扫描 → 加自选 → 14因子排序 → 评分加权下单</span>
-        </div>
+      <div v-if="defaultsError" class="mt-2 rounded border border-up/40 bg-up/10 px-2 py-1 text-[11px] text-up">
+        {{ defaultsError }}（点「重置」重试）
       </div>
+      <div v-if="error" class="mt-2 text-[11px] text-up">{{ error }}</div>
+      <div v-if="loading" class="mt-2 text-[11px] text-content-muted">回测在后台运行，约需 1~3 分钟，请勿关闭页面</div>
 
-      <!-- 可调参数分组（tab 切换，避免一次性铺开占用太多纵向空间） -->
-      <div class="mt-5">
-        <div class="-mb-px flex flex-wrap items-center gap-1 border-b border-base-600/60 pb-2">
+      <div v-show="formOpen" class="mt-2">
+        <div class="mb-1.5 flex flex-wrap items-center gap-1.5">
+          <span class="text-[11px] text-content-muted">预设</span>
+          <button
+            v-for="p in presets"
+            :key="p.name"
+            type="button"
+            @click="applyPreset(p)"
+            class="rounded border border-base-600 bg-base-700 px-2 py-0.5 text-[11px] text-content transition-colors hover:border-primary/60 hover:text-primary"
+          >
+            {{ p.name }}
+          </button>
+          <span class="text-[10px] text-content-faint">只改预设列出的项，其余保持默认</span>
+        </div>
+
+        <!-- 参数分组（tab）：一次只渲染当前组；每行 2~5 列，输入框只够显示数字 -->
+        <div class="flex flex-wrap items-center gap-0.5 border-b border-base-600/60 pb-1">
           <button
             v-for="g in groups"
             :key="g.name"
             type="button"
-            class="flex items-center gap-1.5 rounded-md px-3 py-1.5 text-[12px] font-medium transition-colors"
+            class="flex items-center gap-1 rounded px-2 py-1 text-[11px] font-medium transition-colors"
             :class="
               activeGroup === g.name
                 ? 'bg-primary/15 text-primary-light shadow-[inset_0_0_0_1px_rgba(56,189,248,0.25)]'
@@ -417,62 +477,60 @@ function metricTone(v: number): string {
             @click="activeGroup = g.name"
           >
             {{ g.name }}
-            <span
-              v-if="groupFilledCount(g)"
-              class="rounded bg-primary/20 px-1 font-num text-[10px] text-primary-light"
-            >
-              {{ groupFilledCount(g) }}
+            <span v-if="groupChangedCount(g)" class="rounded bg-up/20 px-1 font-num text-[10px] text-up">
+              {{ groupChangedCount(g) }}
             </span>
           </button>
         </div>
-        <div
-          v-for="g in groups"
-          v-show="activeGroup === g.name"
-          :key="g.name"
-          class="mt-3 rounded-lg border border-base-600/50 bg-base-800/30 p-3"
-        >
-          <div class="mb-2 flex items-center justify-between text-[12px] font-medium text-content-muted">
-            <span>{{ g.name }}</span>
-            <span v-if="groupFilledCount(g)" class="text-[11px] font-normal text-content-faint">
-              已改 {{ groupFilledCount(g) }} 项，其余留空=线上默认
-            </span>
-          </div>
-          <div class="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-4">
+        <div v-for="g in groups" v-show="activeGroup === g.name" :key="g.name" class="mt-1.5">
+          <div class="grid grid-cols-2 gap-1 md:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5">
             <template v-for="it in g.items" :key="it.key">
-              <label v-if="it.type === 'number'" class="flex flex-col gap-1">
-                <span class="text-[11px] text-content-muted">{{ it.label }}<span v-if="it.unit" class="text-content-faint"> · {{ it.unit }}</span></span>
-                <input v-model.number="form[it.key]" type="number" :min="it.min" :max="it.max" :step="it.step" placeholder="默认" class="rounded-lg border border-base-600 bg-base-700 px-2.5 py-1.5 text-[13px] text-content outline-none focus:border-primary" />
+              <label
+                v-if="it.type === 'number'"
+                class="flex items-center justify-between gap-1.5 rounded border border-base-600/40 bg-base-700/30 px-1.5 py-0.5"
+                :title="defaultHint(it) + (it.unit ? ' · ' + it.unit : '')"
+              >
+                <span class="min-w-0 flex-1 truncate text-[11px] text-content-muted">{{ it.label }}</span>
+                <input
+                  v-model.number="form[it.key]"
+                  type="number"
+                  :min="it.min"
+                  :max="it.max"
+                  :step="it.step"
+                  class="h-6 shrink-0 rounded border bg-base-800/60 px-1 text-right font-num text-[12px] outline-none focus:border-primary"
+                  :class="[WIDE_KEYS.has(it.key) ? 'w-[84px]' : 'w-[60px]', inputTone(it)]"
+                />
               </label>
-              <label v-else-if="it.type === 'bool'" class="flex items-center justify-between rounded-lg border border-base-600 bg-base-700 px-3 py-2">
-                <span class="text-[11px] text-content-muted">{{ it.label }}</span>
-                <input v-model="form[it.key]" type="checkbox" class="h-4 w-4 accent-primary" />
+              <label
+                v-else-if="it.type === 'bool'"
+                class="flex items-center justify-between gap-1.5 rounded border border-base-600/40 bg-base-700/30 px-1.5 py-1"
+                :title="defaultHint(it)"
+              >
+                <span
+                  class="min-w-0 flex-1 truncate text-[11px]"
+                  :class="isChanged(it) ? diffTone(it) : 'text-content-muted'"
+                >{{ it.label }}</span>
+                <input v-model="form[it.key]" type="checkbox" class="h-3.5 w-3.5 shrink-0 accent-[#2563EB]" />
               </label>
-              <div v-else-if="it.type === 'multiselect'" class="col-span-2 flex flex-col gap-1 md:col-span-1">
+              <div v-else-if="it.type === 'multiselect'" class="col-span-full flex flex-wrap items-center gap-1">
                 <span class="text-[11px] text-content-muted">{{ it.label }}</span>
-                <div class="flex flex-wrap gap-1.5">
-                  <button v-for="[val, lab] in it.options" :key="val" type="button" @click="toggleBoard(val)"
-                    :class="form[it.key].includes(val) ? 'border-primary/60 bg-primary/20 text-primary' : 'border-base-600 bg-base-700 text-content-muted'"
-                    class="rounded-md border px-2 py-1 text-[11px] transition-colors">{{ lab }}</button>
-                </div>
+                <button
+                  v-for="[val, lab] in it.options"
+                  :key="val"
+                  type="button"
+                  @click="toggleBoard(val)"
+                  class="rounded border px-1.5 py-0.5 text-[11px] transition-colors"
+                  :class="
+                    form[it.key].includes(val)
+                      ? 'border-primary/60 bg-primary/20 text-primary'
+                      : 'border-base-600 bg-base-700 text-content-muted'
+                  "
+                >{{ lab }}</button>
+                <span v-if="!form[it.key].length" class="text-[10px] text-content-faint">不选 = 全市场</span>
               </div>
             </template>
           </div>
         </div>
-      </div>
-      </div>
-
-      <div class="mt-4 flex items-center gap-4">
-        <button
-          class="flex items-center gap-2 rounded-lg bg-gradient-to-r from-primary to-primary-light px-5 py-2.5 text-[13px] font-semibold text-white shadow-glow transition-all hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50"
-          :disabled="loading"
-          @click="submit"
-        >
-          <Play class="h-4 w-4" />
-          {{ loading ? '回测运行中...' : '开始回测' }}
-        </button>
-        <span v-if="loading" class="text-[12px] text-content-muted">回测在后台运行，约需 1~3 分钟，请勿关闭页面</span>
-        <span v-if="error" class="text-[12px] text-up">{{ error }}</span>
-        <span class="text-[11px] text-content-faint">留空=沿用线上默认；板块不选=全市场</span>
       </div>
     </div>
 

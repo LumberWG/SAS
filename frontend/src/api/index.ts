@@ -459,6 +459,64 @@ export function getBacktest(runId: number): Promise<BacktestResult> {
   return http.get(`/backtest/${runId}`).then((r) => r.data)
 }
 
+/** 系统设置总览：一项参数的当前生效值 + 来源 + 生效方式。 */
+export interface ParamItem {
+  key: string
+  label: string
+  value: string | number | boolean | null
+  type: 'bool' | 'int' | 'float' | 'str'
+  /** 值从哪来：app_state 覆盖 / 环境变量(.env) / 代码默认 / 硬编码常量 */
+  source: 'app_state' | 'env' | 'default' | 'code'
+  /** 改了是否必须重启后端才生效 */
+  restart_required: boolean
+  /** 是否允许页面修改（当前全部 false，可写化是下一步） */
+  writable: boolean
+  runtime: boolean
+  note: string
+}
+
+export interface SettingsOverview {
+  groups: { name: string; items: ParamItem[] }[]
+  total: number
+  runtime_overrides: number
+  hint: string
+}
+
+export function getSettingsOverview(): Promise<SettingsOverview> {
+  return http.get('/settings').then((r) => r.data)
+}
+
+/** 交易队列的大盘股过滤设置（「③ 三选 · 交易队列」页开关）。 */
+export interface QueueFilter {
+  exclude_large_cap: boolean
+  large_cap_yi: number
+  /** 当前阈值下会被挡掉的股票数（全市场口径，含不可交易的板块） */
+  excluded_count: number
+  universe: number
+  basis: string
+}
+
+export function getQueueFilter(): Promise<QueueFilter> {
+  return http.get('/paper/queue-filter').then((r) => r.data)
+}
+
+export function setQueueFilter(payload: {
+  exclude_large_cap: boolean
+  large_cap_yi: number
+}): Promise<QueueFilter> {
+  return http.post('/paper/queue-filter', payload).then((r) => r.data)
+}
+
+/**
+ * 回测参数的线上默认值（具体数字）。
+ *
+ * 后端把 `Settings.paper_*` 与 pipeline 里的常量统一算好返回，前端不再抄一份；
+ * 约定「关闭/不限」的数值项返回 0，提交时值为 0 的字段会被略过（等价于 None）。
+ */
+export function getBacktestDefaults(): Promise<Record<string, number | boolean | string[]>> {
+  return http.get('/backtest/defaults').then((r) => r.data.defaults)
+}
+
 // ==================== 监控 / 异动 ====================
 
 export interface MarketAlert {
@@ -808,6 +866,10 @@ export interface WatchItem {
   // 后端合并的实时行情字段（快照失败时为 null）
   price?: number | null
   pct_change?: number | null
+  /** 当日成交额（元），快照缺失时为 null */
+  amount?: number | null
+  /** 换手率（%），快照缺失时为 null */
+  turnover_rate?: number | null
 }
 
 export interface WatchCounts {

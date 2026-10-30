@@ -153,6 +153,19 @@ function pctClass(v: number | null | undefined): string {
   return v > 0 ? 'text-up' : 'text-down'
 }
 
+/** 成交额（元 → 亿/万），列表里只给量级，不用全精度 */
+function fmtAmount(v: number | null | undefined): string {
+  if (v == null) return '--'
+  if (v >= 1e8) return `${(v / 1e8).toFixed(2)}亿`
+  return `${(v / 1e4).toFixed(0)}万`
+}
+
+/** 价格/涨跌用同一套色调，几个版面保持一致 */
+function priceTone(v: number | null | undefined): string {
+  if (v == null || v === 0) return 'text-content'
+  return v > 0 ? 'text-up' : 'text-down'
+}
+
 onMounted(async () => {
   loaded = true
   await Promise.all([loadWatchlist(), loadSignals()])
@@ -273,11 +286,11 @@ onActivated(async () => {
         <div
           v-for="item in visibleItems"
           :key="item.code"
-          class="group flex cursor-pointer items-center justify-between rounded-lg border border-base-600/50 bg-base-700/30 p-3 transition-all hover:border-primary/40 hover:bg-primary/5"
+          class="group flex cursor-pointer items-center justify-between gap-3 rounded border border-base-600/50 bg-base-700/30 px-3 py-2 transition-all hover:border-primary/40 hover:bg-primary/5"
           :class="tab === 'auto' && checked.includes(item.code) ? 'border-primary/50 bg-primary/10' : ''"
           @click="goDetail(item.code)"
         >
-          <div class="flex min-w-0 items-center gap-3">
+          <div class="flex min-w-0 items-center gap-2.5">
             <input
               v-if="tab === 'auto'"
               type="checkbox"
@@ -286,7 +299,7 @@ onActivated(async () => {
               @click.stop="toggleCheck(item.code)"
             />
             <div class="min-w-0">
-              <div class="flex items-center gap-2">
+              <div class="flex items-center gap-1.5">
                 <span class="truncate text-[13px] font-medium text-content">{{ item.name }}</span>
                 <!-- 来源备注只在手动自选展示：程序自选页签内整列都是程序来源 -->
                 <span
@@ -295,20 +308,24 @@ onActivated(async () => {
                   >{{ item.note }}</span
                 >
               </div>
-              <div class="font-num text-[11px] text-content-faint">{{ item.code }}</div>
+              <div class="font-num flex items-center gap-2 text-[11px] text-content-faint">
+                <span>{{ item.code }}</span>
+                <span v-if="item.amount != null">成交 {{ fmtAmount(item.amount) }}</span>
+                <span v-if="item.turnover_rate != null">换手 {{ item.turnover_rate.toFixed(1) }}%</span>
+              </div>
             </div>
           </div>
-          <div class="flex items-center gap-4">
+          <div class="flex shrink-0 items-center gap-3">
             <div class="text-right">
-              <div class="font-num text-[15px] font-semibold" :class="item.pct_change != null && item.pct_change !== 0 ? (item.pct_change > 0 ? 'text-up' : 'text-down') : 'text-content'">
+              <div class="font-num text-[15px] font-semibold" :class="priceTone(item.pct_change)">
                 {{ item.price?.toFixed(2) ?? '--' }}
               </div>
-              <div class="font-num text-[11px]" :class="item.pct_change != null && item.pct_change !== 0 ? (item.pct_change > 0 ? 'text-up' : 'text-down') : 'text-content-faint'">
-                {{ item.pct_change != null ? (item.pct_change > 0 ? '+' : '') + item.pct_change.toFixed(2) + '%' : '--' }}
+              <div class="font-num text-[11px]" :class="pctClass(item.pct_change)">
+                {{ fmtPct(item.pct_change) }}
               </div>
             </div>
             <button
-              class="rounded-lg p-1.5 text-content-faint opacity-0 transition-all hover:bg-down/15 hover:text-down group-hover:opacity-100"
+              class="rounded p-1.5 text-content-faint opacity-0 transition-all hover:bg-down/15 hover:text-down group-hover:opacity-100"
               @click.stop="remove(item.code)"
             >
               <Trash2 class="h-3.5 w-3.5" />

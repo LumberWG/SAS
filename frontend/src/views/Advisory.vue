@@ -18,7 +18,10 @@ import {
   getAdvisorySummary,
   getBuyRecommendations,
   getFocusList,
+  getQueueFilter,
   getSellRecommendations,
+  setQueueFilter,
+  type QueueFilter,
   type RecommendationItem,
 } from '../api'
 
@@ -95,8 +98,56 @@ function pctClass(v: number | null | undefined): string {
   return v > 0 ? 'text-up' : 'text-down'
 }
 
+// ---- 交易队列准入：大盘股过滤（默认开，总市值 > 阈值不进队列） ----
+const filter = ref<QueueFilter>({
+  exclude_large_cap: true,
+  large_cap_yi: 100,
+  excluded_count: 0,
+  universe: 0,
+  basis: '总市值(total_mv)',
+})
+const capYiInput = ref(100)
+const filterSaving = ref(false)
+
+async function loadFilter() {
+  try {
+    const f = await getQueueFilter()
+    filter.value = f
+    capYiInput.value = f.large_cap_yi
+  } catch {
+    // 后端未就绪时保留前端默认展示，不阻塞建议列表
+  }
+}
+
+/** 保存开关/阈值；输入非法（≤0）时回退到当前生效值 */
+async function saveFilter() {
+  const yi = Number(capYiInput.value)
+  if (!Number.isFinite(yi) || yi <= 0) {
+    capYiInput.value = filter.value.large_cap_yi
+    return
+  }
+  filterSaving.value = true
+  try {
+    filter.value = await setQueueFilter({
+      exclude_large_cap: filter.value.exclude_large_cap,
+      large_cap_yi: yi,
+    })
+    capYiInput.value = filter.value.large_cap_yi
+  } catch {
+    await loadFilter()
+  } finally {
+    filterSaving.value = false
+  }
+}
+
+async function toggleLargeCap() {
+  filter.value.exclude_large_cap = !filter.value.exclude_large_cap
+  await saveFilter()
+}
+
 onMounted(() => {
   load()
+  loadFilter()
   timer = window.setInterval(load, 30000)  // 30s 轮询
 })
 onUnmounted(() => {
@@ -144,6 +195,61 @@ onUnmounted(() => {
         </div>
         <span v-if="updatedAt" class="text-[11px] text-content-faint">更新于 {{ updatedAt }}</span>
       </div>
+    </div>
+
+    <!-- 交易队列准入：大盘股过滤（默认剔除，关闭后才允许大市值票进队列） -->
+    <div class="glass-card flex flex-wrap items-center gap-3 px-4 py-2">
+      <button
+        type="button"
+        class="flex items-center gap-2 disabled:opacity-60"
+        :disabled="filterSaving"
+        @click="toggleLargeCap"
+      >
+        <span
+          class="relative h-4 w-8 shrink-0 rounded-full transition-colors"
+          :class="filter.exclude_large_cap ? 'bg-primary' : 'bg-base-600'"
+        >
+          <span
+            class="absolute top-0.5 h-3 w-3 rounded-full bg-white transition-all"
+            :class="filter.exclude_large_cap ? 'left-[18px]' : 'left-0.5'"
+          ></span>
+        </span>
+        <span
+          class="text-[12px] font-medium"
+          :class="filter.exclude_large_cap ? 'text-primary' : 'text-content-muted'"
+        >
+          排除大盘股
+        </span>
+      </button>
+
+      <label class="flex items-center gap-1 text-[11px] text-content-muted">
+        {{ filter.basis }} &gt;
+        <input
+          v-model.number="capYiInput"
+          type="number"
+          min="1"
+          step="10"
+          class="h-6 w-[64px] rounded border border-base-600 bg-base-700 px-1 text-right font-num text-[12px] text-content outline-none focus:border-primary"
+          @keyup.enter="saveFilter"
+          @blur="saveFilter"
+        />
+        亿 不进队列
+      </label>
+
+      <span
+        v-if="filter.exclude_large_cap"
+        class="rounded border border-base-600 px-1.5 py-0.5 font-num text-[10px] text-content-faint"
+      >
+        挡掉 {{ filter.excluded_count }} / {{ filter.universe }} 只
+      </span>
+
+      <span class="ml-auto text-[10px] text-content-faint">
+        {{
+          filter.exclude_large_cap
+            ? '银行/石油等大市值票不进建议与队列'
+            : '已放开：大市值票可以进入队列'
+        }}
+      </span>
     </div>
 
     <div class="grid grid-cols-1 gap-5 xl:grid-cols-2">

@@ -67,6 +67,13 @@ const routes = [
         component: () => import('../views/PaperTrading.vue'),
         meta: { title: '⑤ 持仓与成交', stage: 5, icon: 'Wallet' },
       },
+      {
+        // 系统设置：只读总览「当前生效值 + 来源 + 是否要重启」，不做写操作
+        path: 'settings',
+        name: 'settings',
+        component: () => import('../views/Settings.vue'),
+        meta: { title: '系统设置', icon: 'Settings' },
+      },
     ],
   },
 ]
