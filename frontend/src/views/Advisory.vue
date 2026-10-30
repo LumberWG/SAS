@@ -161,7 +161,7 @@ onUnmounted(() => {
     <div class="glass-card flex flex-wrap items-center justify-between gap-4 p-5">
       <div class="flex items-center gap-3">
         <div
-          class="flex h-10 w-10 items-center justify-center rounded-lg bg-gradient-to-br from-primary to-primary-light shadow-glow"
+          class="flex h-10 w-10 items-center justify-center rounded-lg bg-gradient-to-br from-primary to-primary-dark ring-1 ring-inset ring-white/15"
         >
           <Lightbulb class="h-5 w-5 text-white" />
         </div>

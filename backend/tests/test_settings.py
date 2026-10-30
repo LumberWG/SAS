@@ -12,7 +12,18 @@ from app.param_specs import (
     update_settings,
 )
 
-_KEYS = ("paper_max_positions", "paper_exclude_large_cap", "paper_large_cap_yi")
+_KEYS = (
+    "paper_max_positions",
+    "paper_exclude_large_cap",
+    "paper_large_cap_yi",
+    "paper_stop_loss",
+    "factor_buy_threshold",
+    "factor_sell_threshold",
+    "trade_fee_commission_rate",
+    "trade_fee_commission_min",
+    "trade_fee_stamp_rate",
+    "trade_fee_transfer_rate",
+)
 
 
 @pytest.fixture(autouse=True)
@@ -67,6 +78,72 @@ def test_reset_restores_env_value():
     update_settings({"paper_max_positions": 5})
     assert reset_settings(["paper_max_positions"]) == ["paper_max_positions"]
     assert get_settings().paper_max_positions == expected
+
+
+def test_overview_labels_are_short_with_desc_for_tooltip():
+    """卡片里只放短名，整句注释走 `desc`（tooltip）。
+
+    以前标签直接取 `config.py` 注释首行，界面上一堆
+    「待执行买单最多同时挂 M 条（卖出不受限，释放风险优先）。」这种半句话，
+    卡片里必然截断成省略号。现在标签 ≤ 10 字，说明单独给。
+    """
+    overview = settings_overview()
+    items = [i for g in overview["groups"] for i in g["items"]]
+    assert items
+    for it in items:
+        assert "。" not in it["label"] and "；" not in it["label"], it["key"]
+        assert len(it["label"]) <= 10, it
+        assert it.get("desc"), f"{it['key']} 缺少 tooltip 说明"
+
+
+def test_thresholds_and_fees_are_configurable():
+    """评分阈值与费率不再硬编码：改一次，选股判级、实盘费用、回测费用同时跟上。"""
+    from app.analysis.factors import FactorScore, thresholds
+    from app.backtest.pipeline import calc_fee as bt_fee
+    from app.paper.engine import PaperEngine
+
+    update_settings({"factor_buy_threshold": 30.0, "trade_fee_commission_rate": 0.00012})
+
+    assert thresholds() == (30.0, -15.0)
+    assert FactorScore(total=20.0).action == "hold"      # 20 分不再算 buy
+    assert FactorScore(total=31.0).action == "buy"
+    # 实盘与回测共用同一份费率：10 万元买入 = 佣金 12 + 过户费 1
+    assert PaperEngine.calc_fee("buy", 100000) == pytest.approx(13.0)
+    assert bt_fee("buy", 100000) == pytest.approx(13.0)
+
+
+def test_threshold_cross_validation():
+    """买入阈值必须大于卖出阈值，否则同一只票同时满足买卖。"""
+    with pytest.raises(ValueError):
+        update_settings({"factor_buy_threshold": 10.0, "factor_sell_threshold": 12.0})
+    assert get_settings().factor_buy_threshold == Settings().factor_buy_threshold
+
+
+def test_batch_validation_is_atomic():
+    """批里有一项非法就整批不写，避免"前几项已落库"的半成品状态。"""
+    with pytest.raises(ValueError):
+        update_settings({"paper_max_positions": 6, "paper_stop_loss": 0})
+    assert get_settings().paper_max_positions == Settings().paper_max_positions
+
+
+def test_negative_fee_rejected():
+    with pytest.raises(ValueError):
+        update_settings({"trade_fee_stamp_rate": -0.001})
+
+
+def test_overview_only_lists_editable_params():
+    """只读项与硬编码常量**完全不出现在清单里**：改不了就不展示。
+
+    路径/列表类（`db_path`、`kline_dir`、`cors_origins` ...）进程启动时就被静态挂载、
+    CORS、缓存目录捕获，硬编码常量更要改代码 —— 放在「能改就生效」的页面里只会误导。
+    """
+    overview = settings_overview()
+    editable = {i["key"] for g in overview["groups"] for i in g["items"]}
+    assert not (READONLY_KEYS & editable)
+    assert overview["total"] == len(editable)
+    assert all(i["writable"] for g in overview["groups"] for i in g["items"])
+    # 不再返回只读参考区
+    assert "readonly" not in overview and "constants" not in overview
 
 
 @pytest.mark.parametrize("key", sorted(READONLY_KEYS))

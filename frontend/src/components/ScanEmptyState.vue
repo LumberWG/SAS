@@ -88,9 +88,9 @@ const steps = ['勾选策略', '选择范围', '开始扫描']
         </router-link>
       </p>
       <div class="flex flex-wrap items-center justify-center gap-2 text-[11px]">
-        <span class="rounded-full border border-base-600 px-2.5 py-1">点击策略 ✏️ 放宽参数</span>
-        <span class="rounded-full border border-base-600 px-2.5 py-1">扩大扫描范围</span>
-        <span class="rounded-full border border-base-600 px-2.5 py-1">更换策略组合</span>
+        <span class="chip chip-muted">点击策略 ✏️ 放宽参数</span>
+        <span class="chip chip-muted">扩大扫描范围</span>
+        <span class="chip chip-muted">更换策略组合</span>
       </div>
     </template>
 

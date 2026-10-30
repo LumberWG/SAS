@@ -489,11 +489,29 @@ export interface ParamItem {
   /** 渲染控件：bool 开关 / number 数字框 / text 文本框 / readonly 只读 */
   kind: 'bool' | 'number' | 'text' | 'readonly'
   runtime: boolean
+  /** 完整说明（来自 config.py 注释），只放在 tooltip 里 */
+  desc?: string
   note: string
 }
 
+/** 组内小节：页面上把一个 tab 再切成语义小节，避免一组 50 项堆成一片 */
+export interface ParamSubgroup {
+  name: string
+  desc: string
+  items: ParamItem[]
+}
+
+/** 分组：左侧导航的一项；`items` 是小节的扁平串（搜索/计数用） */
+export interface ParamGroup {
+  name: string
+  desc: string
+  items: ParamItem[]
+  subgroups: ParamSubgroup[]
+}
+
 export interface SettingsOverview {
-  groups: { name: string; items: ParamItem[] }[]
+  /** 只含**可编辑**参数；路径/列表类与硬编码常量不进清单（改不了就不展示） */
+  groups: ParamGroup[]
   total: number
   runtime_overrides: number
   hint: string

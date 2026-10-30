@@ -31,6 +31,20 @@ class Settings(BaseSettings):
     app_name: str = "SAS - A股智能分析系统"
     debug: bool = False
 
+    # ---------- 评分阈值（14 因子总分，±100） ----------
+    # 此前写死在 factors.BUY_THRESHOLD / SELL_THRESHOLD：回测面板有 buy_threshold，
+    # 实盘却只能改代码，同一个口径两套入口。挪进 Settings 后页面可改、回测可落盘。
+    factor_buy_threshold: float = 15.0    # 买入阈值：总分 ≥ 此值判 buy（须大于卖出阈值）
+    factor_sell_threshold: float = -15.0  # 卖出阈值：总分 ≤ 此值判 sell
+
+    # ---------- 交易费率（回测与实盘共用，改一处两边同时生效） ----------
+    # 原先 engine 与 pipeline 各写一份费率常量，佣金谈下来后只改了一边，
+    # 回测 PnL 与实盘对不上。统一到这里。
+    trade_fee_commission_rate: float = 0.00025  # 佣金费率（双向，万2.5）
+    trade_fee_commission_min: float = 5.0       # 单笔最低佣金（元，免五则填 0）
+    trade_fee_stamp_rate: float = 0.001         # 印花税（仅卖出，千1）
+    trade_fee_transfer_rate: float = 1e-05      # 过户费（双向，万0.1）
+
     # ---------- 存储路径 ----------
     # K线 Parquet 缓存目录（按股票代码一个文件，增量追加）
     kline_dir: Path = DATA_DIR / "klines"

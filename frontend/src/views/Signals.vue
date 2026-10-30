@@ -191,14 +191,10 @@ onActivated(async () => {
       </div>
 
       <!-- 来源标签 -->
-      <div class="mb-3 flex gap-1 rounded-lg border border-base-600 bg-base-800/60 p-1">
+      <div class="seg mb-3 flex">
         <button
-          class="flex flex-1 items-center justify-center gap-1.5 rounded-md px-3 py-1.5 text-[12px] transition-colors"
-          :class="
-            tab === 'auto'
-              ? 'bg-primary/15 font-medium text-primary-light'
-              : 'text-content-muted hover:text-content'
-          "
+          class="seg-item flex flex-1 items-center justify-center gap-1.5"
+          :class="tab === 'auto' ? 'seg-item-active' : ''"
           @click="tab = 'auto'"
         >
           <Sparkles class="h-3.5 w-3.5" />
@@ -206,12 +202,8 @@ onActivated(async () => {
           <span class="font-num text-[11px] opacity-80">{{ counts.auto }}</span>
         </button>
         <button
-          class="flex flex-1 items-center justify-center gap-1.5 rounded-md px-3 py-1.5 text-[12px] transition-colors"
-          :class="
-            tab === 'manual'
-              ? 'bg-primary/15 font-medium text-primary-light'
-              : 'text-content-muted hover:text-content'
-          "
+          class="seg-item flex flex-1 items-center justify-center gap-1.5"
+          :class="tab === 'manual' ? 'seg-item-active' : ''"
           @click="tab = 'manual'"
         >
           <Star class="h-3.5 w-3.5" />
@@ -230,11 +222,7 @@ onActivated(async () => {
           class="min-w-0 flex-1 rounded-lg border border-base-600 bg-base-700 px-3 py-2 font-num text-[13px] text-content outline-none transition-colors placeholder:text-content-faint focus:border-primary"
           @keyup.enter="add"
         />
-        <button
-          class="flex items-center gap-1.5 rounded-lg bg-primary px-4 py-2 text-[13px] font-medium text-white transition-all hover:brightness-110 disabled:opacity-50"
-          :disabled="adding"
-          @click="add"
-        >
+        <button class="btn btn-primary px-4 py-2 text-[13px]" :disabled="adding" @click="add">
           <Plus class="h-3.5 w-3.5" />
           添加
         </button>
@@ -255,7 +243,7 @@ onActivated(async () => {
           <span v-if="checked.length" class="font-num text-[11px]">已选 {{ checked.length }}</span>
         </button>
         <button
-          class="flex items-center gap-1.5 rounded-md border border-primary/40 bg-primary/10 px-2.5 py-1 text-[12px] text-primary-light transition-colors hover:bg-primary/20 disabled:cursor-not-allowed disabled:opacity-40"
+          class="btn btn-primary-soft btn-sm"
           :disabled="checked.length === 0 || promoting"
           @click="promoteSelected"
         >
@@ -275,12 +263,7 @@ onActivated(async () => {
         <!-- 错误态（保留旧数据 + 重试） -->
         <div v-else-if="watchError && watchlist.length === 0" class="flex flex-col items-center gap-3 py-12 text-content-faint">
           <p class="text-[13px] text-up">{{ watchError }}</p>
-          <button
-            class="rounded-lg border border-base-600 px-3 py-1.5 text-[12px] text-content-muted transition-colors hover:border-primary/50 hover:text-primary-light"
-            @click="loadWatchlist"
-          >
-            重试
-          </button>
+          <button class="btn btn-outline" @click="loadWatchlist">重试</button>
         </div>
 
         <div
@@ -294,7 +277,7 @@ onActivated(async () => {
             <input
               v-if="tab === 'auto'"
               type="checkbox"
-              class="h-3.5 w-3.5 shrink-0 accent-[#2563EB]"
+              class="h-3.5 w-3.5 shrink-0 accent-primary"
               :checked="checked.includes(item.code)"
               @click.stop="toggleCheck(item.code)"
             />

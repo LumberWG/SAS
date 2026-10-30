@@ -15,6 +15,7 @@ import {
 } from 'lucide-vue-next'
 import VChart from 'vue-echarts'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
+import { chart, tooltipStyle } from '../lib/chartTheme'
 import { use } from 'echarts/core'
 import { CanvasRenderer } from 'echarts/renderers'
 import { LineChart } from 'echarts/charts'
@@ -278,21 +279,19 @@ const equityOption = computed(() => {
     grid: { left: 60, right: 20, top: 20, bottom: 30 },
     tooltip: {
       trigger: 'axis',
-      backgroundColor: '#111A2E',
-      borderColor: '#243354',
-      textStyle: { color: '#E6EDF7', fontSize: 12 },
+      ...tooltipStyle,
       valueFormatter: (v: number) => `${v.toFixed(0)} 元`,
     },
     xAxis: {
       type: 'category',
       data: equity.value.map((e) => e.date),
-      axisLabel: { color: '#5C6B85', fontSize: 10 },
+      axisLabel: { color: chart.textFaint, fontSize: 10 },
     },
     yAxis: {
       type: 'value',
       scale: true,
-      axisLabel: { color: '#5C6B85', fontSize: 10 },
-      splitLine: { lineStyle: { color: 'rgba(36,51,84,0.6)' } },
+      axisLabel: { color: chart.textFaint, fontSize: 10 },
+      splitLine: { lineStyle: { color: chart.splitLine } },
     },
     series: [
       {
@@ -300,22 +299,22 @@ const equityOption = computed(() => {
         data: equity.value.map((e) => e.total_asset),
         smooth: true,
         symbol: 'none',
-        lineStyle: { width: 2, color: '#38BDF8' },
+        lineStyle: { width: 2, color: chart.primaryLight },
         areaStyle: {
           color: {
             type: 'linear',
             x: 0, y: 0, x2: 0, y2: 1,
             colorStops: [
-              { offset: 0, color: 'rgba(56,189,248,0.25)' },
-              { offset: 1, color: 'rgba(56,189,248,0)' },
+              { offset: 0, color: `${chart.primaryLight}40` },
+              { offset: 1, color: `${chart.primaryLight}00` },
             ],
           },
         },
         markLine: {
           silent: true,
           symbol: 'none',
-          lineStyle: { color: '#5C6B85', type: 'dashed' },
-          data: [{ yAxis: initial, label: { show: true, position: 'end', formatter: '初始10万', color: '#5C6B85', fontSize: 10 } }],
+          lineStyle: { color: chart.textFaint, type: 'dashed' },
+          data: [{ yAxis: initial, label: { show: true, position: 'end', formatter: '初始10万', color: chart.textFaint, fontSize: 10 } }],
         },
       },
     ],
@@ -348,7 +347,7 @@ onUnmounted(() => {
     <!-- 账户总览 -->
     <div class="glass-card flex flex-wrap items-center justify-between gap-4 p-5">
       <div class="flex items-center gap-3">
-        <div class="flex h-10 w-10 items-center justify-center rounded-lg bg-gradient-to-br from-primary to-primary-light shadow-glow">
+        <div class="flex h-10 w-10 items-center justify-center rounded-lg bg-gradient-to-br from-primary to-primary-dark ring-1 ring-inset ring-white/15">
           <Wallet class="h-5 w-5 text-white" />
         </div>
         <div>
@@ -386,27 +385,19 @@ onUnmounted(() => {
     </div>
 
     <!-- 页内分段切换：④ 交易池（判定与队列）/ ⑤ 持仓与成交（账户复盘），不再占两个菜单项 -->
-    <div class="flex flex-wrap items-center gap-2">
+    <div class="seg">
       <button
         type="button"
-        class="rounded-lg border px-3.5 py-2 text-[12.5px] font-medium transition-colors"
-        :class="
-          tab === 'pool'
-            ? 'border-primary/40 bg-primary/15 text-primary-light'
-            : 'border-base-600 text-content-muted hover:text-content'
-        "
+        class="seg-item"
+        :class="tab === 'pool' ? 'seg-item-active' : ''"
         @click="switchTab('pool')"
       >
         ④ 交易池 · 判定与队列
       </button>
       <button
         type="button"
-        class="rounded-lg border px-3.5 py-2 text-[12.5px] font-medium transition-colors"
-        :class="
-          tab === 'account'
-            ? 'border-primary/40 bg-primary/15 text-primary-light'
-            : 'border-base-600 text-content-muted hover:text-content'
-        "
+        class="seg-item"
+        :class="tab === 'account' ? 'seg-item-active' : ''"
         @click="switchTab('account')"
       >
         ⑤ 持仓与成交 · 账户复盘

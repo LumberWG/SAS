@@ -180,23 +180,17 @@ function exportCsv() {
 <template>
   <div class="glass-card flex min-h-0 flex-1 flex-col overflow-hidden">
     <!-- 工具行：策略筛选 + 导出 -->
-    <div class="flex items-center justify-between gap-3 border-b border-base-600/60 px-4 py-2.5">
+    <div class="panel-hd justify-between">
       <div class="flex items-center gap-2">
-        <span class="text-[11px] text-content-faint">策略筛选</span>
-        <select
-          v-model="strategyFilter"
-          class="rounded-md border border-base-600 bg-base-700 px-2 py-1 text-[12px] text-content outline-none focus:border-primary"
-        >
+        <span class="eyebrow">策略筛选</span>
+        <select v-model="strategyFilter" class="field h-7 px-2 text-[12px]">
           <option value="">全部（{{ grouped.length }} 只 / {{ hits.length }} 信号）</option>
           <option v-for="name in strategyOptions" :key="name" :value="name">
             {{ name }}（{{ hits.filter((h) => h.strategy === name).length }}）
           </option>
         </select>
       </div>
-      <button
-        class="flex items-center gap-1.5 rounded-md border border-base-600 px-2.5 py-1 text-[11px] text-content-muted transition-colors hover:border-primary/50 hover:text-primary-light"
-        @click="exportCsv"
-      >
+      <button class="btn btn-outline btn-sm" @click="exportCsv">
         <Download class="h-3.5 w-3.5" />
         导出 CSV
       </button>
@@ -205,7 +199,7 @@ function exportCsv() {
     <!-- 表格：单元格不换行，列宽不足时横向滚动 -->
     <div class="min-h-0 flex-1 overflow-auto">
       <table class="w-full min-w-[1180px] whitespace-nowrap text-left text-[13px]">
-        <thead class="sticky top-0 z-10 bg-base-800/95 text-[11px] text-content-faint backdrop-blur">
+        <thead class="sticky top-0 z-10 bg-base-700/90 text-[11px] tracking-wider text-content-faint backdrop-blur">
           <tr class="border-b border-base-600/60">
             <th class="px-4 py-2.5 font-medium">代码</th>
             <th class="px-4 py-2.5 font-medium">名称</th>
@@ -256,8 +250,8 @@ function exportCsv() {
           <tr
             v-for="(row, i) in filtered"
             :key="row.code"
-            class="cursor-pointer transition-colors hover:bg-primary/10"
-            :class="i % 2 === 1 ? 'bg-base-700/20' : ''"
+            class="cursor-pointer transition-colors hover:bg-base-700/60"
+            :class="i % 2 === 1 ? 'bg-base-700/25' : ''"
             @click="emit('goDetail', row.best)"
           >
             <td class="font-num px-4 py-2.5 text-content-muted">{{ row.code }}</td>
@@ -281,7 +275,7 @@ function exportCsv() {
               <span class="inline-flex items-center justify-end gap-1.5">
                 <span
                   v-if="row.rank"
-                  class="rounded border border-warn/40 bg-warn/10 px-1.5 py-0.5 font-num text-[10px] text-warn"
+                  class="rounded border border-warn/35 bg-warn/[0.10] px-1.5 py-0.5 font-num text-[10px] text-warn"
                   :title="`本轮第 ${row.rank} 名`"
                 >
                   #{{ row.rank }}
@@ -324,7 +318,7 @@ function exportCsv() {
                 <span
                   v-for="s in row.strategies"
                   :key="s"
-                  class="rounded-md border border-primary/40 bg-primary/10 px-2 py-0.5 text-[11px] text-primary-light"
+                  class="rounded-md border border-primary/30 bg-primary/[0.10] px-1.5 py-0.5 text-[10.5px] text-primary-light"
                 >
                   {{ s }}
                 </span>

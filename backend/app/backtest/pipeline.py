@@ -30,7 +30,7 @@ from dataclasses import dataclass
 
 import pandas as pd
 
-from app.analysis.factors import BUY_THRESHOLD, SELL_THRESHOLD, compute_factors
+from app.analysis.factors import BUY_THRESHOLD, SELL_THRESHOLD, compute_factors, thresholds
 from app.analysis.scoring import score_technical
 from app.backtest.review import analyze
 from app.config import get_settings
@@ -183,10 +183,15 @@ class PipelineParams:
 
 
 def calc_fee(side: str, amount: float) -> float:
-    """A 股单笔费用：佣金（最低5元）+ 卖出印花税 + 双边过户费。"""
-    commission = max(amount * COMMISSION_RATE, COMMISSION_MIN)
-    stamp = amount * STAMP_RATE if side == "sell" else 0.0
-    return round(commission + stamp + amount * TRANSFER_RATE, 2)
+    """A 股单笔费用：佣金（最低5元）+ 卖出印花税 + 双边过户费。
+
+    费率取 ``Settings.trade_fee_*``（与实盘 engine 同一份），改一次两边同时生效；
+    原先这里和 ``paper/engine.py`` 各写一份常量，改了一边就会让回测与实盘对不上。
+    """
+    s = get_settings()
+    commission = max(amount * s.trade_fee_commission_rate, s.trade_fee_commission_min)
+    stamp = amount * s.trade_fee_stamp_rate if side == "sell" else 0.0
+    return round(commission + stamp + amount * s.trade_fee_transfer_rate, 2)
 
 
 def _intraday_first_trigger(series, stop_px, tp_px, partial_px):
@@ -480,9 +485,10 @@ def _build_signals(prepared: dict, params: PipelineParams) -> dict[str, list[dic
             if params.invert_score:
                 # E33 反转版：翻转总分后重新判级（buy 变成「原来最弱的那批」）
                 total = -total
+                buy_th, sell_th = thresholds()
                 action = (
-                    "buy" if total >= BUY_THRESHOLD
-                    else ("sell" if total <= SELL_THRESHOLD else "hold")
+                    "buy" if total >= buy_th
+                    else ("sell" if total <= sell_th else "hold")
                 )
             else:
                 action = result.action

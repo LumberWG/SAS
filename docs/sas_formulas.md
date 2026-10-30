@@ -119,7 +119,9 @@ action = buy   若 total ≥ +15
 | D 风险 | 15 | 波动率 `atr`(5) / 回撤 `drawdown`(5) / 乖离 `bias`(5) |
 | E 位置 | 10 | 突破 `breakout`(6) / 布林位置 `boll`(4) |
 
-`BUY_THRESHOLD = 15.0`，`SELL_THRESHOLD = -15.0`。
+生效阈值取 `Settings.factor_buy_threshold` / `factor_sell_threshold`（默认 `15.0` / `-15.0`，
+设置页可改、回测中心可落盘；`factors.BUY_THRESHOLD` 只剩代码默认与脚本兜底的作用）。
+两者必须满足 **buy > sell**，同批提交时由 `param_specs._CROSS_RULES` 校验。
 
 ### 3.3 各因子 `sub` 算法（饱和到 [-1,1]）
 
@@ -151,9 +153,13 @@ action = buy   若 total ≥ +15
 
 ### 4.1 费用（A 股标准费率）
 ```
-佣金  = max(amount × 0.00025, 5)      # 万2.5，单笔最低5元，双向
-印花税 = amount × 0.001               # 千1，仅卖出
-过户费 = amount × 0.00001             # 万0.1，双向
+佣金  = max(amount × trade_fee_commission_rate, trade_fee_commission_min)   # 默认 万2.5 / 最低5元，双向
+印花税 = amount × trade_fee_stamp_rate        # 默认 千1，仅卖出
+过户费 = amount × trade_fee_transfer_rate     # 默认 万0.1，双向
+
+> 四个费率都在 `Settings` 里（设置页可改，免五则 `commission_min=0`），**回测 `pipeline.calc_fee`
+> 与实盘 `engine.calc_fee` 共用这一份**；此前两边各写一份常量，佣金谈下来只改一边，
+> 回测 PnL 与实盘就对不上。
 ```
 
 ### 4.2 仓位（评分加权，第 3 次排序）
@@ -322,7 +328,9 @@ paper_position_lots(code, shares, cost_price, buy_date, tag)
 
 > 本表是**文档口径**的参考值。要查「当前实际在跑什么」、或直接改，用 `/settings` 页
 > （`GET/POST /api/settings`）——它由 `app/param_specs.py` 从 `Settings.model_fields` + 源码注释生成，
-> 标注每项当前生效值 / 来源（app_state 覆盖 > .env > 默认 > 硬编码）。
+> 标注每项当前生效值 / 来源（app_state 覆盖 > .env > 默认）。只列可编辑项：路径/列表类
+> （`db_path`、`kline_dir`、`cors_origins` 等）与剩余硬编码常量（`LOT_SIZE`、板块前缀、
+> 巨无霸名单、回测默认止盈止损）不返回、不显示——改不了的项摆出来只会让人以为能调。
 >
 > 写入路径：页面改 → `app_state` 覆盖层（`cfg:<key>`，大盘股那几项沿用既有无前缀键）
 > → **就地 setattr 到 `Settings` 单例**（所以下一个 tick 生效）→ 重启时
@@ -372,7 +380,13 @@ paper_position_lots(code, shares, cost_price, buy_date, tag)
 | `paper_entry_pullback` | 0.0 | **⑤ 回踩**：要求现价低于信号价此比例才买（0=不限） | engine |
 | `paper_entry_timeout_minutes` | 0 | **⑤ 超时**：买单信号超时放弃（0=沿用 `paper_signal_ttl_minutes`） | live |
 | `paper_scan_autotrade / _top_n / _overnight` | True / 10 / True | 选股联动自动交易 | scanner |
-| `FACTOR_WEIGHTS` / `BUY_THRESHOLD` / `SELL_THRESHOLD` | 见 §3.2/3.1 | 评分权重与分级 | factors |
+| `factor_buy_threshold` | 15.0 | **买入阈值**（总分 ≥ 即 buy；须 > 卖出阈值） | factors |
+| `factor_sell_threshold` | -15.0 | **卖出阈值**（总分 ≤ 即 sell） | factors |
+| `trade_fee_commission_rate` | 0.00025 | **佣金费率**（双向，万2.5） | engine + pipeline |
+| `trade_fee_commission_min` | 5.0 | 单笔最低佣金（元，免五填 0） | engine + pipeline |
+| `trade_fee_stamp_rate` | 0.001 | 印花税（仅卖出，千1） | engine + pipeline |
+| `trade_fee_transfer_rate` | 1e-05 | 过户费（双向，万0.1） | engine + pipeline |
+| `FACTOR_WEIGHTS` | 见 §3.2 | 评分权重（14 因子，改需改代码） | factors |
 
 ---
 
@@ -442,6 +456,7 @@ single_position_ratio→paper_single_position_max
 stop_atr_mult→paper_atr_stop_mult    stop_atr_max→paper_atr_stop_max
 breakeven_trigger→paper_breakeven_pct   trail_pct/trail_arm→paper_trail_pct/trail_arm
 max_positions→paper_max_positions    universe_size→paper_pool_top_n
+buy_threshold→factor_buy_threshold
 max_total_exposure/regime_ma/full_score/half_score/rotation_*→同名 paper_*
 queue_top_m→paper_trade_queue_top_m  entry_max_chase/entry_pullback→paper_entry_*
 t_*→paper_t_*
@@ -449,8 +464,8 @@ t_*→paper_t_*
 
 不映射的项一律在响应 `skipped` 里给出原因（前端原样展示），典型是：
 
-- **选股侧回测专属**：`board_prefixes`（实盘只支持排北交所）、`rebalance_days`、`buy_threshold`
-  （硬编码）、`buy_top_pct`、`max_gain_5d`、`min_volume_ratio`、`min_turnover_rate`、`invert_score`；
+- **选股侧回测专属**：`board_prefixes`（实盘只支持排北交所）、`rebalance_days`、`buy_top_pct`、
+  `max_gain_5d`、`min_volume_ratio`、`min_turnover_rate`、`invert_score`；
 - **卖出侧回测专属**：`max_hold_days`、`stop_atr_min`、`stop_confirm_close`、`partial_tp_at/ratio`；
 - **择时分档**：`regime_fast_ma`、`weak_exposure`、`regime_flat_below`（实盘只有单均线 + 弱市暂停买入）；
 - **账户级**：`initial_capital`（已有账户不会被重置）。

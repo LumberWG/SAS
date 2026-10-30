@@ -407,21 +407,17 @@ onMounted(async () => {
       <div class="glass-card shrink-0 p-4">
         <div class="flex flex-wrap items-center gap-4">
           <!-- 主操作按钮 -->
-          <button
-            class="flex items-center gap-1.5 rounded-lg border border-base-600 px-3 py-2.5 text-[12px] text-content-muted transition-colors hover:border-primary/50 hover:text-primary-light disabled:cursor-not-allowed disabled:opacity-50"
-            :disabled="running || warming"
-            @click="warmup"
-          >
+          <button class="btn btn-outline py-2.5" :disabled="running || warming" @click="warmup">
             <Database class="h-3.5 w-3.5" />
             {{ warming ? '预热中...' : '预热K线' }}
           </button>
           <button
-            class="group flex items-center gap-2 rounded-lg bg-gradient-to-r from-primary to-primary-light px-5 py-2.5 text-[13px] font-semibold text-white shadow-glow transition-all hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50"
+            class="btn btn-primary px-5 py-2.5 text-[13px] font-semibold"
             :disabled="running || selected.length === 0"
             :title="selected.length === 0 ? '请先在左侧勾选至少一个策略' : ''"
             @click="start"
           >
-            <Play class="h-4 w-4 transition-transform group-hover:scale-110" />
+            <Play class="h-4 w-4" />
             {{ running ? '扫描中...' : '开始扫描' }}
           </button>
 
@@ -469,11 +465,11 @@ onMounted(async () => {
               <!-- 尚未产生进度：用往复滚动的不确定进度条表示仍在工作 -->
               <div
                 v-if="task.status === 'running' && task.progress <= 0"
-                class="progress-indeterminate absolute h-full rounded-full bg-gradient-to-r from-primary to-primary-light"
+                class="progress-indeterminate absolute h-full rounded-full bg-primary"
               />
               <div
                 v-else
-                class="relative h-full rounded-full bg-gradient-to-r from-primary to-primary-light transition-all duration-500"
+                class="relative h-full rounded-full bg-primary transition-all duration-500"
                 :class="task.status === 'running' ? 'progress-shimmer overflow-hidden' : ''"
                 :style="{ width: `${task.progress}%` }"
               />
@@ -487,7 +483,7 @@ onMounted(async () => {
           class="mt-4 grid grid-cols-2 gap-3 border-t border-base-600/50 pt-4 sm:grid-cols-4"
         >
           <div class="rounded-lg bg-base-700/40 p-3 text-center">
-            <div class="font-num bg-gradient-to-r from-primary-light to-primary bg-clip-text text-[24px] font-bold leading-none text-transparent">
+            <div class="font-num text-[24px] font-semibold leading-none text-primary-light">
               {{ hitStockCount }}
             </div>
             <div class="mt-1 text-[11px] text-content-faint">

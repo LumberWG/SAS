@@ -1,7 +1,7 @@
 <script setup lang="ts">
 /**
  * ECharts K线图：蜡烛图 + MA5/MA10/MA20 + 成交量副图。
- * A股配色：阳线红（#F5222D）、阴线绿（#00B96B）。
+ * A股配色：阳线红、阴线绿；色值统一取自 `lib/chartTheme`（与 Tailwind 色板同步）。
  */
 import { computed } from 'vue'
 import VChart from 'vue-echarts'
@@ -14,6 +14,8 @@ import {
   DataZoomComponent,
   LegendComponent,
 } from 'echarts/components'
+
+import { axisLabel, chart, splitLine, tooltipStyle } from '../lib/chartTheme'
 
 use([
   CanvasRenderer,
@@ -33,8 +35,8 @@ const props = defineProps<{
   height?: string
 }>()
 
-const UP = '#F5222D'
-const DOWN = '#00B96B'
+const UP = chart.up
+const DOWN = chart.down
 
 // MA 计算（与后端一致：简单算术平均）
 function ma(values: number[], n: number): (number | null)[] {
@@ -56,14 +58,12 @@ const option = computed(() => ({
   backgroundColor: 'transparent',
   tooltip: {
     trigger: 'axis',
-    axisPointer: { type: 'cross', lineStyle: { color: '#5C6B85' } },
-    backgroundColor: '#111A2E',
-    borderColor: '#243354',
-    textStyle: { color: '#E6EDF7', fontSize: 12 },
+    axisPointer: { type: 'cross', lineStyle: { color: chart.textFaint } },
+    ...tooltipStyle,
   },
   legend: {
     data: ['MA5', 'MA10', 'MA20'],
-    textStyle: { color: '#8B9BB4', fontSize: 11 },
+    textStyle: { color: chart.textMuted, fontSize: 11 },
     top: 0,
     icon: 'roundRect',
     itemWidth: 12,
@@ -77,8 +77,8 @@ const option = computed(() => ({
     {
       type: 'category',
       data: props.dates,
-      axisLine: { lineStyle: { color: '#243354' } },
-      axisLabel: { color: '#5C6B85', fontSize: 10 },
+      axisLine: { lineStyle: { color: chart.axisLine } },
+      axisLabel,
       boundaryGap: true,
     },
     {
@@ -86,20 +86,20 @@ const option = computed(() => ({
       gridIndex: 1,
       data: props.dates,
       axisLabel: { show: false },
-      axisLine: { lineStyle: { color: '#243354' } },
+      axisLine: { lineStyle: { color: chart.axisLine } },
       boundaryGap: true,
     },
   ],
   yAxis: [
     {
       scale: true,
-      axisLabel: { color: '#5C6B85', fontSize: 10 },
-      splitLine: { lineStyle: { color: 'rgba(36,51,84,0.6)' } },
+      axisLabel,
+      splitLine,
     },
     {
       scale: true,
       gridIndex: 1,
-      axisLabel: { color: '#5C6B85', fontSize: 10 },
+      axisLabel,
       splitLine: { show: false },
     },
   ],
@@ -123,7 +123,7 @@ const option = computed(() => ({
       type: 'line',
       data: ma5.value,
       smooth: true,
-      lineStyle: { width: 1, color: '#38BDF8' },
+      lineStyle: { width: 1, color: chart.primaryLight },
       symbol: 'none',
     },
     {
@@ -131,7 +131,7 @@ const option = computed(() => ({
       type: 'line',
       data: ma10.value,
       smooth: true,
-      lineStyle: { width: 1, color: '#FAAD14' },
+      lineStyle: { width: 1, color: chart.warn },
       symbol: 'none',
     },
     {
@@ -139,7 +139,7 @@ const option = computed(() => ({
       type: 'line',
       data: ma20.value,
       smooth: true,
-      lineStyle: { width: 1, color: '#722ED1' },
+      lineStyle: { width: 1, color: chart.accent },
       symbol: 'none',
     },
     {

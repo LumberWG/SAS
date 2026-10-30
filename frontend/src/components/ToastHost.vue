@@ -2,6 +2,8 @@
 /**
  * 全局 Toast 容器：渲染 notify store 中的提示。
  * 放在 App.vue 根级，任意页面触发的提示都会在此展示。
+ *
+ * 深色底 + 左侧语义色描边（不再用浅色 alert 配色，否则深色界面里蹦出白底块很刺眼）。
  */
 import { useNotifyStore } from '../stores/notify'
 import { AlertTriangle, CheckCircle2, Info, XCircle } from 'lucide-vue-next'
@@ -14,6 +16,20 @@ const icons = {
   info: Info,
   success: CheckCircle2,
 }
+
+const toneBorder: Record<string, string> = {
+  warn: 'border-warn/45',
+  error: 'border-up/45',
+  info: 'border-primary/45',
+  success: 'border-down/45',
+}
+
+const toneText: Record<string, string> = {
+  warn: 'text-warn',
+  error: 'text-up',
+  info: 'text-primary-light',
+  success: 'text-down',
+}
 </script>
 
 <template>
@@ -22,18 +38,13 @@ const icons = {
       <div
         v-for="t in notify.toasts"
         :key="t.id"
-        class="pointer-events-auto flex items-start gap-2 rounded-lg border px-3 py-2 text-[13px] shadow-lg"
-        :class="{
-          'border-amber-300 bg-amber-50 text-amber-800': t.type === 'warn',
-          'border-red-300 bg-red-50 text-red-700': t.type === 'error',
-          'border-sky-300 bg-sky-50 text-sky-700': t.type === 'info',
-          'border-emerald-300 bg-emerald-50 text-emerald-700': t.type === 'success',
-        }"
+        class="pointer-events-auto flex items-start gap-2 rounded-xl border bg-base-800/95 px-3 py-2 text-[12.5px] shadow-pop backdrop-blur"
+        :class="toneBorder[t.type]"
       >
-        <component :is="icons[t.type]" class="mt-0.5 h-4 w-4 shrink-0" />
-        <span class="flex-1 leading-snug">{{ t.message }}</span>
+        <component :is="icons[t.type]" class="mt-0.5 h-4 w-4 shrink-0" :class="toneText[t.type]" />
+        <span class="flex-1 leading-snug text-content">{{ t.message }}</span>
         <button
-          class="shrink-0 text-xs opacity-50 transition hover:opacity-100"
+          class="shrink-0 rounded p-0.5 text-[11px] text-content-faint transition-colors hover:text-content"
           @click="notify.dismiss(t.id)"
         >
           ✕

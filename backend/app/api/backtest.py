@@ -16,7 +16,6 @@ import uuid
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from app.analysis.factors import BUY_THRESHOLD
 from app.api.utils import with_disclaimer
 from app.backtest.apply import persist_map, split_changes
 from app.backtest.pipeline import PipelineParams, run_pipeline
@@ -152,7 +151,7 @@ def _defaults_payload() -> dict:
         "add_per_day": 50,
         # 选股 / 买入（0 = 不启用该过滤）
         "rebalance_days": 1,
-        "buy_threshold": float(BUY_THRESHOLD),
+        "buy_threshold": float(s.factor_buy_threshold),
         "buy_top_pct": 0.0,
         "max_open_gain": 0.0,
         "max_gain_5d": 0.0,

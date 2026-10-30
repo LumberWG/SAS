@@ -1,12 +1,17 @@
 <script setup lang="ts">
 /**
- * 系统设置：分组 tab + 可编辑。
+ * 系统设置：左导航（分组）+ 右侧小节卡片（组内二级分组）。
+ *
+ * 为什么分两层：参数按前缀天然是「`paper_` 一坨 50 项、其余一两项」，一条平铺的
+ * tab 会让一半页面在翻屏、另一半在留白。后端 `param_specs._LAYOUT` 按业务语义切成
+ * 8 个分组（每组 7~13 项），组内再切 2~5 个语义小节 —— 这里只负责按层级渲染。
  *
  * 写模型（后端 `app/param_specs.py`）：改动落 `app_state` 覆盖层，同时就地改
  * `Settings` 单例 → 下一个 tick / 下一轮扫描即生效；重启时由启动流程重放，不会丢。
  *
  * 只读项：路径 / 列表类（`kline_dir`、`db_path`、`cors_origins` 等），它们在进程
- * 启动时就被静态挂载、CORS、缓存目录捕获，运行中改只会造成「显示改了实际没变」。
+ * 启动时就被静态挂载、CORS、缓存目录捕获，运行中改只会造成「显示改了实际没变」，
+ * 后端压根不返回它们。
  */
 import { computed, onMounted, ref } from 'vue'
 import { Info, RefreshCw, RotateCcw, Save, Search } from 'lucide-vue-next'
@@ -15,6 +20,7 @@ import {
   getSettingsOverview,
   resetSettings,
   updateSettings,
+  type ParamGroup,
   type ParamItem,
   type SettingsOverview,
 } from '../api'
@@ -68,6 +74,11 @@ async function load() {
   }
 }
 
+/** 兼容旧后端：没有 subgroups 时退化成「全部参数」单个小节 */
+function subsOf(g: ParamGroup) {
+  return g.subgroups?.length ? g.subgroups : [{ name: '全部参数', desc: '', items: g.items }]
+}
+
 function fmtValue(it: ParamItem): string {
   const v = baseline.value[it.key]
   if (it.kind === 'bool') return v ? '开' : '关'
@@ -94,53 +105,76 @@ const dirtyKeys = computed(() => {
   return keys
 })
 
-const groups = computed(() =>
+const kw = computed(() => keyword.value.trim().toLowerCase())
+/** 有筛选条件时跨分组搜索，否则只看当前分组 */
+const searching = computed(() => Boolean(kw.value) || onlyChanged.value)
+
+function matches(it: ParamItem): boolean {
+  if (onlyChanged.value && it.source !== 'app_state') return false
+  const k = kw.value
+  if (!k) return true
+  return (
+    it.key.toLowerCase().includes(k) ||
+    it.label.toLowerCase().includes(k) ||
+    fmtValue(it).toLowerCase().includes(k) ||
+    (it.desc ?? '').toLowerCase().includes(k)
+  )
+}
+
+/** 左侧导航：每组的总数 / 当前筛选命中数 / 已覆盖数 / 未保存数 */
+const navGroups = computed(() =>
   (data.value?.groups ?? []).map((g) => ({
     name: g.name,
+    desc: g.desc ?? '',
     total: g.items.length,
-    changed: g.items.filter((it) => it.source === 'app_state').length,
+    matched: g.items.filter((it) => matches(it)).length,
+    covered: g.items.filter((it) => it.source === 'app_state').length,
+    dirty: g.items.filter((it) => isDirty(it)).length,
   })),
 )
 
-/** 当前分组里有多少项「改了还没保存」（tab 上的角标是已覆盖数，两者含义不同） */
-const activeGroupDirty = computed(
-  () =>
-    (data.value?.groups ?? [])
-      .find((g) => g.name === activeGroup.value)
-      ?.items.filter((it) => isDirty(it)).length ?? 0
+/** 右侧内容：无筛选时只渲染当前分组；搜索/筛选时按分组分段展示全部命中 */
+const visibleGroups = computed(() => {
+  const all = data.value?.groups ?? []
+  const list = searching.value ? all : all.filter((g) => g.name === activeGroup.value)
+  return list
+    .map((g) => ({
+      name: g.name,
+      desc: g.desc ?? '',
+      total: g.items.length,
+      covered: g.items.filter((it) => it.source === 'app_state').length,
+      dirty: g.items.filter((it) => isDirty(it)).length,
+      subgroups: subsOf(g)
+        .map((sg) => ({ name: sg.name, desc: sg.desc ?? '', items: sg.items.filter((it) => matches(it)) }))
+        .filter((sg) => sg.items.length),
+    }))
+    .filter((g) => g.subgroups.length)
+})
+
+const visibleCount = computed(() =>
+  visibleGroups.value.reduce((n, g) => n + g.subgroups.reduce((m, sg) => m + sg.items.length, 0), 0),
 )
 
+const coveredTotal = computed(() => data.value?.runtime_overrides ?? 0)
+
 /**
- * 行悬停提示：完整说明（note）、完整 key、当前值与待保存值都放这里。
+ * 行悬停提示：完整说明 + 完整 key + 当前值 + 待保存值。
  *
- * 行内只保留短标签，长说明塞进 tooltip —— 否则一条 `paper_exclude_large_cap` 的备注
- * 就能把卡片撑成三行、整个网格高低不齐。
+ * 卡片里只留短标签（"固定止损"这种），`config.py` 里那整句注释走 tooltip ——
+ * 否则一条 `paper_exclude_large_cap` 的备注就能把卡片撑成三行、网格高低不齐。
  */
 function tipOf(it: ParamItem): string {
-  const lines = [it.label, it.key, `当前值：${fmtValue(it)}`]
+  const lines = [it.label]
+  if (it.desc) lines.push(it.desc)
+  lines.push(it.key, `当前值：${fmtValue(it)}`)
   if (isDirty(it)) {
     const v = draft.value[it.key]
     lines.push(`待保存：${typeof v === 'boolean' ? (v ? '开' : '关') : String(v ?? '')}`)
   }
-  if (it.note) lines.push(`说明：${it.note}`)
+  if (it.note) lines.push(`补充：${it.note}`)
   if (!it.writable) lines.push('路径/列表类参数：仅启动时读取，需改 .env 后重启后端')
   return lines.join('\n')
 }
-
-const currentItems = computed(() => {
-  const g = (data.value?.groups ?? []).find((x) => x.name === activeGroup.value)
-  if (!g) return [] as ParamItem[]
-  const kw = keyword.value.trim().toLowerCase()
-  return g.items.filter((it) => {
-    if (onlyChanged.value && it.source !== 'app_state') return false
-    if (!kw) return true
-    return (
-      it.key.toLowerCase().includes(kw) ||
-      it.label.toLowerCase().includes(kw) ||
-      fmtValue(it).toLowerCase().includes(kw)
-    )
-  })
-})
 
 async function save() {
   const changes: Record<string, string | number | boolean> = {}
@@ -178,6 +212,13 @@ async function resetKeys(keys: string[]) {
   }
 }
 
+/** 整组还原：只还原该组里被 app_state 覆盖过的项（没覆盖过的本来就是默认值） */
+function resetGroup(name: string) {
+  const g = (data.value?.groups ?? []).find((x) => x.name === name)
+  const keys = (g?.items ?? []).filter((it) => it.source === 'app_state').map((it) => it.key)
+  if (keys.length) resetKeys(keys)
+}
+
 /** 单行还原：只是把草稿拉回生效值（真正落库走「还原」按钮） */
 function revertRow(it: ParamItem) {
   draft.value[it.key] = baseline.value[it.key]
@@ -193,32 +234,53 @@ onMounted(load)
 
 <template>
   <div class="space-y-3">
-    <!-- 概览 + 操作 -->
-    <div class="glass-card px-4 py-2.5">
-      <div class="flex flex-wrap items-center gap-x-3 gap-y-2">
+    <!-- 顶部概览：标题 + 生效口径 + 指标 + 操作 -->
+    <div class="glass-card relative overflow-hidden px-4 py-3">
+      <div
+        class="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-primary/70 to-transparent"
+      ></div>
+      <div class="flex flex-wrap items-start gap-x-4 gap-y-3">
         <div class="min-w-0 flex-1">
-          <div class="flex items-center gap-2">
-            <span class="h-1.5 w-1.5 rounded-full bg-primary shadow-glow"></span>
-            <h2 class="text-[13px] font-semibold text-content">当前生效配置</h2>
+          <div class="flex flex-wrap items-center gap-2">
+            <span class="h-1.5 w-1.5 rounded-full bg-primary"></span>
+            <h2 class="text-[14px] font-semibold tracking-wide text-content">系统设置</h2>
+            <span class="rounded border border-base-600/60 bg-base-700/50 px-1.5 py-px text-[10px] text-content-faint">
+              保存后即时生效
+            </span>
           </div>
-          <p class="mt-0.5 max-w-[720px] text-[11px] leading-relaxed text-content-faint">
+          <p class="mt-1 max-w-[780px] text-[11px] leading-relaxed text-content-faint">
             {{ data?.hint ?? '加载中…' }}
           </p>
         </div>
+
         <div class="flex flex-wrap items-center gap-2">
           <div class="flex items-center gap-1.5 rounded-lg border border-base-600/60 bg-base-700/30 px-2.5 py-1">
             <span class="font-num text-[15px] font-semibold leading-none text-content">{{ data?.total ?? '--' }}</span>
-            <span class="text-[10px] text-content-faint">参数</span>
+            <span class="text-[10px] text-content-faint">可调参数</span>
           </div>
           <div class="flex items-center gap-1.5 rounded-lg border border-primary/40 bg-primary/10 px-2.5 py-1">
-            <span class="font-num text-[15px] font-semibold leading-none text-primary-light">
-              {{ data?.runtime_overrides ?? 0 }}
-            </span>
+            <span class="font-num text-[15px] font-semibold leading-none text-primary-light">{{ coveredTotal }}</span>
             <span class="text-[10px] text-content-faint">已覆盖</span>
           </div>
+          <div
+            class="flex items-center gap-1.5 rounded-lg border px-2.5 py-1 transition-colors"
+            :class="
+              dirtyKeys.length
+                ? 'border-warn/50 bg-warn/10'
+                : 'border-base-600/60 bg-base-700/30'
+            "
+          >
+            <span
+              class="font-num text-[15px] font-semibold leading-none"
+              :class="dirtyKeys.length ? 'text-warn' : 'text-content'"
+            >{{ dirtyKeys.length }}</span>
+            <span class="text-[10px] text-content-faint">未保存</span>
+          </div>
+
           <div class="mx-0.5 hidden h-6 w-px bg-base-600/60 sm:block"></div>
+
           <button
-            class="flex items-center gap-1 rounded-lg border border-primary/60 bg-primary/15 px-2.5 py-1 text-[12px] font-medium text-primary-light transition-colors hover:bg-primary/25 disabled:opacity-40"
+            class="btn btn-primary"
             :disabled="!dirtyKeys.length || saving"
             :title="dirtyKeys.length ? '写入 app_state 覆盖层并立即生效（重启保留）' : '当前没有改动'"
             @click="save"
@@ -227,15 +289,15 @@ onMounted(load)
             保存{{ dirtyKeys.length ? ` (${dirtyKeys.length})` : '' }}
           </button>
           <button
-            class="flex items-center gap-1 rounded-lg border border-base-600 bg-base-700 px-2.5 py-1 text-[11px] text-content-muted transition-colors hover:border-down/60 hover:text-down disabled:opacity-40"
-            :disabled="saving || !(data?.runtime_overrides ?? 0)"
+            class="btn btn-danger"
+            :disabled="saving || !coveredTotal"
             title="把所有已覆盖项还原为 .env / 环境变量里的值"
             @click="resetKeys(dirtyKeys.length ? dirtyKeys : [])"
           >
             <RotateCcw class="h-3.5 w-3.5" />还原
           </button>
           <button
-            class="flex items-center gap-1 rounded-lg border border-base-600 bg-base-700 px-2 py-1 text-[11px] text-content-muted transition-colors hover:border-primary/60 hover:text-primary"
+            class="btn btn-outline px-2"
             :disabled="loading"
             title="重新拉取当前生效值（丢弃未保存草稿）"
             @click="load"
@@ -244,183 +306,231 @@ onMounted(load)
           </button>
         </div>
       </div>
-      <div v-if="toast" class="mt-1.5 rounded bg-down/10 px-2 py-1 text-[11px] text-down">{{ toast }}</div>
-      <div v-if="error" class="mt-1.5 rounded bg-up/10 px-2 py-1 text-[11px] text-up">{{ error }}</div>
+
+      <div v-if="toast" class="mt-2 rounded border border-down/30 bg-down/10 px-2 py-1 text-[11px] text-down">
+        {{ toast }}
+      </div>
+      <div v-if="error" class="mt-2 rounded border border-up/30 bg-up/10 px-2 py-1 text-[11px] text-up">
+        {{ error }}
+      </div>
     </div>
 
-    <!-- 过滤 + 分组 tab + 参数行，收进同一张卡片 -->
-    <div class="glass-card p-3">
-      <div class="flex flex-wrap items-center gap-2">
-        <label
-          class="flex items-center gap-1.5 rounded-lg border border-base-600 bg-base-700/60 px-2.5 py-1.5 transition-colors focus-within:border-primary"
-        >
-          <Search class="h-3.5 w-3.5 shrink-0 text-content-faint" />
-          <input
-            v-model="keyword"
-            placeholder="搜参数名 / key / 值"
-            class="w-[170px] bg-transparent text-[12px] text-content outline-none placeholder:text-content-faint sm:w-[210px]"
-          />
-          <button
-            v-if="keyword"
-            type="button"
-            class="shrink-0 text-[13px] leading-none text-content-faint transition-colors hover:text-content"
-            title="清空搜索"
-            @click="keyword = ''"
+    <!-- 左导航 + 右侧小节卡片 -->
+    <div class="grid items-start gap-3 lg:grid-cols-[232px_minmax(0,1fr)]">
+      <!-- 左栏：搜索 + 分组导航 -->
+      <aside class="overflow-hidden rounded-xl border border-base-600/60 bg-base-800/70 backdrop-blur-md lg:sticky lg:top-3">
+        <div class="border-b border-base-600/50 p-2">
+          <label
+            class="flex items-center gap-1.5 rounded-lg border border-base-600 bg-base-700/60 px-2 py-1.5 transition-colors focus-within:border-primary"
           >
-            ×
-          </button>
-        </label>
-        <button
-          class="rounded-lg border px-2.5 py-1.5 text-[11px] transition-colors"
-          :class="
-            onlyChanged
-              ? 'border-primary/60 bg-primary/15 text-primary-light'
-              : 'border-base-600 bg-base-700 text-content-muted hover:text-content'
-          "
-          @click="onlyChanged = !onlyChanged"
-        >
-          只看已覆盖
-        </button>
-        <span class="text-[11px] text-content-faint">共 {{ currentItems.length }} 项</span>
-      </div>
-
-      <!-- 分组 tab：胶囊底槽，角标为已覆盖数 -->
-      <div class="mt-2.5 flex flex-wrap items-center gap-1 rounded-lg bg-base-800/40 p-1">
-        <button
-          v-for="g in groups"
-          :key="g.name"
-          type="button"
-          class="flex items-center gap-1.5 rounded-md px-2.5 py-1 text-[11.5px] font-medium transition-colors"
-          :class="
-            activeGroup === g.name
-              ? 'bg-primary/15 text-primary-light shadow-[inset_0_0_0_1px_rgba(56,189,248,0.25)]'
-              : 'text-content-muted hover:bg-base-700/60 hover:text-content'
-          "
-          @click="activeGroup = g.name"
-        >
-          {{ g.name }}
-          <span class="font-num text-[10px] font-normal text-content-faint">{{ g.total }}</span>
-          <span
-            v-if="g.changed"
-            class="rounded bg-primary/20 px-1 font-num text-[10px] text-primary-light"
-            title="该组已覆盖（app_state）的项数"
-          >
-            {{ g.changed }}
-          </span>
-        </button>
-      </div>
-
-      <!-- 当前组标题 -->
-      <div class="mb-1.5 mt-3 flex flex-wrap items-center gap-x-2 gap-y-1">
-        <span class="text-[12px] font-medium text-content">{{ activeGroup }}</span>
-        <span class="rounded bg-base-600/40 px-1.5 py-0.5 font-num text-[10px] text-content-muted">
-          {{ currentItems.length }}
-        </span>
-        <span
-          v-if="activeGroupDirty"
-          class="rounded bg-primary/20 px-1.5 py-0.5 text-[10px] text-primary-light"
-        >
-          本组已改 {{ activeGroupDirty }}
-        </span>
-        <span class="flex-1"></span>
-        <span class="flex items-center gap-1 text-[10px] text-content-faint">
-          <Info class="h-3 w-3" />悬停任一行可看完整 key、当前值与说明
-        </span>
-      </div>
-
-      <!-- 参数行：行内只留短标签与控件，长说明一律收进 tooltip，避免卡片高低不齐 -->
-      <div class="grid grid-cols-1 gap-1.5 lg:grid-cols-2 2xl:grid-cols-3">
-        <div
-          v-for="it in currentItems"
-          :key="it.key"
-          class="group flex items-start gap-2 rounded-lg border px-2.5 py-2 transition-colors"
-          :class="
-            isDirty(it)
-              ? 'border-primary/50 bg-primary/10'
-              : 'border-base-600/40 bg-base-700/25 hover:border-base-600 hover:bg-base-700/40'
-          "
-          :title="tipOf(it)"
-        >
-          <div class="min-w-0 flex-1">
-            <div class="flex items-center gap-1.5">
-              <span
-                class="truncate text-[12px] font-medium"
-                :class="isDirty(it) ? 'text-primary-light' : 'text-content'"
-              >{{ it.label }}</span>
-              <Info v-if="it.note" class="h-3 w-3 shrink-0 text-warn/70" />
-            </div>
-            <div class="mt-0.5 flex items-center gap-1 text-[10px]">
-              <span class="truncate font-num text-content-faint">{{ it.key }}</span>
-              <span class="shrink-0 text-content-faint/60">·</span>
-              <span class="shrink-0 text-content-muted">当前 {{ fmtValue(it) }}</span>
-            </div>
-          </div>
-
-          <div class="flex shrink-0 items-center gap-1.5 pt-0.5">
-            <!-- 开关 -->
+            <Search class="h-3.5 w-3.5 shrink-0 text-content-faint" />
+            <input
+              v-model="keyword"
+              placeholder="搜标签 / key / 值 / 说明"
+              class="min-w-0 flex-1 bg-transparent text-[12px] text-content outline-none placeholder:text-content-faint"
+            />
             <button
-              v-if="it.kind === 'bool'"
+              v-if="keyword"
               type="button"
-              class="relative h-4 w-8 shrink-0 rounded-full transition-colors"
-              :class="draft[it.key] ? 'bg-primary' : 'bg-base-600'"
-              :title="draft[it.key] ? '点击关闭' : '点击开启'"
-              @click="draft[it.key] = !draft[it.key]"
+              class="shrink-0 text-[13px] leading-none text-content-faint transition-colors hover:text-content"
+              title="清空搜索"
+              @click="keyword = ''"
             >
-              <span
-                class="absolute top-0.5 h-3 w-3 rounded-full bg-white transition-all"
-                :class="draft[it.key] ? 'left-[18px]' : 'left-0.5'"
-              ></span>
+              ×
             </button>
-
-            <!-- 数字 -->
-            <input
-              v-else-if="it.kind === 'number'"
-              v-model.number="draft[it.key]"
-              type="number"
-              step="any"
-              class="h-7 w-[84px] shrink-0 rounded border bg-base-800/60 px-1.5 text-right font-num text-[12px] text-content outline-none transition-colors focus:border-primary"
-              :class="isDirty(it) ? 'border-primary/60' : 'border-base-600'"
-            />
-
-            <!-- 文本 -->
-            <input
-              v-else-if="it.kind === 'text'"
-              v-model="draft[it.key]"
-              type="text"
-              class="h-7 w-[130px] shrink-0 rounded border bg-base-800/60 px-1.5 text-right font-num text-[12px] text-content outline-none transition-colors focus:border-primary"
-              :class="isDirty(it) ? 'border-primary/60' : 'border-base-600'"
-            />
-
-            <!-- 只读（路径/列表） -->
-            <span
-              v-else
-              class="shrink-0 cursor-help rounded-full border border-base-600 px-1.5 py-0.5 text-[10px] leading-none text-content-faint"
-            >
-              需重启
-            </span>
-
-            <span
-              class="shrink-0 whitespace-nowrap rounded-full border px-1.5 py-0.5 text-[10px] leading-none"
-              :class="sourceMeta[it.source]?.cls ?? 'border-base-600 text-content-faint'"
-            >
-              {{ sourceMeta[it.source]?.text ?? it.source }}
-            </span>
-
-            <button
-              v-if="isDirty(it)"
-              class="shrink-0 rounded p-0.5 text-content-faint transition-colors hover:text-primary"
-              title="撤销这一行的改动（不写库）"
-              @click="revertRow(it)"
-            >
-              <RotateCcw class="h-3 w-3" />
-            </button>
-          </div>
+          </label>
+          <button
+            class="mt-1.5 flex w-full items-center justify-between rounded-lg border px-2 py-1.5 text-[11px] transition-colors"
+            :class="
+              onlyChanged
+                ? 'border-primary/60 bg-primary/15 text-primary-light'
+                : 'border-base-600 bg-base-700/60 text-content-muted hover:text-content'
+            "
+            @click="onlyChanged = !onlyChanged"
+          >
+            <span>只看已覆盖</span>
+            <span class="font-num text-[10px]">{{ coveredTotal }}</span>
+          </button>
         </div>
-      </div>
 
-      <p v-if="!currentItems.length" class="py-6 text-center text-[12px] text-content-faint">
-        没有匹配的参数
-      </p>
+        <nav class="max-h-[calc(100vh-260px)] space-y-0.5 overflow-y-auto p-1.5">
+          <button
+            v-for="g in navGroups"
+            :key="g.name"
+            type="button"
+            class="relative flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left transition-colors"
+            :class="
+              !searching && activeGroup === g.name
+                ? 'bg-primary/[0.12] text-primary-light'
+                : 'text-content-muted hover:bg-base-700/60 hover:text-content'
+            "
+            @click="activeGroup = g.name; keyword = ''; onlyChanged = false"
+          >
+            <span
+              class="absolute left-0 top-1/2 h-4 w-0.5 -translate-y-1/2 rounded-full transition-colors"
+              :class="!searching && activeGroup === g.name ? 'bg-primary' : 'bg-transparent'"
+            ></span>
+            <span
+              class="min-w-0 flex-1 truncate pl-1 text-[12px]"
+              :class="!searching && activeGroup === g.name ? 'font-medium' : ''"
+            >{{ g.name }}</span>
+            <span v-if="g.dirty" class="h-1.5 w-1.5 shrink-0 rounded-full bg-warn" title="本组有未保存改动"></span>
+            <span
+              v-if="g.covered"
+              class="shrink-0 rounded bg-primary/20 px-1 font-num text-[9.5px] leading-4 text-primary-light"
+              title="该组已覆盖（app_state）的项数"
+            >{{ g.covered }}</span>
+            <span
+              class="w-6 shrink-0 text-right font-num text-[10px]"
+              :class="searching && g.matched ? 'text-primary-light' : 'text-content-faint'"
+            >{{ searching ? g.matched : g.total }}</span>
+          </button>
+        </nav>
+
+        <div class="flex items-center justify-between border-t border-base-600/50 px-3 py-1.5 text-[10px] text-content-faint">
+          <span>{{ navGroups.length }} 个分组</span>
+          <span v-if="searching" class="font-num text-primary-light">命中 {{ visibleCount }}</span>
+          <span v-else>共 {{ data?.total ?? 0 }} 项</span>
+        </div>
+      </aside>
+
+      <!-- 右栏 -->
+      <div class="min-w-0 space-y-3">
+        <div
+          v-if="searching"
+          class="flex items-center gap-2 rounded-lg border border-primary/25 bg-primary/[0.06] px-3 py-1.5 text-[11px] text-content-muted"
+        >
+          <Search class="h-3 w-3 text-primary-light" />
+          在全部 {{ data?.total ?? 0 }} 项中命中
+          <span class="font-num font-semibold text-primary-light">{{ visibleCount }}</span> 项
+          <span class="text-content-faint">· 点左栏分组可回到分组视图</span>
+        </div>
+
+        <section v-for="g in visibleGroups" :key="g.name" class="rounded-xl border border-base-600/60 bg-base-800/70">
+          <!-- 分组标题 -->
+          <header class="flex flex-wrap items-center gap-x-2 gap-y-1 border-b border-base-600/50 px-3 py-2.5">
+            <h3 class="text-[13px] font-semibold text-content">{{ g.name }}</h3>
+            <span class="rounded bg-base-600/40 px-1.5 py-0.5 font-num text-[10px] text-content-muted">{{ g.total }}</span>
+            <span v-if="g.covered" class="rounded bg-primary/20 px-1.5 py-0.5 text-[10px] text-primary-light">
+              已覆盖 {{ g.covered }}
+            </span>
+            <span v-if="g.dirty" class="rounded bg-warn/15 px-1.5 py-0.5 text-[10px] text-warn">
+              已改未存 {{ g.dirty }}
+            </span>
+            <span class="min-w-0 flex-1 truncate text-[11px] text-content-faint">{{ g.desc }}</span>
+            <button
+              v-if="g.covered"
+              class="btn btn-xs btn-danger shrink-0"
+              :disabled="saving"
+              title="把本组已覆盖的项还原为 .env 值"
+              @click="resetGroup(g.name)"
+            >
+              <RotateCcw class="h-2.5 w-2.5" />本组还原
+            </button>
+          </header>
+
+          <!-- 组内小节 -->
+          <div
+            v-for="sg in g.subgroups"
+            :key="`${g.name}/${sg.name}`"
+            class="mx-2 my-2 overflow-hidden rounded-lg border border-base-600/40 bg-base-800/40"
+          >
+            <div class="flex flex-wrap items-center gap-x-2 border-b border-base-600/30 bg-base-700/20 px-2.5 py-1.5">
+              <span class="h-3 w-0.5 rounded-full bg-primary/70"></span>
+              <span class="text-[11.5px] font-medium text-content">{{ sg.name }}</span>
+              <span class="min-w-0 flex-1 truncate text-[10px] text-content-faint">{{ sg.desc }}</span>
+              <span class="shrink-0 font-num text-[10px] text-content-faint">{{ sg.items.length }}</span>
+            </div>
+
+            <!-- 参数行：短名 + 控件一行一个；完整说明 / key / 当前值 / 待保存值都在 tooltip -->
+            <div class="grid grid-cols-1 gap-x-4 p-1.5 md:grid-cols-2 2xl:grid-cols-3">
+              <div
+                v-for="it in sg.items"
+                :key="it.key"
+                class="flex h-9 items-center gap-1.5 rounded-md px-2 transition-colors"
+                :class="
+                  isDirty(it)
+                    ? 'bg-primary/[0.10] ring-1 ring-inset ring-primary/25'
+                    : 'hover:bg-base-700/50'
+                "
+                :title="tipOf(it)"
+              >
+                <span
+                  class="h-4 w-0.5 shrink-0 rounded-full transition-colors"
+                  :class="isDirty(it) ? 'bg-primary' : 'bg-transparent'"
+                ></span>
+                <span
+                  class="min-w-0 flex-1 truncate text-[12px]"
+                  :class="isDirty(it) ? 'font-medium text-primary-light' : 'text-content-muted'"
+                >{{ it.label }}</span>
+                <Info v-if="it.note" class="h-3 w-3 shrink-0 text-warn/70" />
+
+                <span
+                  class="shrink-0 rounded-full border px-1 py-px text-[9.5px] leading-none"
+                  :class="sourceMeta[it.source]?.cls ?? 'text-content-faint'"
+                >{{ sourceMeta[it.source]?.text ?? it.source }}</span>
+
+                <!-- 开关 -->
+                <button
+                  v-if="it.kind === 'bool'"
+                  type="button"
+                  class="relative h-4 w-8 shrink-0 rounded-full transition-colors"
+                  :class="draft[it.key] ? 'bg-primary' : 'bg-base-600'"
+                  :title="draft[it.key] ? '点击关闭' : '点击开启'"
+                  @click="draft[it.key] = !draft[it.key]"
+                >
+                  <span
+                    class="absolute top-0.5 h-3 w-3 rounded-full bg-white transition-all"
+                    :class="draft[it.key] ? 'left-[18px]' : 'left-0.5'"
+                  ></span>
+                </button>
+
+                <!-- 数字 -->
+                <input
+                  v-else-if="it.kind === 'number'"
+                  v-model.number="draft[it.key]"
+                  type="number"
+                  step="any"
+                  class="field field-num h-7 w-[80px] shrink-0 px-1.5 text-[12px]"
+                  :class="isDirty(it) ? 'border-primary/60' : 'border-base-600'"
+                />
+
+                <!-- 文本 -->
+                <input
+                  v-else-if="it.kind === 'text'"
+                  v-model="draft[it.key]"
+                  type="text"
+                  class="field field-num h-7 w-[120px] shrink-0 px-1.5 text-[12px]"
+                  :class="isDirty(it) ? 'border-primary/60' : 'border-base-600'"
+                />
+
+                <span v-else class="shrink-0 text-[10px] text-content-faint">需重启</span>
+
+                <button
+                  v-if="isDirty(it)"
+                  class="shrink-0 rounded p-0.5 text-content-faint transition-colors hover:text-primary"
+                  title="撤销这一行的改动（不写库）"
+                  @click="revertRow(it)"
+                >
+                  <RotateCcw class="h-3 w-3" />
+                </button>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <div
+          v-if="!visibleGroups.length"
+          class="rounded-xl border border-dashed border-base-600/60 bg-base-800/40 px-4 py-10 text-center"
+        >
+          <p class="text-[12px] text-content-muted">没有匹配的参数</p>
+          <p class="mt-1 text-[11px] text-content-faint">换个关键词，或点左栏分组回到分组视图</p>
+        </div>
+
+        <p class="flex items-center gap-1 px-1 text-[10px] text-content-faint">
+          <Info class="h-3 w-3" />悬停任一行可看完整 key、当前值与 config.py 原始说明
+        </p>
+      </div>
     </div>
 
     <!-- 底部悬浮保存条：只在有未保存改动时出现。原先只有顶栏一个「保存」按钮，
@@ -431,26 +541,16 @@ onMounted(load)
         class="pointer-events-none fixed inset-x-0 bottom-5 z-40 flex justify-center px-4"
       >
         <div
-          class="pointer-events-auto flex flex-wrap items-center gap-3 rounded-full border border-primary/40 bg-base-800/95 px-4 py-2 shadow-glow backdrop-blur"
+          class="pointer-events-auto flex flex-wrap items-center gap-3 rounded-full border border-primary/35 bg-base-800/95 px-4 py-2 shadow-pop backdrop-blur"
         >
           <span class="text-[12px] text-content">
             有 <span class="font-num font-semibold text-primary-light">{{ dirtyKeys.length }}</span> 项未保存
             <span class="text-content-faint">（保存后立即落库并对下一 tick 生效）</span>
           </span>
-          <button
-            type="button"
-            class="rounded-lg bg-primary px-3 py-1 text-[12px] font-medium text-white transition-all hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50"
-            :disabled="saving"
-            @click="save"
-          >
+          <button type="button" class="btn btn-primary" :disabled="saving" @click="save">
             {{ saving ? '保存中...' : '保存并生效' }}
           </button>
-          <button
-            type="button"
-            class="rounded-lg border border-base-600 px-3 py-1 text-[12px] text-content-muted transition-colors hover:text-content disabled:opacity-50"
-            :disabled="saving"
-            @click="discardAll"
-          >
+          <button type="button" class="btn btn-outline" :disabled="saving" @click="discardAll">
             放弃
           </button>
         </div>

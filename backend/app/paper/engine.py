@@ -420,11 +420,14 @@ class PaperEngine:
     def calc_fee(side: str, amount: float) -> float:
         """按 A 股标准费率计算单笔费用。
 
+        费率取 ``Settings.trade_fee_*``（与回测 ``pipeline.calc_fee`` 同一份）：
         佣金万2.5（最低5元，双边）+ 印花税千1（仅卖出）+ 过户费万0.1（双边）。
+        改费率只改设置页，两边同时生效，回测 PnL 才和实盘可比。
         """
-        commission = max(amount * FEE_COMMISSION_RATE, FEE_COMMISSION_MIN)
-        stamp = amount * FEE_STAMP_RATE if side == "sell" else 0.0
-        transfer = amount * FEE_TRANSFER_RATE
+        s = get_settings()   # staticmethod：不依赖实例，取单例保证与回测同一份费率
+        commission = max(amount * s.trade_fee_commission_rate, s.trade_fee_commission_min)
+        stamp = amount * s.trade_fee_stamp_rate if side == "sell" else 0.0
+        transfer = amount * s.trade_fee_transfer_rate
         return round(commission + stamp + transfer, 2)
 
     # ------------------------------------------------------------------

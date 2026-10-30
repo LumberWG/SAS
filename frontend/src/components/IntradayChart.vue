@@ -1,7 +1,7 @@
 <script setup lang="ts">
 /**
  * ECharts 分时图：价格线 + 当日均价 + 昨收基准线 + 成交量副图。
- * A股配色：高于昨收红（#F5222D）、低于昨收绿（#00B96B）。
+ * A股配色：高于昨收红、低于昨收绿；色值统一取自 `lib/chartTheme`。
  */
 import { computed } from 'vue'
 import VChart from 'vue-echarts'
@@ -14,6 +14,8 @@ import {
   LegendComponent,
   MarkLineComponent,
 } from 'echarts/components'
+
+import { chart, tooltipStyle } from '../lib/chartTheme'
 
 use([
   CanvasRenderer,
@@ -34,9 +36,9 @@ const props = defineProps<{
   height?: string
 }>()
 
-const UP = '#F5222D'
-const DOWN = '#00B96B'
-const NEUTRAL = '#38BDF8'
+const UP = chart.up
+const DOWN = chart.down
+const NEUTRAL = chart.primaryLight
 
 const base = computed(() =>
   props.prevClose != null && props.prevClose > 0 ? props.prevClose : null,
@@ -54,7 +56,7 @@ const tone = computed(() => {
   if (base.value == null || lastPrice.value == null) return NEUTRAL
   if (lastPrice.value > base.value) return UP
   if (lastPrice.value < base.value) return DOWN
-  return '#8B9BB4'
+  return chart.textMuted
 })
 
 /** 以昨收为中心对称取值域：涨跌视觉幅度一致（与行情软件一致）。 */
@@ -102,14 +104,12 @@ const option = computed(() => ({
   backgroundColor: 'transparent',
   tooltip: {
     trigger: 'axis',
-    axisPointer: { type: 'cross', lineStyle: { color: '#5C6B85' } },
-    backgroundColor: '#111A2E',
-    borderColor: '#243354',
-    textStyle: { color: '#E6EDF7', fontSize: 12 },
+    axisPointer: { type: 'cross', lineStyle: { color: chart.textFaint } },
+    ...tooltipStyle,
   },
   legend: {
     data: ['价格', '均价'],
-    textStyle: { color: '#8B9BB4', fontSize: 11 },
+    textStyle: { color: chart.textMuted, fontSize: 11 },
     top: 0,
     right: 0,
     icon: 'roundRect',
@@ -125,7 +125,7 @@ const option = computed(() => ({
       type: 'category',
       data: props.times,
       boundaryGap: false,
-      axisLine: { lineStyle: { color: '#243354' } },
+      axisLine: { lineStyle: { color: chart.axisLine } },
       axisTick: { show: false },
       axisLabel: { show: false },
     },
@@ -134,10 +134,10 @@ const option = computed(() => ({
       gridIndex: 1,
       data: props.times,
       boundaryGap: false,
-      axisLine: { lineStyle: { color: '#243354' } },
+      axisLine: { lineStyle: { color: chart.axisLine } },
       axisTick: { show: false },
       axisLabel: {
-        color: '#5C6B85',
+        color: chart.textFaint,
         fontSize: 10,
         interval: labelInterval.value,
       },
@@ -149,11 +149,11 @@ const option = computed(() => ({
       min: yRange.value?.min,
       max: yRange.value?.max,
       axisLabel: {
-        color: '#5C6B85',
+        color: chart.textFaint,
         fontSize: 10,
         formatter: (v: number) => v.toFixed(2),
       },
-      splitLine: { lineStyle: { color: 'rgba(36,51,84,0.6)' } },
+      splitLine: { lineStyle: { color: chart.splitLine } },
     },
     {
       scale: true,
@@ -170,16 +170,16 @@ const option = computed(() => ({
       symbol: 'none',
       lineStyle: { width: 1.4, color: tone.value },
       itemStyle: { color: tone.value },
-      areaStyle: { color: 'rgba(56,189,248,0.12)' },
+      areaStyle: { color: tone.value, opacity: 0.1 },
       markLine:
         base.value != null
           ? {
               symbol: 'none',
               silent: true,
-              lineStyle: { color: '#8B9BB4', type: 'dashed', width: 1 },
+              lineStyle: { color: chart.textMuted, type: 'dashed', width: 1 },
               label: {
                 position: 'end',
-                color: '#8B9BB4',
+                color: chart.textMuted,
                 fontSize: 10,
                 formatter: '昨收',
               },
@@ -192,8 +192,8 @@ const option = computed(() => ({
       type: 'line',
       data: props.avgPrices,
       symbol: 'none',
-      lineStyle: { width: 1, color: '#FAAD14' },
-      itemStyle: { color: '#FAAD14' },
+      lineStyle: { width: 1, color: chart.warn },
+      itemStyle: { color: chart.warn },
     },
     {
       name: '成交量',

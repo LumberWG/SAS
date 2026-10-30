@@ -17,7 +17,7 @@ const emit = defineEmits<{ click: [] }>()
 <template>
   <div
     class="glass-card p-4"
-    :class="clickable ? 'cursor-pointer' : ''"
+    :class="clickable ? 'glass-card-interactive cursor-pointer' : ''"
     @click="clickable && emit('click')"
   >
     <div class="mb-1.5 flex items-center justify-between">
@@ -25,7 +25,7 @@ const emit = defineEmits<{ click: [] }>()
       <slot name="icon" />
     </div>
     <div
-      class="font-num text-[22px] font-semibold leading-tight"
+      class="font-num text-[24px] font-semibold leading-tight tracking-tight"
       :class="{
         'text-up': tone === 'up',
         'text-down': tone === 'down',

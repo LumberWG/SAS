@@ -66,9 +66,25 @@ FACTOR_LABELS: dict[str, tuple[str, str]] = {
     "boll": ("布林位置", "位置"),
 }
 
-#: 买入 / 卖出阈值（总分 ±100）
+#: 买入 / 卖出阈值的**代码默认值**（真正生效的是 :func:`thresholds` 返回的值）
 BUY_THRESHOLD = 15.0
 SELL_THRESHOLD = -15.0
+
+
+def thresholds() -> tuple[float, float]:
+    """当前买卖阈值：优先取 ``Settings.factor_*_threshold``（页面可改 / 回测可落盘）。
+
+    保留模块常量作缺省回退，脚本与测试直接引用 ``BUY_THRESHOLD`` 时行为不变。
+    """
+    from app.config import get_settings
+
+    s = get_settings()
+    buy = getattr(s, "factor_buy_threshold", None)
+    sell = getattr(s, "factor_sell_threshold", None)
+    return (
+        BUY_THRESHOLD if buy is None else float(buy),
+        SELL_THRESHOLD if sell is None else float(sell),
+    )
 
 
 @dataclass
@@ -108,10 +124,11 @@ class FactorScore:
 
     @property
     def action(self) -> str:
-        """按阈值给出分级：buy / sell / hold。"""
-        if self.total >= BUY_THRESHOLD:
+        """按阈值给出分级：buy / sell / hold（阈值可在设置页改，见 :func:`thresholds`）。"""
+        buy, sell = thresholds()
+        if self.total >= buy:
             return "buy"
-        if self.total <= SELL_THRESHOLD:
+        if self.total <= sell:
             return "sell"
         return "hold"
 

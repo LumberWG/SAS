@@ -25,7 +25,8 @@ BACKTEST_TO_SETTING: dict[str, str] = {
     # 单票/总仓位
     "max_total_exposure": "paper_max_total_exposure",
     "single_position_ratio": "paper_single_position_max",
-    # 评分分档
+    # 评分阈值与分档
+    "buy_threshold": "factor_buy_threshold",
     "full_score": "paper_full_score",
     "half_score": "paper_half_score",
     # 止损 / 止盈
@@ -67,7 +68,6 @@ SKIP_REASONS: dict[str, str] = {
     "watch_cap": "实盘自选没有上限/FIFO 淘汰，无对应配置",
     "add_per_day": "实盘自选由「扫描 → 分析」链路写入，没有每日配额",
     "rebalance_days": "实盘按每日调仓，没有调仓周期开关",
-    "buy_threshold": "买入阈值硬编码在 factors.BUY_THRESHOLD，需改代码",
     "buy_top_pct": "实盘选股没有分位门槛，只有评分分档（full_score/half_score）",
     "max_open_gain": "与「切入点 · 不追高」同口径，落盘请用 entry_max_chase",
     "max_gain_5d": "实盘选股没有近 5 日涨幅过滤",

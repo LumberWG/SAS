@@ -136,13 +136,13 @@ const allSelected = computed(
               class="group relative flex cursor-pointer items-start gap-2.5 rounded-lg border p-3 transition-all"
               :class="
                 selected.includes(s.name)
-                  ? 'border-primary/50 bg-primary/10 shadow-[inset_2px_0_0_0_#2563EB]'
+                  ? 'border-primary/50 bg-primary/10 shadow-[inset_2px_0_0_0_theme(colors.primary.DEFAULT)]'
                   : 'border-base-600/60 hover:border-base-600 hover:bg-base-700/40'
               "
             >
               <input
                 type="checkbox"
-                class="mt-0.5 h-3.5 w-3.5 accent-[#2563EB]"
+                class="mt-0.5 h-3.5 w-3.5 accent-primary"
                 :checked="selected.includes(s.name)"
                 @change="emit('toggle', s.name)"
               />

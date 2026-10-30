@@ -187,7 +187,7 @@ function resetDefaults() {
               :max="spec.max"
               :step="spec.step ?? 1"
               :value="form[key]"
-              class="w-full accent-[#2563EB]"
+              class="w-full accent-primary"
               @input="form[key] = Number(($event.target as HTMLInputElement).value)"
             />
           </div>
@@ -206,7 +206,7 @@ function resetDefaults() {
             class="min-w-0 flex-1 rounded-lg border border-base-600 bg-base-700 px-3 py-2 text-[13px] text-content outline-none transition-colors placeholder:text-content-faint focus:border-primary"
           />
           <button
-            class="flex items-center gap-1.5 rounded-lg bg-primary px-4 py-2 text-[13px] font-medium text-white transition-all hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50"
+            class="btn btn-primary px-4 py-2 text-[13px]"
             :disabled="saving || !customName.trim() || !hasParams"
             @click="save"
           >

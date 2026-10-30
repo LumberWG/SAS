@@ -224,16 +224,12 @@ function statusColor(status: string) {
       <!-- 分时 / 日K 走势 -->
       <div class="glass-card p-4 xl:col-span-3">
         <div class="mb-2 flex flex-wrap items-center justify-between gap-2">
-          <div class="flex items-center gap-1 rounded-lg border border-base-600 bg-base-700/40 p-0.5">
+          <div class="seg !p-0.5">
             <button
               v-for="tab in chartTabs"
               :key="tab.key"
-              class="rounded-md px-3 py-1 text-[12px] font-medium transition-colors"
-              :class="
-                chartTab === tab.key
-                  ? 'bg-base-600 text-content'
-                  : 'text-content-muted hover:text-content'
-              "
+              class="seg-item px-3 py-1"
+              :class="chartTab === tab.key ? 'seg-item-active' : ''"
               @click="chartTab = tab.key"
             >
               {{ tab.label }}

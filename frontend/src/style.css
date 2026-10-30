@@ -2,22 +2,27 @@
 @tailwind components;
 @tailwind utilities;
 
-/* ============ 设计令牌（深色金融仪表盘） ============ */
+/* ============================================================================
+   设计令牌（深色金融仪表盘）
+   ----------------------------------------------------------------------------
+   层次只用三级表面 + 一档边框表达（背景 900 / 卡片 800 / 悬浮 700 / 边框 600），
+   不叠加多层光晕；强调色只有 primary 一支，红绿只留给涨跌数据。
+   ============================================================================ */
 @layer base {
   :root {
-    --background: #0b1220;
-    --card: #111a2e;
-    --elevated: #1a2540;
-    --border: #243354;
-    --content: #e6edf7;
-    --content-muted: #8b9bb4;
-    --content-faint: #5c6b85;
-    --primary: #2563eb;
-    --primary-light: #38bdf8;
-    --up: #f5222d;   /* A股红涨 */
-    --down: #00b96b; /* A股绿跌 */
-    --warn: #faad14;
-    --accent: #722ed1;
+    --background: #0a0c10;
+    --card: #101319;
+    --elevated: #171b23;
+    --border: #252b37;
+    --content: #e8ebf1;
+    --content-muted: #98a2b3;
+    --content-faint: #697386;
+    --primary: #3b82f6;
+    --primary-light: #93c5fd;
+    --up: #f04452; /* A股红涨 */
+    --down: #12b76a; /* A股绿跌 */
+    --warn: #f5a524;
+    --accent: #8b5cf6;
   }
 
   html,
@@ -28,51 +33,196 @@
 
   body {
     @apply bg-base-900 text-content font-sans text-body antialiased;
+    /* 极弱的环境光：只在大屏顶端留一点冷色，避免大片纯黑发闷 */
     background-image:
-      radial-gradient(ellipse 80% 50% at 50% -20%, rgba(37, 99, 235, 0.12), transparent),
-      radial-gradient(ellipse 60% 40% at 90% 100%, rgba(56, 189, 248, 0.06), transparent);
+      radial-gradient(1100px 520px at 50% -12%, rgba(59, 130, 246, 0.07), transparent 70%),
+      radial-gradient(760px 420px at 100% 100%, rgba(139, 92, 246, 0.04), transparent 70%);
     background-attachment: fixed;
+    font-feature-settings: "cv05" 1, "ss03" 1;
+    text-rendering: optimizeLegibility;
   }
 
-  /* 数字统一等宽，避免表格跳动 */
+  /* 数字统一等宽 + 表格数字对齐，避免行情跳动时整行左右抖 */
   .font-num {
-    @apply font-mono tabular-nums tracking-tight;
+    @apply font-mono tabular-nums;
+    letter-spacing: -0.01em;
+  }
+
+  ::selection {
+    background: rgba(59, 130, 246, 0.32);
+    color: #fff;
+  }
+
+  :focus-visible {
+    outline: 2px solid rgba(59, 130, 246, 0.55);
+    outline-offset: 1px;
   }
 
   /* 滚动条 */
   ::-webkit-scrollbar {
-    width: 8px;
-    height: 8px;
+    width: 10px;
+    height: 10px;
   }
   ::-webkit-scrollbar-thumb {
     @apply rounded-full bg-base-600;
+    border: 2px solid transparent;
+    background-clip: content-box;
+  }
+  ::-webkit-scrollbar-thumb:hover {
+    @apply bg-base-500;
+    background-clip: content-box;
   }
   ::-webkit-scrollbar-track {
     background: transparent;
   }
+
+  /* 数字输入框的原生上下箭头在深色界面里很脏，统一去掉（仍可键盘上下调） */
+  input[type="number"]::-webkit-outer-spin-button,
+  input[type="number"]::-webkit-inner-spin-button {
+    -webkit-appearance: none;
+    margin: 0;
+  }
+  input[type="number"] {
+    -moz-appearance: textfield;
+    appearance: textfield;
+  }
+
+  /* 下拉展开面板跟着深色主题走（Windows 下否则是白底） */
+  select option {
+    background-color: #171b23;
+    color: #e8ebf1;
+  }
 }
 
 @layer components {
-  /* 玻璃拟态卡片 */
+  /* ---------- 表面 ---------- */
   .glass-card {
-    @apply rounded-xl border border-base-600/60 bg-base-800/70 backdrop-blur-md;
-    box-shadow:
-      inset 0 1px 0 rgba(255, 255, 255, 0.04),
-      0 4px 24px rgba(0, 0, 0, 0.35);
+    @apply rounded-xl border border-base-600/70 bg-base-800/80 backdrop-blur-md shadow-card;
     transition:
-      transform 0.25s ease,
-      border-color 0.25s ease,
+      border-color 0.2s ease,
+      background-color 0.2s ease;
+  }
+
+  /* 悬停只微亮边框：整页卡片跟着鼠标上浮会让人以为可以点 */
+  .glass-card:hover {
+    @apply border-base-500/70;
+  }
+
+  /* 可点击卡片才给位移与强调色 */
+  .glass-card-interactive {
+    @apply cursor-pointer;
+    transition:
+      transform 0.25s cubic-bezier(0.22, 1, 0.36, 1),
+      border-color 0.2s ease,
       box-shadow 0.25s ease;
   }
-
-  .glass-card:hover {
+  .glass-card-interactive:hover {
     @apply border-primary/40;
     transform: translateY(-2px);
-    box-shadow:
-      inset 0 1px 0 rgba(255, 255, 255, 0.06),
-      0 8px 32px rgba(37, 99, 235, 0.18);
+    box-shadow: 0 12px 30px -18px rgba(59, 130, 246, 0.6);
   }
 
+  /* 静态面板：表格 / 配置页这类不该有 hover 反馈的容器 */
+  .panel {
+    @apply rounded-xl border border-base-600/70 bg-base-800/70;
+  }
+  .panel-hd {
+    @apply flex flex-wrap items-center gap-2 border-b border-base-600/60 px-3.5 py-2.5;
+  }
+  .panel-title {
+    @apply text-[13px] font-semibold tracking-wide text-content;
+  }
+
+  /* ---------- 按钮 ---------- */
+  .btn {
+    @apply inline-flex select-none items-center justify-center gap-1.5 whitespace-nowrap rounded-lg border
+      px-3 py-1.5 text-[12px] font-medium transition-colors duration-150
+      disabled:cursor-not-allowed disabled:opacity-45;
+  }
+  .btn-primary {
+    @apply border-primary/70 bg-primary text-white hover:bg-primary/90;
+  }
+  .btn-outline {
+    @apply border-base-600 bg-base-700/60 text-content-muted hover:border-base-500 hover:text-content;
+  }
+  /* 次级强调按钮：主色描边 + 轻底，用于「加入自选 / 转入」这类非主操作 */
+  .btn-primary-soft {
+    @apply border-primary/40 bg-primary/[0.10] text-primary-light hover:bg-primary/20;
+  }
+  .btn-ghost {
+    @apply border-transparent bg-transparent text-content-muted hover:bg-base-700/70 hover:text-content;
+  }
+  .btn-danger {
+    @apply border-base-600 bg-base-700/60 text-content-muted hover:border-up/60 hover:text-up;
+  }
+  .btn-sm {
+    @apply rounded-md px-2.5 py-1 text-[11px];
+  }
+  .btn-xs {
+    @apply rounded-md px-2 py-0.5 text-[11px];
+  }
+
+  /* ---------- 状态胶囊 ---------- */
+  .chip {
+    @apply inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10.5px] font-medium leading-normal;
+  }
+  .chip-primary {
+    @apply border-primary/45 bg-primary/[0.12] text-primary-light;
+  }
+  .chip-muted {
+    @apply border-base-600 bg-base-700/60 text-content-faint;
+  }
+  .chip-up {
+    @apply border-up/40 bg-up/[0.12] text-up;
+  }
+  .chip-down {
+    @apply border-down/40 bg-down/[0.12] text-down;
+  }
+  .chip-warn {
+    @apply border-warn/40 bg-warn/[0.12] text-warn;
+  }
+
+  /* ---------- 分段切换（页内 tab） ---------- */
+  .seg {
+    @apply inline-flex flex-wrap items-center gap-1 rounded-lg border border-base-600/70 bg-base-800/60 p-1;
+  }
+  .seg-item {
+    @apply rounded-md px-3 py-1.5 text-[12px] font-medium text-content-muted transition-colors hover:text-content;
+  }
+  .seg-item-active {
+    @apply bg-primary/[0.12] text-primary-light shadow-[inset_0_0_0_1px_rgba(59,130,246,0.28)];
+  }
+
+  /* ---------- 表单 ---------- */
+  .field {
+    @apply h-8 rounded-lg border border-base-600 bg-base-900/70 px-2.5 text-[12.5px] text-content
+      outline-none transition-colors placeholder:text-content-faint
+      focus:border-primary/70 focus:bg-base-900;
+  }
+  .field-num {
+    @apply text-right font-num;
+  }
+
+  /* ---------- 表格 ---------- */
+  .table-shell {
+    @apply overflow-auto rounded-xl border border-base-600/70 bg-base-800/60;
+  }
+  .table-head {
+    @apply sticky top-0 z-10 bg-base-700/90 px-3 py-2 text-left text-[11px] font-medium tracking-wider text-content-faint backdrop-blur;
+  }
+  .table-cell {
+    @apply border-t border-base-600/40 px-3 py-2 text-[12.5px] text-content-muted;
+  }
+  .row-hover:hover {
+    background-color: rgba(23, 27, 35, 0.72);
+  }
+
+  /* 小标题（分组名、字段组名） */
+  .eyebrow {
+    @apply text-[10px] font-semibold uppercase tracking-[0.12em] text-content-faint;
+  }
+
+  /* ---------- 动效 ---------- */
   /* 涨跌闪烁高亮 */
   .flash-up {
     animation: flashUp 0.8s ease-out;
@@ -82,7 +232,7 @@
   }
   @keyframes flashUp {
     0% {
-      background-color: rgba(245, 34, 45, 0.25);
+      background-color: rgba(240, 68, 82, 0.22);
     }
     100% {
       background-color: transparent;
@@ -90,7 +240,7 @@
   }
   @keyframes flashDown {
     0% {
-      background-color: rgba(0, 185, 107, 0.25);
+      background-color: rgba(18, 183, 106, 0.22);
     }
     100% {
       background-color: transparent;
@@ -102,12 +252,7 @@
     content: "";
     position: absolute;
     inset: 0;
-    background: linear-gradient(
-      90deg,
-      transparent,
-      rgba(255, 255, 255, 0.35),
-      transparent
-    );
+    background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.3), transparent);
     animation: shimmer 1.6s infinite;
   }
   @keyframes shimmer {
@@ -120,7 +265,7 @@
   }
 
   /* 尚未产生真实进度时的不确定进度条（扫描首批K线期间）：
-     进度为 0 时真实百分比无法体现工作状态，用往复滚动的色块表示“仍在进行” */
+     进度为 0 时真实百分比无法体现工作状态，用往复滚动的色块表示"仍在进行" */
   .progress-indeterminate {
     width: 40%;
     animation: indeterminate 1.3s ease-in-out infinite;

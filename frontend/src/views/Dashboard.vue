@@ -12,14 +12,15 @@ import { BarChart, LineChart } from 'echarts/charts'
 import { GridComponent, TooltipComponent } from 'echarts/components'
 
 import { getAlerts, getIndexKline, getOverview, type MarketAlert, type MarketOverview } from '../api'
+import { chart, tooltipStyle } from '../lib/chartTheme'
 import { useMarketStore } from '../stores/market'
 
 use([CanvasRenderer, BarChart, LineChart, GridComponent, TooltipComponent])
 
 const market = useMarketStore()
 
-const UP = '#F5222D'
-const DOWN = '#00B96B'
+const UP = chart.up
+const DOWN = chart.down
 
 const overview = ref<MarketOverview | null>(null)
 const alerts = ref<MarketAlert[]>([])
@@ -140,7 +141,7 @@ const sentimentStroke = computed(() => {
   const w = overview.value?.sentiment?.weight ?? 0
   if (w > 0) return UP
   if (w < 0) return DOWN
-  return '#5C6B85'
+  return chart.textFaint
 })
 
 // 迷你走势 option
@@ -156,7 +157,7 @@ function sparkOption(data: (number | null)[]) {
         data,
         smooth: true,
         symbol: 'none',
-        lineStyle: { width: 1.5, color: '#38BDF8' },
+        lineStyle: { width: 1.5, color: chart.primaryLight },
         areaStyle: {
           color: {
             type: 'linear',
@@ -165,8 +166,8 @@ function sparkOption(data: (number | null)[]) {
             x2: 0,
             y2: 1,
             colorStops: [
-              { offset: 0, color: 'rgba(56,189,248,0.25)' },
-              { offset: 1, color: 'rgba(56,189,248,0)' },
+              { offset: 0, color: `${chart.primaryLight}40` },
+              { offset: 1, color: `${chart.primaryLight}00` },
             ],
           },
         },
@@ -184,19 +185,17 @@ const breadthOption = computed(() => {
     grid: { left: 46, right: 34, top: 6, bottom: 4 },
     tooltip: {
       trigger: 'axis',
-      backgroundColor: '#111A2E',
-      borderColor: '#243354',
-      textStyle: { color: '#E6EDF7', fontSize: 12 },
+      ...tooltipStyle,
     },
     xAxis: {
       type: 'value',
-      axisLabel: { color: '#5C6B85', fontSize: 10 },
-      splitLine: { lineStyle: { color: 'rgba(36,51,84,0.6)' } },
+      axisLabel: { color: chart.textFaint, fontSize: 10 },
+      splitLine: { lineStyle: { color: chart.splitLine } },
     },
     yAxis: {
       type: 'category',
       data: ['跌停', '下跌', '平盘', '上涨', '涨停'],
-      axisLabel: { color: '#8B9BB4', fontSize: 10 },
+      axisLabel: { color: chart.textMuted, fontSize: 10 },
       axisTick: { show: false },
     },
     series: [
@@ -204,13 +203,13 @@ const breadthOption = computed(() => {
         type: 'bar',
         data: [
           { value: b.limit_down, itemStyle: { color: DOWN } },
-          { value: b.down, itemStyle: { color: 'rgba(0,185,107,0.55)' } },
-          { value: b.flat, itemStyle: { color: '#5C6B85' } },
-          { value: b.up, itemStyle: { color: 'rgba(245,34,45,0.55)' } },
+          { value: b.down, itemStyle: { color: `${chart.down}8C` } },
+          { value: b.flat, itemStyle: { color: chart.textFaint } },
+          { value: b.up, itemStyle: { color: `${chart.up}8C` } },
           { value: b.limit_up, itemStyle: { color: UP } },
         ],
         barWidth: 10,
-        label: { show: true, position: 'right', color: '#E6EDF7', fontSize: 10 },
+        label: { show: true, position: 'right', color: chart.text, fontSize: 10 },
       },
     ],
   }
@@ -225,19 +224,12 @@ const breadthOption = computed(() => {
         <span v-if="overview">数据更新于 {{ overview.updated_at }}</span>
       </div>
       <div class="flex items-center gap-2">
-        <button
-          class="flex items-center gap-1.5 rounded-lg border border-base-600 px-3 py-1.5 text-[12px] text-content-muted transition-colors hover:border-primary/50 hover:text-primary-light"
-          @click="toggleAuto"
-        >
+        <button class="btn btn-outline" @click="toggleAuto">
           <Pause v-if="autoRefresh" class="h-3.5 w-3.5" />
           <Play v-else class="h-3.5 w-3.5" />
           {{ autoRefresh ? '暂停轮询' : '开启轮询' }}
         </button>
-        <button
-          class="flex items-center gap-1.5 rounded-lg border border-base-600 px-3 py-1.5 text-[12px] text-content-muted transition-colors hover:border-primary/50 hover:text-primary-light disabled:cursor-not-allowed disabled:opacity-50"
-          :disabled="loading"
-          @click="load(true)"
-        >
+        <button class="btn btn-outline" :disabled="loading" @click="load(true)">
           <RefreshCw class="h-3.5 w-3.5" :class="spinning ? 'animate-spin' : ''" />
           刷新
         </button>
@@ -305,7 +297,7 @@ const breadthOption = computed(() => {
       <div class="glass-card flex items-center gap-3 px-3 py-2">
         <div class="relative flex h-20 w-20 shrink-0 items-center justify-center">
           <svg viewBox="0 0 120 120" class="h-full w-full -rotate-90">
-            <circle cx="60" cy="60" r="52" fill="none" stroke="#1A2540" stroke-width="10" />
+            <circle cx="60" cy="60" r="52" fill="none" stroke-width="10" class="stroke-base-700" />
             <circle
               cx="60"
               cy="60"

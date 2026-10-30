@@ -62,7 +62,7 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
       class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm"
       @click.self="emit('cancel')"
     >
-      <div class="glass-card w-full max-w-sm animate-fade-in overflow-hidden !bg-base-800">
+      <div class="w-full max-w-sm animate-fade-in overflow-hidden rounded-xl border border-base-600 bg-base-800 shadow-pop">
         <div class="flex items-center gap-2.5 border-b border-base-600/60 px-5 py-4">
           <AlertTriangle
             class="h-4 w-4"
@@ -77,15 +77,11 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
         </div>
 
         <div class="flex items-center justify-end gap-2 border-t border-base-600/60 px-5 py-3">
-          <button
-            class="rounded-lg border border-base-600 px-3 py-1.5 text-[12px] text-content-muted transition-colors hover:text-content disabled:opacity-50"
-            :disabled="loading"
-            @click="emit('cancel')"
-          >
+          <button class="btn btn-outline" :disabled="loading" @click="emit('cancel')">
             {{ cancelText }}
           </button>
           <button
-            class="rounded-lg px-3.5 py-1.5 text-[12px] font-medium text-white transition-all disabled:cursor-not-allowed disabled:opacity-50"
+            class="btn text-white hover:brightness-110"
             :class="toneClass[tone]"
             :disabled="loading"
             @click="emit('confirm')"

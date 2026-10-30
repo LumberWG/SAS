@@ -11,6 +11,7 @@ import { LineChart } from 'echarts/charts'
 import { GridComponent, TooltipComponent } from 'echarts/components'
 
 import ConfirmDialog from '../components/ConfirmDialog.vue'
+import { chart, tooltipStyle } from '../lib/chartTheme'
 import { useNotifyStore } from '../stores/notify'
 import {
   getBacktestDefaults,
@@ -482,22 +483,20 @@ function buildEquityOption(data: BacktestResult) {
     grid: { left: 70, right: 20, top: 20, bottom: 40 },
     tooltip: {
       trigger: 'axis',
-      backgroundColor: '#111A2E',
-      borderColor: '#243354',
-      textStyle: { color: '#E6EDF7', fontSize: 12 },
+      ...tooltipStyle,
       valueFormatter: (v: number) => v.toLocaleString('zh-CN', { maximumFractionDigits: 0 }) + ' 元',
     },
     xAxis: {
       type: 'category',
       data: dates,
-      axisLabel: { color: '#5C6B85', fontSize: 10 },
-      axisLine: { lineStyle: { color: '#243354' } },
+      axisLabel: { color: chart.textFaint, fontSize: 10 },
+      axisLine: { lineStyle: { color: chart.axisLine } },
     },
     yAxis: {
       type: 'value',
       scale: true,
-      axisLabel: { color: '#5C6B85', fontSize: 10, formatter: (v: number) => (v / 10000).toFixed(0) + '万' },
-      splitLine: { lineStyle: { color: 'rgba(36,51,84,0.6)' } },
+      axisLabel: { color: chart.textFaint, fontSize: 10, formatter: (v: number) => (v / 10000).toFixed(0) + '万' },
+      splitLine: { lineStyle: { color: chart.splitLine } },
     },
     series: [
       {
@@ -506,14 +505,14 @@ function buildEquityOption(data: BacktestResult) {
         data: equity,
         smooth: true,
         symbol: 'none',
-        lineStyle: { width: 2, color: '#38BDF8' },
+        lineStyle: { width: 2, color: chart.primaryLight },
         areaStyle: {
           color: {
             type: 'linear',
             x: 0, y: 0, x2: 0, y2: 1,
             colorStops: [
-              { offset: 0, color: 'rgba(56,189,248,0.25)' },
-              { offset: 1, color: 'rgba(56,189,248,0)' },
+              { offset: 0, color: `${chart.primaryLight}40` },
+              { offset: 1, color: `${chart.primaryLight}00` },
             ],
           },
         },
@@ -524,7 +523,7 @@ function buildEquityOption(data: BacktestResult) {
         data: benchmark,
         smooth: true,
         symbol: 'none',
-        lineStyle: { width: 1.5, color: '#94A3B8', type: 'dashed' },
+        lineStyle: { width: 1.5, color: chart.neutral, type: 'dashed' },
       },
     ],
   }
@@ -564,19 +563,11 @@ function metricTone(v: number): string {
         >
           <RotateCcw class="h-3.5 w-3.5" />重置
         </button>
-        <button
-          type="button"
-          class="flex items-center gap-1 rounded border border-base-600 bg-base-700 px-2 py-1 text-[11px] text-content-muted transition-colors hover:border-primary/60 hover:text-primary"
-          @click="formOpen = !formOpen"
-        >
+        <button type="button" class="btn btn-outline btn-sm" @click="formOpen = !formOpen">
           <ChevronDown class="h-3.5 w-3.5 transition-transform" :class="formOpen ? 'rotate-180' : ''" />
           {{ formOpen ? '收起' : '展开' }}
         </button>
-        <button
-          class="flex items-center gap-1.5 rounded bg-gradient-to-r from-primary to-primary-light px-3 py-1 text-[12px] font-semibold text-white shadow-glow transition-all hover:brightness-110 disabled:cursor-not-allowed disabled:opacity-50"
-          :disabled="loading"
-          @click="submit"
-        >
+        <button class="btn btn-primary btn-sm" :disabled="loading" @click="submit">
           <Play class="h-3.5 w-3.5" />
           {{ loading ? '运行中...' : '开始回测' }}
         </button>
@@ -650,8 +641,8 @@ function metricTone(v: number): string {
             v-for="p in presets"
             :key="p.name"
             type="button"
+            class="btn btn-outline btn-xs"
             @click="applyPreset(p)"
-            class="rounded border border-base-600 bg-base-700 px-2 py-0.5 text-[11px] text-content transition-colors hover:border-primary/60 hover:text-primary"
           >
             {{ p.name }}
           </button>
@@ -659,17 +650,13 @@ function metricTone(v: number): string {
         </div>
 
         <!-- 参数分组（tab）：一次只显示当前组，避免九组全铺开 -->
-        <div class="mt-2 flex flex-wrap items-center gap-1 rounded-lg bg-base-800/40 p-1">
+        <div class="seg mt-2">
           <button
             v-for="g in groups"
             :key="g.name"
             type="button"
-            class="flex items-center gap-1.5 rounded-md px-2.5 py-1 text-[11.5px] font-medium transition-colors"
-            :class="
-              activeGroup === g.name
-                ? 'bg-primary/15 text-primary-light shadow-[inset_0_0_0_1px_rgba(56,189,248,0.25)]'
-                : 'text-content-muted hover:bg-base-700/60 hover:text-content'
-            "
+            class="seg-item flex items-center gap-1.5"
+            :class="activeGroup === g.name ? 'seg-item-active' : ''"
             @click="activeGroup = g.name"
           >
             {{ g.name }}
@@ -720,7 +707,7 @@ function metricTone(v: number): string {
                   class="min-w-0 flex-1 truncate text-[11px]"
                   :class="isChanged(it) ? diffTone(it) : 'text-content-muted'"
                 >{{ it.label }}</span>
-                <input v-model="form[it.key]" type="checkbox" class="h-4 w-4 shrink-0 accent-[#2563EB]" />
+                <input v-model="form[it.key]" type="checkbox" class="h-4 w-4 shrink-0 accent-primary" />
               </label>
               <div
                 v-else-if="it.type === 'multiselect'"
@@ -881,10 +868,10 @@ function metricTone(v: number): string {
           <h3 class="text-subheading">净值曲线</h3>
           <div class="flex items-center gap-4 text-[11px] text-content-muted">
             <span class="flex items-center gap-1.5">
-              <span class="inline-block h-2 w-4 rounded-full bg-[#38BDF8]"></span>策略净值
+              <span class="inline-block h-2 w-4 rounded-full bg-primary-light"></span>策略净值
             </span>
             <span class="flex items-center gap-1.5">
-              <span class="inline-block h-2 w-4 rounded-full bg-[#94A3B8]"></span>等权基准
+              <span class="inline-block h-2 w-4 rounded-full bg-content-muted"></span>等权基准
             </span>
           </div>
         </div>

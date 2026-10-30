@@ -54,6 +54,8 @@ def test_split_keeps_only_mapped_and_explains_skips():
     from app.config import Settings
 
     assert all(target in Settings.model_fields for target in BACKTEST_TO_SETTING.values())
+    # 买入阈值已从「硬编码、只能改代码」挪进 Settings，回测可落盘
+    assert BACKTEST_TO_SETTING["buy_threshold"] == "factor_buy_threshold"
 
 
 def test_persist_writes_live_config_and_reports_skips():
