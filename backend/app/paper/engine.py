@@ -26,6 +26,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import time
 from dataclasses import dataclass
@@ -409,27 +410,51 @@ class PaperEngine:
 
     async def _index_is_weak_uncached(self, today: str, n: int) -> bool:
         """``_index_is_weak`` 的实际计算（带 IO，按日缓存后一天只跑一次）。"""
+        return bool((await self._index_regime_detail(today, n))["weak"])
+
+    async def _index_regime_detail(self, today: str, n: int) -> dict:
+        """大盘择时的数值明细：前一交易日收盘、MA(N)、是否弱势。
+
+        判定口径与原先完全一致（都用**前一交易日**收盘与截至前日的均线，无未来函数）。
+        单独拆出来是因为收盘对账需要的是「为什么弱」——只有 ``is_weak=True``
+        无法复核判定是否正确，而带上指数点位与均线就能一眼看出距离。
+
+        返回的 ``reason`` 非空表示本次判定退化（数据缺失/均线不足），此时 ``weak=False``，
+        与 :meth:`_index_is_weak` 的既有行为保持一致：数据源抖动不停交易。
+        """
+        out: dict = {"ma": n, "prev_close": None, "prev_ma": None,
+                     "weak": False, "reason": ""}
         try:
             idx_path = self.settings.kline_dir / "idx_sh000001.parquet"
             if not idx_path.exists():
-                return False
+                out["reason"] = "指数文件缺失"
+                return out
             df = await asyncio.to_thread(pd.read_parquet, idx_path)
             if df is None or df.empty or "close" not in df.columns or len(df) < n + 1:
-                return False
+                out["reason"] = "指数数据不足"
+                return out
             close = df["close"].astype(float)
             ma = close.rolling(n).mean().shift(1)  # 前一交易日，避免未来函数
             last = df[df["date"] <= today] if "date" in df.columns else df
             i = (len(last) - 1) if not last.empty else (len(df) - 1)
             if i <= 0:
-                return False
+                out["reason"] = "缺少前一交易日"
+                return out
             prev_close = float(close.iloc[i - 1])
             prev_ma = float(ma.iloc[i - 1])
             if prev_ma != prev_ma or prev_ma <= 0:
-                return False
-            return prev_close < prev_ma
+                out["reason"] = "均线无效"
+                return out
+            out.update({
+                "prev_close": round(prev_close, 2),
+                "prev_ma": round(prev_ma, 2),
+                "weak": prev_close < prev_ma,
+            })
+            return out
         except Exception as exc:  # noqa: BLE001
+            out["reason"] = f"判定失败: {exc}"
             logger.debug("大盘择时判断失败: %s", exc)
-            return False
+            return out
 
     def regime_state(self) -> dict:
         """大盘择时闸门的当日状态（供 ``GET /api/paper/live`` 展示）。
@@ -1151,13 +1176,54 @@ class PaperEngine:
         }
 
     async def settle(self) -> dict:
-        """每日收盘结算：止盈止损检查 + 记录净值快照。"""
+        """每日收盘结算：止盈止损检查 + 记录净值快照 + 记录当日择时状态。"""
         await self.check_stop_loss_target()
         detail = await self.account_detail()
         today = datetime.now().strftime("%Y-%m-%d")
         db.save_paper_equity(
             today, detail["total_asset"], detail["cash"], detail["market_value"]
         )
+        await self._save_regime_snapshot(today, detail)
         logger.info("模拟盘收盘结算：总资产 %.2f（%+.2f%%）",
                     detail["total_asset"], detail["return_pct"])
         return detail
+
+    async def _save_regime_snapshot(self, today: str, detail: dict) -> None:
+        """把当日择时状态落一行，供事后区分「弱市没信号」与「本来就不弱」。
+
+        为什么需要（BACKTEST_LOG 记录 #70 §8）：``paper_regime_paused:{date}``
+        只在**发生拦截**时才写，于是「弱市但没有买入信号」的一天与「不是弱市」
+        在库里长得一样（都没有键）。而 #70 冻结的对账项之一正是
+        「弱市日总仓位是否 ≤30%」——缺了当日是否弱势这个前提，这个数核对不了。
+
+        这里同时记录**判定输入**（指数收盘/均线）与**仓位结果**（总仓位比例），
+        事后不必再靠日志反推判定是否正确。
+        """
+        n = int(getattr(self.settings, "paper_regime_ma", 0) or 0)
+        if n > 0:
+            info = await self._index_regime_detail(today, n)
+        else:
+            info = {"ma": 0, "prev_close": None, "prev_ma": None,
+                    "weak": False, "reason": "择时未启用"}
+        total = float(detail["total_asset"] or 0)
+        market_value = float(detail["market_value"] or 0)
+        payload = {
+            "date": today,
+            "enabled": bool(getattr(self.settings, "paper_regime_weak_pause", False)) and n > 0,
+            "ma": info["ma"],
+            "index_prev_close": info["prev_close"],
+            "index_prev_ma": info["prev_ma"],
+            "weak": bool(info["weak"]),
+            "note": info["reason"],
+            "weak_exposure": float(getattr(self.settings, "paper_weak_exposure", 0.0) or 0.0),
+            "paused_count": int(self._regime_paused if self._regime_day == today else 0),
+            "total_asset": round(total, 2),
+            "market_value": round(market_value, 2),
+            "exposure": round(market_value / total, 4) if total > 0 else 0.0,
+        }
+        try:
+            db.set_state(
+                f"paper_regime_state:{today}", json.dumps(payload, ensure_ascii=False)
+            )
+        except Exception as exc:  # noqa: BLE001 - 记录失败不能影响结算
+            logger.debug("择时状态落库失败: %s", exc)

@@ -226,6 +226,13 @@ market_weak → 全部买入候选返回 skip「大盘弱势，暂停买入」�
 - **可运行时切换**：`paper_regime_weak_pause` 在 `param_specs.RUNTIME_KEYS` 中，设置页改完立即生效
   （无需改 `.env` 重启）；当前值经 `GET /api/paper/live` 的 `regime` 字段返回：
   `{enabled, ma, weak, paused_count, day}`，`paused_count` 是**当日**累计拦截次数（跨日归零）。
+- **收盘快照 `paper_regime_state:{date}`（2026-10-30）**：`settle()` 每日**无条件**写一条 JSON：
+  `{date, enabled, ma, index_prev_close, index_prev_ma, weak, note, weak_exposure, paused_count,
+  total_asset, market_value, exposure}`。与 `paper_regime_paused:{date}` 互补——后者只在**发生拦截**
+  时才有值，「弱市但当天没有买入信号」不会留下任何痕迹，而「当日是否弱势」正是
+  `BACKTEST_LOG #70 §8` 要对账的前提。`note` 非空表示判定退化（指数文件缺失/长度不足），
+  此时 `weak=false`，与闸门「数据源抖动不停交易」的既有行为一致；数值明细由
+  `_index_regime_detail()` 给出，布尔判定 `_index_is_weak()` 只是它的薄封装（口径一字未改）。
 - **三档实测（记录 #59，A~D+G/H，2025 年后）**：不暂停均值超额 +5.68%、降仓 60% +1.71%、
   降仓 30% +6.92%（但涨市 C 段 −13.82pp）、全暂停（现状）+4.83%。
   配对中位：降仓 30% +3.29pp、全暂停 **−2.50pp**。**三档均未通过验收协议**，故线上默认值不动，
@@ -592,6 +599,28 @@ t_*→paper_t_*
    （止损/止盈/单票上限现在读 `Settings`，不再写死）。
 
 ---
+
+### 7.5 实盘对账口径（`scripts/live_review.py`，2026-10-30）
+
+回测的「超额」一直是相对**等权基准**的，而实盘账本只有绝对收益——两边口径不通，
+`BACKTEST_LOG #70 §6` 那条判读规则（21 天超额 −1pp ~ +5pp）在补这层之前无法执行。
+
+```
+universe(d) = 当日成交额降序前 N（跳过 idx_* 指数文件，不做板块过滤）
+bench_ret(t) = mean( close_i(t) / close_i(t-1) - 1 )，i ∈ universe(前一交易日)
+bench_cum    = Π (1 + bench_ret(t))，从首个净值快照日起算
+超额(pp)     = (策略区间收益 − 基准区间收益) × 100
+```
+
+- **滞后一天是防未来函数**，不是保守：当日成交额排名收盘后才知道，用当日池算当日收益
+  等于拿成交额（与当日涨跌强相关）挑赢家。与 `pipeline.py` 的 `bench_codes = universe[dates[day_idx-1]]` 完全一致。
+- **两个池都报**：回测 `PipelineParams.universe_size` 默认 **500**，线上 `paper_pool_top_n`
+  默认 **300**。冻结的 ≈+2.1pp（#68）是相对 500 的，而实盘只买 300 内的票——差异本身是信息。
+- **净值快照断档时逐日累乘**：`paper_equity` 缺某天不会让该天的基准收益消失，只把策略侧
+  变成区间收益；否则会系统性漏掉断档期间的基准波动。
+- 判读（`#70 §6` 冻结，先写死避免事后解释）：**−1pp ~ +5pp** = 与回测一致；
+  **< −1pp** 先查执行价与成交可行性（#67 量化 1.4~2.5pp），不要调策略参数；
+  **> +5pp** 视为短期运气（#68 噪声极差 3.44pp）；**< 21 个交易日不下结论**。
 
 ## 8. 自动交易五段式（目标架构）与现状差距
 

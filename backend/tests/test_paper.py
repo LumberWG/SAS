@@ -453,6 +453,48 @@ class TestSettle:
         assert detail["total_asset"] == pytest.approx(110000, abs=0.01)
         assert detail["return_pct"] == pytest.approx(10.0, abs=0.01)
 
+    def test_settle_records_regime_snapshot(self, engine):
+        """结算顺带落一行择时快照：弱市但没信号的日子也要留痕（#70 §8）。"""
+        import json
+        from datetime import datetime
+
+        eng, db, _ = engine
+        eng.ensure_account()
+        asyncio.run(eng.settle())
+
+        today = datetime.now().strftime("%Y-%m-%d")
+        raw = db.get_state(f"paper_regime_state:{today}")
+        assert raw, "收盘结算必须无条件写一条择时快照"
+        payload = json.loads(raw)
+        assert payload["date"] == today
+        # autouse fixture 关了择时闸门 → 不判弱势，但要注明原因，不能悄悄留个 False
+        assert payload["weak"] is False
+        assert payload["note"] == "择时未启用"
+        assert payload["exposure"] == pytest.approx(0.0)
+        # 档位可能来自 app_state 运行时覆盖（线上就是 0.3），断言与引擎同源而非写死
+        assert payload["weak_exposure"] == pytest.approx(
+            float(eng.settings.paper_weak_exposure)
+        )
+
+    def test_regime_detail_reads_prev_close_and_ma(self, engine, monkeypatch, tmp_path):
+        """择时明细给出前一交易日收盘与均线，供事后复核判定依据。"""
+        import pandas as pd
+
+        eng, _, _ = engine
+        # 前 60 天 100、后 20 天 80 → 前一交易日收盘 80 明确跌破 MA60
+        closes = [100.0] * 60 + [80.0] * 20
+        dates = pd.date_range("2026-01-01", periods=80, freq="D").strftime("%Y-%m-%d")
+        pd.DataFrame({"date": dates, "close": closes}).to_parquet(
+            tmp_path / "idx_sh000001.parquet", index=False
+        )
+        monkeypatch.setattr(eng.settings, "kline_dir", tmp_path, raising=False)
+
+        detail = asyncio.run(eng._index_regime_detail("2026-03-21", 60))
+        assert detail["weak"] is True
+        assert detail["prev_close"] == pytest.approx(80.0)
+        assert detail["prev_ma"] > detail["prev_close"]
+        assert detail["reason"] == ""
+
     def test_account_detail_structure(self, engine):
         """账户详情字段完整。"""
         eng, db, prices = engine
