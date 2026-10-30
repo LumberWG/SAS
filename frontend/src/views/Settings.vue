@@ -273,6 +273,9 @@ onMounted(load)
             <div class="font-num truncate text-[10px] text-content-faint">
               {{ it.key }} · {{ fmtValue(it) }}
             </div>
+            <div v-if="it.note" class="truncate text-[10px] text-warn/80" :title="it.note">
+              {{ it.note }}
+            </div>
           </div>
 
           <!-- 开关 -->

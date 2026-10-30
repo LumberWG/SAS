@@ -2,15 +2,25 @@
 /**
  * 回测中心：参数表单 → 提交回测 → 净值曲线 + 绩效指标 + 交易明细。
  */
-import { onMounted, reactive, ref } from 'vue'
-import { Play, ChevronDown, RotateCcw } from 'lucide-vue-next'
+import { computed, onMounted, reactive, ref } from 'vue'
+import { Play, ChevronDown, RotateCcw, DatabaseZap } from 'lucide-vue-next'
 import VChart from 'vue-echarts'
 import { use } from 'echarts/core'
 import { CanvasRenderer } from 'echarts/renderers'
 import { LineChart } from 'echarts/charts'
 import { GridComponent, TooltipComponent } from 'echarts/components'
 
-import { getBacktestDefaults, runBacktest, type BacktestResult } from '../api'
+import ConfirmDialog from '../components/ConfirmDialog.vue'
+import { useNotifyStore } from '../stores/notify'
+import {
+  getBacktestDefaults,
+  getBacktestPersistMap,
+  persistBacktestRules,
+  runBacktest,
+  type BacktestPersistMap,
+  type BacktestPersistResult,
+  type BacktestResult,
+} from '../api'
 
 use([CanvasRenderer, LineChart, GridComponent, TooltipComponent])
 
@@ -35,6 +45,14 @@ const activeGroup = ref('基础')
 const result = ref<BacktestResult | null>(null)
 const loading = ref(false)
 const error = ref('')
+const notify = useNotifyStore()
+
+// ---- 落盘（回测规则 → 选股/交易实盘默认值）----
+const persistMap = ref<BacktestPersistMap | null>(null)
+const persistResult = ref<BacktestPersistResult | null>(null)
+const persistDetailOpen = ref(false)
+const confirming = ref(false)
+const persisting = ref(false)
 
 interface ParamDef {
   key: string
@@ -124,8 +142,110 @@ const ZERO_OFF = new Set([
   't_size', 't_up_sell', 't_up_buyback', 't_down_add', 't_down_full', 't_rebound_sell',
   't_crash_guard',
 ])
-/** 大整数（金额）用宽一点的输入框 */
-const WIDE_KEYS = new Set(['initial_capital'])
+const allItems = groups.flatMap((g) => g.items)
+
+/** 该回测参数在实盘对应的 Settings 字段（空 = 仅回测生效） */
+function liveTarget(key: string): string {
+  return persistMap.value?.mapping[key] ?? ''
+}
+
+const liveCount = computed(() => allItems.filter((it) => liveTarget(it.key)).length)
+const backtestOnlyCount = computed(() => allItems.length - liveCount.value)
+const changedTotal = computed(() => allItems.reduce((n, it) => n + (isChanged(it) ? 1 : 0), 0))
+
+/** 回测参数的中文标签（落盘结果里用，比裸的 paper_* 字段名好读） */
+function labelOfKey(key: string): string {
+  return allItems.find((it) => it.key === key)?.label ?? key
+}
+
+/** Settings 字段 → 回测参数中文标签 */
+function labelOfSetting(setting: string): string {
+  const hit = allItems.find((it) => liveTarget(it.key) === setting)
+  return hit ? hit.label : setting
+}
+
+/** 落盘会真正改动的项（与实盘当前值比较），确认框里逐条列出 */
+const pendingChanges = computed(() => {
+  const map = persistMap.value
+  if (!map) return [] as { label: string; target: string; old: unknown; next: unknown }[]
+  const out: { label: string; target: string; old: unknown; next: unknown }[] = []
+  for (const it of allItems) {
+    const target = map.mapping[it.key]
+    if (!target || it.type === 'multiselect') continue
+    const next = form[it.key]
+    if (next === null || next === undefined || next === '') continue
+    const old = map.current[target]
+    const differs =
+      it.type === 'bool' ? Boolean(old) !== Boolean(next) : Number(old) !== Number(next)
+    if (differs) out.push({ label: it.label, target, old, next })
+  }
+  return out
+})
+
+function fmtValue(v: unknown): string {
+  if (typeof v === 'boolean') return v ? '开' : '关'
+  if (v === null || v === undefined) return '—'
+  return String(v)
+}
+
+const confirmMessage = computed(
+  () =>
+    `将把当前表单里的回测规则写入配置数据库：${liveCount.value} 项有实盘落点的参数会立即成为「选股 + 模拟盘交易」的新默认值，重启后仍然保留。`
+)
+
+const confirmHint = computed(() => {
+  const ch = pendingChanges.value
+  const detail = ch.length
+    ? `会变更 ${ch.length} 项：${ch
+        .slice(0, 6)
+        .map((c) => `${c.label} ${fmtValue(c.old)}→${fmtValue(c.next)}`)
+        .join('、')}${ch.length > 6 ? ' 等' : ''}。`
+    : '各项与实盘现值一致，落盘只是把它们固化成默认值。'
+  return `${detail}另有 ${backtestOnlyCount.value} 项实盘没有对应实现（板块/调仓周期/分位门槛/分段止盈/时间止损等），将跳过并列出原因。`
+})
+
+/** 落盘提交体：提交表单里的全部显式值（0 也要提交——实盘里 0 常表示「关闭该规则」） */
+function persistPayload(): Record<string, unknown> {
+  const p: Record<string, unknown> = {
+    start_date: form.start_date,
+    end_date: form.end_date,
+  }
+  for (const it of allItems) {
+    if (it.type === 'multiselect') continue
+    const v = form[it.key]
+    if (v === null || v === undefined || v === '') continue
+    p[it.key] = v
+  }
+  return p
+}
+
+function askPersist() {
+  persistResult.value = null
+  confirming.value = true
+}
+
+async function doPersist() {
+  persisting.value = true
+  error.value = ''
+  try {
+    const res = await persistBacktestRules(persistPayload() as any)
+    persistResult.value = res
+    persistDetailOpen.value = res.skipped.length > 0
+    // 落盘后这些值就是新的线上默认值：直接换基线，颜色高亮归零
+    defaults.value = res.defaults as Record<string, any>
+    confirming.value = false
+    notify.push(
+      `已落盘 ${Object.keys(res.applied).length} 项到实盘配置（变更 ${res.changed.length} 项，跳过 ${res.skipped.length} 项）`,
+      'success',
+      6000
+    )
+  } catch (e: unknown) {
+    error.value = e instanceof Error ? e.message : '落盘失败'
+    confirming.value = false
+  } finally {
+    persisting.value = false
+  }
+}
 
 /** 载入线上默认值，并把表单填成具体数字 */
 async function loadDefaults() {
@@ -178,12 +298,19 @@ function groupChangedCount(g: { items: ParamDef[] }): number {
   return g.items.reduce((n, it) => n + (isChanged(it) ? 1 : 0), 0)
 }
 
-/** 展示用的默认值文本（标题 tooltip） */
+/** 展示用的对照值文本（标题 tooltip）：对照的是**线上**当前生效值，不是代码里的默认常量 */
 function defaultHint(it: ParamDef): string {
   const d = defOf(it.key)
-  if (it.type === 'multiselect') return '默认：全市场'
-  if (it.type === 'bool') return `默认：${d ? '开' : '关'}`
-  return `默认：${d}`
+  const base =
+    it.type === 'multiselect'
+      ? '线上：全市场'
+      : it.type === 'bool'
+        ? `线上：${d ? '开' : '关'}`
+        : `线上：${d}${it.unit ? ' ' + it.unit : ''}`
+  const target = liveTarget(it.key)
+  if (target) return `${base} · 落盘后同步到 ${target}`
+  const why = persistMap.value?.skipped[it.key]
+  return `${base} · 仅回测生效${why ? '：' + why : ''}`
 }
 
 function toggleBoard(val: string) {
@@ -203,6 +330,7 @@ function resetDefaults() {
   }
   form.board_prefixes = []
   error.value = ''
+  persistResult.value = null
 }
 
 function buildPayload(): Record<string, unknown> {
@@ -333,7 +461,15 @@ function applyPreset(p: { name: string; params: Record<string, unknown> }) {
   if (hit) activeGroup.value = hit.name
 }
 
-onMounted(loadDefaults)
+onMounted(async () => {
+  await loadDefaults()
+  // 落盘映射只用于提示与按钮，取不到不影响回测本身
+  try {
+    persistMap.value = await getBacktestPersistMap()
+  } catch {
+    persistMap.value = null
+  }
+})
 
 const equityOption = ref({})
 function buildEquityOption(data: BacktestResult) {
@@ -403,20 +539,24 @@ function metricTone(v: number): string {
 
 <template>
   <div class="space-y-5">
-    <!-- 参数表单：默认值全部写成具体数字，改过的按方向着色（大=红 / 小=绿） -->
-    <div class="glass-card p-3">
-      <div class="flex flex-wrap items-center gap-2">
+    <!-- 参数面板：顶部时间段与操作；说明 + 落盘按钮；参数按 tab 分组、卡片式两行布局 -->
+    <div class="glass-card p-4">
+      <div class="flex flex-wrap items-center gap-x-3 gap-y-2">
         <h3 class="text-subheading whitespace-nowrap">回测参数</h3>
-        <label class="flex items-center gap-1 text-[11px] text-content-muted">
-          开始
-          <input v-model="form.start_date" type="date" class="h-7 w-[116px] rounded border border-base-600 bg-base-700 px-1.5 font-num text-[12px] text-content outline-none focus:border-primary" />
-        </label>
-        <label class="flex items-center gap-1 text-[11px] text-content-muted">
-          结束
-          <input v-model="form.end_date" type="date" class="h-7 w-[116px] rounded border border-base-600 bg-base-700 px-1.5 font-num text-[12px] text-content outline-none focus:border-primary" />
-        </label>
-        <span class="hidden text-[11px] text-content-faint lg:inline">红=比默认大 · 绿=比默认小 · 0=不启用</span>
+        <div class="flex flex-wrap items-center gap-2">
+          <label class="flex items-center gap-1 text-[11px] text-content-muted">
+            开始
+            <input v-model="form.start_date" type="date" class="h-7 w-[122px] rounded border border-base-600 bg-base-700 px-1.5 font-num text-[12px] text-content outline-none focus:border-primary" />
+          </label>
+          <label class="flex items-center gap-1 text-[11px] text-content-muted">
+            结束
+            <input v-model="form.end_date" type="date" class="h-7 w-[122px] rounded border border-base-600 bg-base-700 px-1.5 font-num text-[12px] text-content outline-none focus:border-primary" />
+          </label>
+        </div>
         <span class="flex-1"></span>
+        <span v-if="changedTotal" class="rounded-full bg-up/15 px-2 py-0.5 font-num text-[11px] text-up">
+          已改 {{ changedTotal }} 项
+        </span>
         <button
           type="button"
           class="flex items-center gap-1 rounded border border-base-600 bg-base-700 px-2 py-1 text-[11px] text-content-muted transition-colors hover:border-primary/60 hover:text-primary"
@@ -441,14 +581,70 @@ function metricTone(v: number): string {
           {{ loading ? '运行中...' : '开始回测' }}
         </button>
       </div>
+
+      <!-- 说明 + 落盘：默认只影响回测，点按钮才写实盘并成为默认值 -->
+      <div class="mt-3 rounded-lg border border-primary/25 bg-primary/[0.06] px-3 py-2.5">
+        <div class="flex flex-col gap-2 lg:flex-row lg:items-center">
+          <p class="min-w-0 flex-1 text-[11.5px] leading-relaxed text-content-muted">
+            <span class="font-medium text-primary-light">此处参数更改只影响回测功能，不影响交易。</span>
+            点「开始回测」只跑这一次模拟；确认规则有效后，再点右侧按钮把它写入实盘配置。
+          </p>
+          <button
+            type="button"
+            class="flex shrink-0 items-center justify-center gap-1.5 rounded-lg border border-primary/50 bg-primary/10 px-3 py-1.5 text-[12px] font-medium text-primary-light transition-colors hover:bg-primary/20 disabled:cursor-not-allowed disabled:opacity-50"
+            :disabled="persisting || !persistMap"
+            @click="askPersist"
+          >
+            <DatabaseZap class="h-3.5 w-3.5" />
+            {{ persisting ? '保存中...' : '将规则落盘保存到数据库' }}
+          </button>
+        </div>
+        <div class="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-[10.5px] text-content-faint">
+          <span v-if="persistMap">可同步 {{ liveCount }} 项（股票池/仓位/止损止盈/择时/做T） · {{ backtestOnlyCount }} 项仅回测生效</span>
+          <span v-else>落盘映射未加载，按钮暂不可用（不影响回测）</span>
+          <span>落盘 = 写数据库 + 立即生效 + 重启保留 + 成为默认值</span>
+        </div>
+      </div>
+
+      <!-- 落盘结果：改了哪些、哪些跳过（含原因） -->
+      <div v-if="persistResult" class="mt-2 rounded-lg border border-primary/25 bg-primary/[0.04] px-3 py-2">
+        <div class="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px]">
+          <span class="font-medium text-primary-light">已落盘 {{ Object.keys(persistResult.applied).length }} 项</span>
+          <span class="text-content-muted">实际变更 {{ persistResult.changed.length }} 项</span>
+          <span class="text-content-faint">{{ persistResult.skipped.length }} 项仅回测生效</span>
+          <span class="flex-1"></span>
+          <button
+            type="button"
+            class="text-[11px] text-content-muted transition-colors hover:text-primary"
+            @click="persistDetailOpen = !persistDetailOpen"
+          >
+            {{ persistDetailOpen ? '收起明细' : '查看明细' }}
+          </button>
+        </div>
+        <div v-if="persistDetailOpen" class="mt-2 space-y-1.5 border-t border-base-600/40 pt-2">
+          <div v-if="persistResult.changed.length" class="flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-content-muted">
+            <span class="text-content-faint">已变更：</span>
+            <span v-for="c in persistResult.changed" :key="c.setting" class="whitespace-nowrap">
+              {{ labelOfSetting(c.setting) }}
+              <span class="font-num text-content">{{ fmtValue(c.old) }} → {{ fmtValue(c.new) }}</span>
+            </span>
+          </div>
+          <div v-if="persistResult.skipped.length" class="flex flex-wrap gap-x-3 gap-y-1 text-[11px] leading-relaxed text-content-faint">
+            <span>未同步：</span>
+            <span v-for="s in persistResult.skipped" :key="s.key">{{ labelOfKey(s.key) }}（{{ s.reason }}）</span>
+          </div>
+        </div>
+      </div>
+
       <div v-if="defaultsError" class="mt-2 rounded border border-up/40 bg-up/10 px-2 py-1 text-[11px] text-up">
         {{ defaultsError }}（点「重置」重试）
       </div>
       <div v-if="error" class="mt-2 text-[11px] text-up">{{ error }}</div>
       <div v-if="loading" class="mt-2 text-[11px] text-content-muted">回测在后台运行，约需 1~3 分钟，请勿关闭页面</div>
 
-      <div v-show="formOpen" class="mt-2">
-        <div class="mb-1.5 flex flex-wrap items-center gap-1.5">
+      <div v-show="formOpen" class="mt-3">
+        <!-- 预设：一键把心得策略载入表单 -->
+        <div class="flex flex-wrap items-center gap-1.5 rounded-lg border border-base-600/50 bg-base-700/25 px-2.5 py-2">
           <span class="text-[11px] text-content-muted">预设</span>
           <button
             v-for="p in presets"
@@ -459,16 +655,16 @@ function metricTone(v: number): string {
           >
             {{ p.name }}
           </button>
-          <span class="text-[10px] text-content-faint">只改预设列出的项，其余保持默认</span>
+          <span class="text-[10px] text-content-faint">只改预设列出的项，其余保持线上值</span>
         </div>
 
-        <!-- 参数分组（tab）：一次只渲染当前组；每行 2~5 列，输入框只够显示数字 -->
-        <div class="flex flex-wrap items-center gap-0.5 border-b border-base-600/60 pb-1">
+        <!-- 参数分组（tab）：一次只显示当前组，避免九组全铺开 -->
+        <div class="mt-2 flex flex-wrap items-center gap-1 rounded-lg bg-base-800/40 p-1">
           <button
             v-for="g in groups"
             :key="g.name"
             type="button"
-            class="flex items-center gap-1 rounded px-2 py-1 text-[11px] font-medium transition-colors"
+            class="flex items-center gap-1.5 rounded-md px-2.5 py-1 text-[11.5px] font-medium transition-colors"
             :class="
               activeGroup === g.name
                 ? 'bg-primary/15 text-primary-light shadow-[inset_0_0_0_1px_rgba(56,189,248,0.25)]'
@@ -482,51 +678,70 @@ function metricTone(v: number): string {
             </span>
           </button>
         </div>
-        <div v-for="g in groups" v-show="activeGroup === g.name" :key="g.name" class="mt-1.5">
-          <div class="grid grid-cols-2 gap-1 md:grid-cols-3 xl:grid-cols-4 2xl:grid-cols-5">
+
+        <div v-for="g in groups" v-show="activeGroup === g.name" :key="g.name" class="mt-2.5">
+          <div class="mb-2 flex flex-wrap items-baseline gap-x-2 gap-y-1">
+            <span class="text-[12px] font-medium text-content">{{ g.name }}</span>
+            <span class="text-[10.5px] text-content-faint">
+              {{ g.items.length }} 项 · 悬停可看线上值与落盘去向 · 0 = 不启用
+            </span>
+            <span class="flex-1"></span>
+            <span v-if="groupChangedCount(g)" class="text-[10.5px] text-up">已改 {{ groupChangedCount(g) }} 项</span>
+          </div>
+
+          <!-- 卡片式：标签一行、输入框占满一行，标签不再被 60px 输入框挤到截断 -->
+          <div class="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3 2xl:grid-cols-4">
             <template v-for="it in g.items" :key="it.key">
               <label
                 v-if="it.type === 'number'"
-                class="flex items-center justify-between gap-1.5 rounded border border-base-600/40 bg-base-700/30 px-1.5 py-0.5"
-                :title="defaultHint(it) + (it.unit ? ' · ' + it.unit : '')"
+                class="flex flex-col gap-1 rounded-lg border border-base-600/50 bg-base-700/25 px-2.5 py-2 transition-colors hover:border-base-600"
+                :title="defaultHint(it)"
               >
-                <span class="min-w-0 flex-1 truncate text-[11px] text-content-muted">{{ it.label }}</span>
+                <span class="flex items-baseline gap-1.5">
+                  <span class="min-w-0 flex-1 truncate text-[11px] leading-tight text-content-muted">{{ it.label }}</span>
+                  <span v-if="it.unit" class="shrink-0 text-[10px] text-content-faint">{{ it.unit }}</span>
+                </span>
                 <input
                   v-model.number="form[it.key]"
                   type="number"
                   :min="it.min"
                   :max="it.max"
                   :step="it.step"
-                  class="h-6 shrink-0 rounded border bg-base-800/60 px-1 text-right font-num text-[12px] outline-none focus:border-primary"
-                  :class="[WIDE_KEYS.has(it.key) ? 'w-[84px]' : 'w-[60px]', inputTone(it)]"
+                  class="h-7 w-full rounded border bg-base-800/60 px-2 text-right font-num text-[12px] text-content outline-none focus:border-primary"
+                  :class="inputTone(it)"
                 />
               </label>
               <label
                 v-else-if="it.type === 'bool'"
-                class="flex items-center justify-between gap-1.5 rounded border border-base-600/40 bg-base-700/30 px-1.5 py-1"
+                class="flex items-center justify-between gap-2 rounded-lg border border-base-600/50 bg-base-700/25 px-2.5 py-2 transition-colors hover:border-base-600"
                 :title="defaultHint(it)"
               >
                 <span
                   class="min-w-0 flex-1 truncate text-[11px]"
                   :class="isChanged(it) ? diffTone(it) : 'text-content-muted'"
                 >{{ it.label }}</span>
-                <input v-model="form[it.key]" type="checkbox" class="h-3.5 w-3.5 shrink-0 accent-[#2563EB]" />
+                <input v-model="form[it.key]" type="checkbox" class="h-4 w-4 shrink-0 accent-[#2563EB]" />
               </label>
-              <div v-else-if="it.type === 'multiselect'" class="col-span-full flex flex-wrap items-center gap-1">
-                <span class="text-[11px] text-content-muted">{{ it.label }}</span>
-                <button
-                  v-for="[val, lab] in it.options"
-                  :key="val"
-                  type="button"
-                  @click="toggleBoard(val)"
-                  class="rounded border px-1.5 py-0.5 text-[11px] transition-colors"
-                  :class="
-                    form[it.key].includes(val)
-                      ? 'border-primary/60 bg-primary/20 text-primary'
-                      : 'border-base-600 bg-base-700 text-content-muted'
-                  "
-                >{{ lab }}</button>
-                <span v-if="!form[it.key].length" class="text-[10px] text-content-faint">不选 = 全市场</span>
+              <div
+                v-else-if="it.type === 'multiselect'"
+                class="col-span-full rounded-lg border border-base-600/50 bg-base-700/25 px-2.5 py-2"
+              >
+                <div class="flex flex-wrap items-center gap-1.5">
+                  <span class="text-[11px] text-content-muted">{{ it.label }}</span>
+                  <button
+                    v-for="[val, lab] in it.options"
+                    :key="val"
+                    type="button"
+                    @click="toggleBoard(val)"
+                    class="rounded border px-1.5 py-0.5 text-[11px] transition-colors"
+                    :class="
+                      form[it.key].includes(val)
+                        ? 'border-primary/60 bg-primary/20 text-primary'
+                        : 'border-base-600 bg-base-700 text-content-muted'
+                    "
+                  >{{ lab }}</button>
+                  <span v-if="!form[it.key].length" class="text-[10px] text-content-faint">不选 = 全市场</span>
+                </div>
               </div>
             </template>
           </div>
@@ -721,5 +936,17 @@ function metricTone(v: number): string {
       <p class="text-[13px]">设置参数后点击「开始回测」</p>
       <p class="text-[11px]">缺省股票池为实时成交额前 N 只，K线优先使用本地缓存</p>
     </div>
+
+    <!-- 落盘确认：改成实盘默认值是不可逆的（影响后续交易），必须先让用户看到会改哪几项 -->
+    <ConfirmDialog
+      :open="confirming"
+      title="将回测规则落盘到数据库？"
+      :message="confirmMessage"
+      :hint="confirmHint"
+      confirm-text="确认落盘"
+      :loading="persisting"
+      @confirm="doPersist"
+      @cancel="confirming = false"
+    />
   </div>
 </template>

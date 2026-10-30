@@ -336,6 +336,21 @@ export interface BacktestRequest {
   rotation_enabled?: boolean
   rotation_gap?: number
   rotation_min_score?: number
+  // 五段式③⑤：队列容量与切入点
+  queue_top_m?: number
+  entry_max_chase?: number
+  entry_pullback?: number
+  entry_window_minutes?: number
+  // 做T引擎
+  t_active?: boolean
+  t_size?: number
+  t_up_sell?: number
+  t_up_buyback?: number
+  t_down_add?: number
+  t_down_full?: number
+  t_rebound_sell?: number
+  t_limit_sell_half?: boolean
+  t_crash_guard?: number
 }
 
 export interface BacktestTrade {
@@ -529,6 +544,40 @@ export function setQueueFilter(payload: {
  */
 export function getBacktestDefaults(): Promise<Record<string, number | boolean | string[]>> {
   return http.get('/backtest/defaults').then((r) => r.data.defaults)
+}
+
+/**
+ * 回测参数 → 实盘配置的落盘映射。
+ *
+ * `mapping` 是能同步的项（回测参数 → Settings 字段），`skipped` 是实盘没有对应实现
+ * 的项及原因，`current` 是这些字段当前生效值（前端用来算「落盘会改哪几项」）。
+ */
+export interface BacktestPersistMap {
+  mapping: Record<string, string>
+  skipped: Record<string, string>
+  current: Record<string, number | boolean | string>
+}
+
+export function getBacktestPersistMap(): Promise<BacktestPersistMap> {
+  return http.get('/backtest/persist-map').then((r) => r.data)
+}
+
+/** 落盘结果：写了哪些项、其中哪些真的变了、哪些跳过 */
+export interface BacktestPersistResult {
+  applied: Record<string, unknown>
+  changed: { setting: string; old: unknown; new: unknown }[]
+  skipped: { key: string; reason: string }[]
+  /** 落盘后的默认值（前端直接用作新基线，颜色高亮归零） */
+  defaults: Record<string, number | boolean | string[]>
+}
+
+/**
+ * 将回测参数落盘为**实盘默认值**：写配置覆盖层 + 立即生效，重启保留。
+ *
+ * 只同步有实盘落点的子集（见 `getBacktestPersistMap`），其余项由后端返回原因。
+ */
+export function persistBacktestRules(req: BacktestRequest): Promise<BacktestPersistResult> {
+  return http.post('/backtest/persist', req).then((r) => r.data)
 }
 
 // ==================== 监控 / 异动 ====================
