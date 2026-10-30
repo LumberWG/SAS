@@ -340,14 +340,16 @@ paper_position_lots(code, shares, cost_price, buy_date, tag)
 ### 7.2 回测侧新增的日内建模（均为可选，默认关闭=线上行为）
 | 参数 | 默认 | 含义 |
 |---|---|---|
-| `intraday_minutes` | False | True 时对持仓日拉真实 5 分钟线（`data/minute.py`），按时间顺序判定止损/止盈/分段止盈首次触发，成交价取分钟价；False 时用日K 边界序列 `open→low→high→close`（low 在 high 前，天然实现「止损优先」） |
+| `intraday_minutes` | False | True 时对持仓日读真实 5 分钟线（`data/minute.py` → `data/minute5_fsdb`，全市场 5563 只、2025-01-02 起、纯本地不联网，按 code 缓存「日期→切片下标 + close 数组」，首次 ~5ms、之后 ~0.02ms/次），按时间顺序判定止损/止盈/分段止盈首次触发，成交价取分钟价；False 时用日K 边界序列 `open→low→high→close`（low 在 high 前，天然实现「止损优先」，但成交价直接取止损价，**系统性偏乐观**，见 §7.3） |
 | `slippage` | 0.0 | 单边滑点：买价 ×(1+s)、卖价 ×(1−s)，涨跌停判定仍用原始价 |
 | `t_active` 及 `t_*` | None | 做T引擎回测：涨停卖半（卖出后当日不再做T）/ 上涨倒T（成交价 = 开盘价×(1+t_up_sell)，买回按**次日开盘**）/ 下跌分级加仓（成交价 = 开盘价×(1−t_down_add)，预算 = 现金×t_down_add；触发满仓档时预算 = 现金×0.95）/ 反弹减仓（按收盘价，只卖之前交易日加的仓） |
 | `partial_tp_at / partial_tp_ratio` | None / 0.5 | 分段止盈：首次达到该涨幅卖出一部分 |
 | `queue_top_m` | None | ③ 队列容量：每日买单笔数上限（按评分截断） |
 | `entry_max_chase` | None | ⑤ 不追高：次日开盘相对信号日收盘的涨幅上限 |
 | `entry_pullback` | None | ⑤ 回踩：要求次日开盘 ≤ 信号日收盘×(1−x)，即低开才买 |
-| `entry_window_minutes` | None | ⑤ **分钟级切入点**：需开 `intraday_minutes`；买入日开盘后前 N 分钟的 5 分钟收盘价里等回踩，以首次触及价成交，等不到则当天不买。只读本地 `data/minute5` 缓存（保证可复现） |
+| `entry_window_minutes` | None | ⑤ **分钟级切入点**：需开 `intraday_minutes`；买入日开盘后前 N 分钟的 5 分钟收盘价里等回踩，以首次触及价成交，等不到则当天不买。只读本地 `data/minute5_fsdb` 缓存（保证可复现） |
+| `entry_confirm_minutes` | None | ⑤ **分钟级强势确认**（`#54` 的反向假设）：需开 `intraday_minutes`；只观察开盘后前 N 分钟（N=30 → 前 6 根 5m），满足 `entry_confirm_mode` 才以**窗口末收盘价**成交，否则当天不买。无分钟数据的票直接放弃（不回落开盘价）。**默认关闭**：2026-10-30 按验收协议证伪（记录 #57） |
+| `entry_confirm_mode` | None | 确认口径：`hold_open`=窗口内 5m 收盘从未跌破当日开盘价；`above_avg`=窗口末收盘 ≥ 当日累计成交均价（Σamount/Σvolume，真 VWAP）；`both`=两者同时 |
 | `breakeven_trigger / trail_pct / trail_arm` | None | 保本止损 / 移动止损（回测侧） |
 
 `_intraday_first_trigger(series, stop, tp, partial)` 返回首个触发的 `(type, price)`，
@@ -362,6 +364,13 @@ paper_position_lots(code, shares, cost_price, buy_date, tag)
   （满分票扎堆的日子尤甚），对照时需注意。
 - **止损止盈触发**：回测用日线 `low/high`（或分钟线）判定，实盘每 5 秒用最新价判定，
   盘中被扫的止损在两端不完全等价。
+- **日K 边界模式的止损价偏乐观**：不开 `intraday_minutes` 时，止损按「触发价=止损价」成交，
+  而真实分钟序列里穿越止损价的那根 5 分钟线收盘常更低。2026-10-30 A~D 四窗口实测（记录 #56）：
+  开 `intraday_minutes` 后平均超额 5.05% → 4.28%、3/4 窗口更差、回撤普遍被低估 1~5pp，
+  即**历史日K 边界口径的结果系统性偏乐观**。对比历史记录时需注意这一点。
+- **分钟数据覆盖**：`minute5_fsdb` 覆盖 5563 只、2025-01-02 起；日K 有而分钟缺的 171 只中，
+  69 只在 2026 年仍有日K（北交所 920xxx、B 股 200xxx 等），这部分票在 `intraday_minutes=True` 时
+  会静默回落到日K 边界。2024 及更早窗口无分钟数据，该开关等于无效（不会报错）。
 - **指数 K 线新鲜度**：`regime_ma` 依赖 `idx_sh000001.parquet`，该文件由开机预热与 16:00 日更刷新；
   滞后时会静默退化为「不弱」档。
 

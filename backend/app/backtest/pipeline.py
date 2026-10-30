@@ -35,6 +35,7 @@ from app.analysis.scoring import score_technical
 from app.backtest.review import analyze
 from app.config import get_settings
 from app.data.service import get_stock_pool
+from app.data.minute import get_minute_day_bars  # E45：分钟级强势确认（需当日 OHLCV）
 from app.data.minute import get_minute_prices  # E-intraday：真实分钟线（可选，失败降级）
 from app.indicators import add_all_indicators
 from app.screener.scanner import rank_hits
@@ -169,6 +170,16 @@ class PipelineParams:
     #: ``entry_pullback>0`` 时要求**窗口内曾回踩**到 ``信号价×(1-pullback)``，以首次触及价成交；
     #: 未触及则放弃（当天不买）。线上对应「tick 累积最低价、触及回踩线后放开买入」。
     entry_window_minutes: int | None = None
+    #: ⑤ 分钟级**强势确认**（与 ``entry_window_minutes`` 的「等回踩」方向相反）：
+    #: 需同时开 ``intraday_minutes``。开盘后只观察前 N 分钟，满足 ``entry_confirm_mode``
+    #: 的条件才以**观察窗最后一根的收盘价**成交，不满足则当天不买。
+    #: 记录 #54 已证「等回踩」是逆向选择（等到回踩的票次日继续走弱），这里测相反假设：
+    #: 买的是「开盘后 N 分钟站住了」的强势票，代价是成交价从开盘价挪到 N 分钟后。
+    entry_confirm_minutes: int | None = None
+    #: 强势确认口径：``"hold_open"`` = 窗口内 5 分钟收盘**从未跌破当日开盘价**；
+    #: ``"above_avg"`` = 窗口末收盘 **≥ 当日累计成交均价**（分时均价，真 VWAP）；
+    #: ``"both"`` = 两条同时满足。``None`` = 不启用。
+    entry_confirm_mode: str | None = None
 
 
 def calc_fee(side: str, amount: float) -> float:
@@ -860,10 +871,36 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
             # E2：高开太多不追（次日开盘涨幅上限），缺席即沿用线上「照价买入」
             if params.max_open_gain is not None and pc and px / pc - 1 > params.max_open_gain:
                 continue
-            # ⑤ 切入点：日K 粒度（不追高 + 回踩）或分钟级窗口（等回踩、以触及价成交）
+            # ⑤ 切入点：日K 粒度（不追高 + 回踩）/ 分钟级等回踩 / 分钟级强势确认
             fill_px = px
             minute_window = int(params.entry_window_minutes or 0)
-            if params.intraday_minutes and minute_window > 0 and pc:
+            confirm_window = int(params.entry_confirm_minutes or 0)
+            if (params.intraday_minutes and confirm_window > 0
+                    and params.entry_confirm_mode):
+                # E45：确认强势才买。观察窗内条件不成立 → 当天不买（不追、不降级）。
+                bars = get_minute_day_bars(code, date)
+                if not bars:
+                    continue              # 无分钟数据时不猜，直接放弃（保证可复现）
+                k = max(1, confirm_window // 5)
+                cls = bars["close"][:k]
+                if not cls:
+                    continue
+                mode = str(params.entry_confirm_mode)
+                ok = True
+                if mode in ("hold_open", "both"):
+                    day_open = float(bars["open"][0]) if bars["open"] else px
+                    ok = all(c >= day_open for c in cls)      # 盘中从未破开盘价
+                if ok and mode in ("above_avg", "both"):
+                    cum_v = sum(bars["volume"][:k])
+                    cum_a = sum(bars["amount"][:k])
+                    ok = cum_v > 0 and cls[-1] >= cum_a / cum_v   # 站上分时均价
+                if not ok:
+                    continue              # 窗口内没站住，当天不买
+                fill_px = float(cls[-1])  # 以观察窗最后一根的收盘价成交
+                if (params.entry_max_chase is not None and pc
+                        and fill_px / pc - 1 > params.entry_max_chase):
+                    continue
+            elif params.intraday_minutes and minute_window > 0 and pc:
                 bars = get_minute_prices(code, date, "5", local_only=True)
                 if bars:
                     target = pc * (1 - float(params.entry_pullback or 0.0))
@@ -1172,6 +1209,8 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
             "entry_max_chase": params.entry_max_chase,
             "entry_pullback": params.entry_pullback,
             "entry_window_minutes": params.entry_window_minutes,
+            "entry_confirm_minutes": params.entry_confirm_minutes,
+            "entry_confirm_mode": params.entry_confirm_mode,
             "max_gain_5d": params.max_gain_5d,
             "min_volume_ratio": params.min_volume_ratio,
             "min_turnover_rate": params.min_turnover_rate,

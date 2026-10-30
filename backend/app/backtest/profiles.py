@@ -368,9 +368,25 @@ PROFILES: dict[str, dict] = {
     "wk_s30": {"rebalance_days": 5, "slippage": 0.003},
     "wk10_s30": {"rebalance_days": 10, "slippage": 0.003},
     # ---- E-intraday：真实 5 分钟线精确止损/止盈（对照 default） ----
-    # 开启后对持仓日按需拉取历史 5 分钟线，按时间顺序检测首次触发，成交价取分钟价。
-    # 数据源限频，回测会变慢；default 走日K 边界（low/high 已含盘中极值，等价可对照）。
+    # 开启后对持仓日读本地 data/minute5_fsdb（全市场 5563 只，2025-01-02 起，
+    # 纯本地不联网 → 同一参数结果可复现），按时间顺序检测首次触发，成交价取分钟价。
+    # default 走日K 边界（low/high 已含盘中极值，但成交价直接取止损价，偏乐观）。
     "intraday5": {"intraday_minutes": True},
+    # ---- E45：分钟级「确认强势」买入（与 #54 的「等回踩」方向相反） ----
+    # 观察开盘后 30 分钟（前 6 根 5m），站住了才以窗口末价成交，否则当天不买。
+    # 必须与 intraday5 对照：止损口径一致，只差入场规则。
+    "cf30": {"intraday_minutes": True, "entry_confirm_minutes": 30,
+             "entry_confirm_mode": "hold_open"},
+    "cfv30": {"intraday_minutes": True, "entry_confirm_minutes": 30,
+              "entry_confirm_mode": "above_avg"},
+    "cfb30": {"intraday_minutes": True, "entry_confirm_minutes": 30,
+              "entry_confirm_mode": "both"},
+    # 验收协议要求报两档摩擦：同规则 + 0.3% 单边滑点（记录 #29 的生死线）
+    "intraday5_s30": {"intraday_minutes": True, "slippage": 0.003},
+    "cf30_s30": {"intraday_minutes": True, "entry_confirm_minutes": 30,
+                 "entry_confirm_mode": "hold_open", "slippage": 0.003},
+    "cfv30_s30": {"intraday_minutes": True, "entry_confirm_minutes": 30,
+                  "entry_confirm_mode": "above_avg", "slippage": 0.003},
 }
 
 

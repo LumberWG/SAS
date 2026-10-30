@@ -11,7 +11,7 @@ $env:PYTHONUTF8 = "1"
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
 & ".\.venv\Scripts\python.exe" "scripts\preload_minutes_parallel.py" `
-    --proxy --shards 4 --sleep 2.5 --stall-timeout 5 --max-restarts 50
+    --proxy --shards 3 --sleep 6 --stall-timeout 5 --max-restarts 50
 
 Write-Host ""
 Write-Host "Preloader exited. Press Enter to close."

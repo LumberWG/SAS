@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import os
 from functools import lru_cache
 from pathlib import Path
 
@@ -12,6 +13,11 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # 项目根目录（backend/ 的上一级）
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
+
+# 数据根目录：程序运行数据（K线缓存 / SQLite），跟随项目放在 E 盘。
+# 注意：free-stockdb 的 26GB 原始历史数据另在 D:\Backup\SAS\fsdb，与本目录无关。
+# 可用环境变量 SAS_DATA_DIR 覆盖。
+DATA_DIR = Path(os.getenv("SAS_DATA_DIR", r"E:\Study\SAS\data"))
 
 
 class Settings(BaseSettings):
@@ -27,9 +33,9 @@ class Settings(BaseSettings):
 
     # ---------- 存储路径 ----------
     # K线 Parquet 缓存目录（按股票代码一个文件，增量追加）
-    kline_dir: Path = BASE_DIR / "data" / "klines"
+    kline_dir: Path = DATA_DIR / "klines"
     # SQLite 数据库文件（自选股 / 信号 / 回测记录，个人使用完全够用）
-    db_path: Path = BASE_DIR / "data" / "sas.db"
+    db_path: Path = DATA_DIR / "sas.db"
 
     # ---------- 数据源 / 扫描 ----------
     # 全市场扫描并发上限。akshare 背后的东方财富接口对并发较敏感，

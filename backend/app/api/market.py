@@ -272,17 +272,28 @@ async def stock_intraday(code: str) -> dict:
     主源东财逐笔成交聚合，失败降级腾讯分时；非交易时段返回最近交易日数据。
     """
     code = code.zfill(6)
-    source = get_data_source()
+
+    # 本地 1 分钟数据优先：免联网、毫秒级，且不为数据源限频所困
+    df = None
     try:
-        # 限时拉取：数据源故障时最多 15s 返回 503，避免前端长时间挂起
-        df = await asyncio.wait_for(
-            asyncio.to_thread(source.get_intraday, code), timeout=15
-        )
-    except asyncio.TimeoutError:
-        raise HTTPException(status_code=503, detail="分时数据源暂时不可用（超时）") from None
-    except Exception as exc:  # noqa: BLE001
-        logger.exception("获取分时失败 code=%s", code)
-        raise HTTPException(status_code=502, detail=f"数据源异常: {exc}") from exc
+        from app.data.minute import get_intraday_local
+
+        df = await asyncio.to_thread(get_intraday_local, code)
+    except Exception as exc:  # noqa: BLE001 - 本地读失败不影响联网降级
+        logger.warning("本地分时读取失败 code=%s: %s", code, exc)
+
+    if df is None or df.empty:
+        source = get_data_source()
+        try:
+            # 限时拉取：数据源故障时最多 15s 返回 503，避免前端长时间挂起
+            df = await asyncio.wait_for(
+                asyncio.to_thread(source.get_intraday, code), timeout=15
+            )
+        except asyncio.TimeoutError:
+            raise HTTPException(status_code=503, detail="分时数据源暂时不可用（超时）") from None
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("获取分时失败 code=%s", code)
+            raise HTTPException(status_code=502, detail=f"数据源异常: {exc}") from exc
 
     if df is None or df.empty:
         raise HTTPException(status_code=404, detail=f"股票 {code} 暂无分时数据")

@@ -51,13 +51,18 @@ def _trading_dates() -> list[str]:
     return [str(d)[:10] for d in idx["date"]]
 
 
-def _segments(dates: list[str], span: int, draws: int, seed: int) -> list[tuple[str, str]]:
+def _segments(
+    dates: list[str], span: int, draws: int, seed: int, min_start: str = MIN_START
+) -> list[tuple[str, str]]:
     """随机抽 ``draws`` 段、**两两不重叠**的区间（起点加 span 个交易日）。
 
     实现：把可用起点打乱后贪心接受，命中「与已选区间不重叠」才收。
     区间不足时返回能凑出的最大数量（调用方需报告实际段数）。
+
+    ``min_start`` 用于「依赖分钟线」的方案：分钟数据只有 2025-01-02 起，
+    更早的段会整段没有 5 分钟数据，强势确认类规则等于全程不买，配对失真。
     """
-    starts = [i for i in range(len(dates) - span) if dates[i] >= MIN_START]
+    starts = [i for i in range(len(dates) - span) if dates[i] >= min_start]
     if not starts:
         return []
     rng = random.Random(seed)
@@ -173,6 +178,10 @@ def main() -> None:
     parser.add_argument("--profiles", default="default,rev_inv,pct10", help="逗号分隔的方案名")
     parser.add_argument("--baseline", default="default", help="配对比较的基准方案")
     parser.add_argument("--seed", type=int, default=20261028, help="抽样种子（冻结，便于复现）")
+    parser.add_argument(
+        "--min-start", default=MIN_START,
+        help=f"段起点下限（默认 {MIN_START}）；依赖分钟线的方案要传 2025-01-02",
+    )
     parser.add_argument("--jobs", type=int, default=4, help="并行段数")
     parser.add_argument("--tag", default="", help="结果文件名后缀")
     args = parser.parse_args()
@@ -185,7 +194,7 @@ def main() -> None:
         raise SystemExit(f"基准方案 {args.baseline} 必须在 --profiles 里")
 
     dates = _trading_dates()
-    segs = _segments(dates, args.span, args.draws, args.seed)
+    segs = _segments(dates, args.span, args.draws, args.seed, args.min_start)
     if not segs:
         raise SystemExit("可用区间不足，无法抽样（检查 K 线覆盖范围）")
     print(
