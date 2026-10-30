@@ -386,7 +386,7 @@ paper_position_lots(code, shares, cost_price, buy_date, tag)
   回测池子不按市值剔除。所以线上开着 100 亿阈值时，实盘的可选集合比回测**窄**，
   两边的超额不能直接对读——对比时应把回测限制在「当日市值 ≤ 阈值」的子集，或临时关掉开关。
 - **评分模型**：`compute_factors` 在选股建议与回测中复用同一套权重与阈值，外部 `weights` 仅做参数实验，自动归一化回 100 分制。
-- **止损口径**：回测止损用 `max(8%, 2×ATR%)` 建仓时定死，与 `_stop_distance` 一致。
+- **止损口径**：回测止损用 `max(stop_loss, N×ATR%)` 建仓时定死，与实盘 `_stop_distance`（`max(paper_stop_loss, N×ATR%)`）一致；两侧默认都是 8%，且都能改（回测走 `stop_loss`，实盘走 `paper_stop_loss` / 落盘）。
 
 ### 7.2 回测侧新增的日内建模（均为可选，默认关闭=线上行为）
 | 参数 | 默认 | 含义 |
