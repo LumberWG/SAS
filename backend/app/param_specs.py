@@ -31,6 +31,11 @@ RUNTIME_KEYS: frozenset[str] = frozenset({
     "paper_exclude_large_cap",
     "paper_large_cap_yi",
     "paper_trade_mode",
+    # 弱市买入闸门：一天之内可能要多试几次（关掉看是否恢复买入/卖出），
+    # 改 .env 重启代价太高，且它是「今天是否开仓」的唯一决定项。
+    "paper_regime_weak_pause",
+    # 弱市保留仓位：属于风险偏好档位，盘中想从「全暂停」切到「留三成」要能立刻生效
+    "paper_weak_exposure",
 })
 
 #: 设置页布局：**分组（左侧导航）→ 子分组（组内小节）→ 参数键**。
@@ -191,7 +196,11 @@ _LAYOUT: tuple[tuple[str, str, tuple[tuple[str, str, tuple[str, ...]], ...]], ..
                 ),
             ),
             ("做T 保护", "涨停卖半与做T 熔断", ("paper_t_limit_sell_half", "paper_t_crash_guard")),
-            ("大盘择时", "指数在均线下方时收缩买入", ("paper_regime_ma", "paper_regime_weak_pause")),
+            (
+                "大盘择时",
+                "指数在均线下方时收缩买入",
+                ("paper_regime_ma", "paper_regime_weak_pause", "paper_weak_exposure"),
+            ),
         ),
     ),
     (
@@ -324,6 +333,8 @@ _DEPENDS_ON: dict[str, str] = {
     "paper_rotation_max_per_day": "paper_rotation_enabled",
     "paper_backlog_max": "paper_backlog_enabled",
     "paper_large_cap_yi": "paper_exclude_large_cap",
+    # 弱市保留仓位只在「弱市暂停买入」开启时有意义（关掉闸门就谈不上弱市档位）
+    "paper_weak_exposure": "paper_regime_weak_pause",
     "auto_watch_top_n": "auto_watch_enabled",
     "scheduler_timezone": "scheduler_enabled",
     # 自动交易关掉 = 不产生委托，撮合方式（tick / 批量）与收盘自动下单都无从谈起
@@ -354,7 +365,12 @@ _NON_NEGATIVE: frozenset[str] = frozenset({
     "trade_fee_commission_min",
     "trade_fee_stamp_rate",
     "trade_fee_transfer_rate",
+    # 弱市保留仓位：0 是合法档位（=全暂停买入），所以不能进 _MIN_EXCLUSIVE
+    "paper_weak_exposure",
 })
+
+#: 必须 ≤1 的比例项（>1 等于加杠杆，属于误操作）
+_MAX_ONE: frozenset[str] = frozenset({"paper_weak_exposure"})
 
 #: 跨字段约束：单键下限表达不了「A 必须大于 B」，同批提交时合并校验
 _CROSS_RULES: tuple[tuple[tuple[str, str], str], ...] = (
@@ -385,7 +401,7 @@ _SHORT_LABELS: dict[str, str] = {
     "scan_concurrency": "扫描并发数",
     "fetch_retries": "抓取重试次数",
     "kline_warmup_concurrency": "预热并发数",
-    "kline_warmup_top_n": "预热股票数",
+    "kline_warmup_top_n": "收盘预热只数",
     "request_timeout": "请求超时",
     "snapshot_ttl": "快照缓存时长",
     "scan_wait_timeout": "扫描等待上限",
@@ -446,6 +462,7 @@ _SHORT_LABELS: dict[str, str] = {
     # ---- 大盘择时 ----
     "paper_regime_ma": "择时均线",
     "paper_regime_weak_pause": "弱市暂停买入",
+    "paper_weak_exposure": "弱市保留仓位",
     # ---- 做T ----
     "paper_t_active": "做T开关",
     "paper_t_size": "做T仓位比例",
@@ -642,6 +659,8 @@ def update_settings(changes: dict[str, Any]) -> dict[str, Any]:
             raise ValueError(f"{key} 需大于 {floor}")
         if key in _NON_NEGATIVE and isinstance(value, (int, float)) and value < 0:
             raise ValueError(f"{key} 不能为负")
+        if key in _MAX_ONE and isinstance(value, (int, float)) and value > 1:
+            raise ValueError(f"{key} 需 ≤ 1（比例，0 表示弱市全暂停买入）")
         pending[key] = value
 
     # 第二阶段：跨字段校验（用「现值 + 本批新值」合并后判断）

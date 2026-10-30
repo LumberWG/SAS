@@ -168,6 +168,13 @@ class PaperEngine:
 
     def __init__(self) -> None:
         self.settings = get_settings()
+        # 大盘择时闸门的当日状态：让 /api/paper/live 能直接回答「今天为什么没买」，
+        # 不用再翻 data/logs 里的「大盘弱势」行（2026-10-30 全天 1999 条，就是从那翻出来的）。
+        self._regime_day: str = ""
+        self._regime_paused: int = 0
+        #: (日期, 是否弱市)：判定只依赖**前一交易日**收盘，同一天内结果不变，
+        #: 缓存后 tick 不必每 5 秒读一次指数 parquet。
+        self._weak_cache: tuple[str, bool] = ("", False)
 
     # ------------------------------------------------------------------
     # 账户与行情
@@ -386,11 +393,22 @@ class PaperEngine:
     async def _index_is_weak(self, today: str) -> bool:
         """大盘择时：上证指数前一交易日收盘 < MA(N) 即判弱势（与回测 regime 同口径，无未来函数）。
 
+        判定只用到**前一交易日**收盘与截至前日的均线，同一交易日内结果恒定，
+        因此按自然日缓存：tick 每 5 秒一次，没必要每次都读 8MB 的指数 parquet。
+
         指数文件 ``idx_sh000001.parquet`` 缺失时退化为「不暂停」（避免数据源抖动直接停交易）。
         """
         n = int(getattr(self.settings, "paper_regime_ma", 0) or 0)
         if n <= 0:
             return False
+        if self._weak_cache[0] == today:
+            return self._weak_cache[1]
+        weak = await self._index_is_weak_uncached(today, n)
+        self._weak_cache = (today, weak)
+        return weak
+
+    async def _index_is_weak_uncached(self, today: str, n: int) -> bool:
+        """``_index_is_weak`` 的实际计算（带 IO，按日缓存后一天只跑一次）。"""
         try:
             idx_path = self.settings.kline_dir / "idx_sh000001.parquet"
             if not idx_path.exists():
@@ -412,6 +430,24 @@ class PaperEngine:
         except Exception as exc:  # noqa: BLE001
             logger.debug("大盘择时判断失败: %s", exc)
             return False
+
+    def regime_state(self) -> dict:
+        """大盘择时闸门的当日状态（供 ``GET /api/paper/live`` 展示）。
+
+        ``weak`` 为 ``None`` 表示今天还没跑过判定（非交易时段/尚未 tick）。
+        """
+        today = datetime.now().strftime("%Y-%m-%d")
+        n = int(getattr(self.settings, "paper_regime_ma", 0) or 0)
+        cached = self._weak_cache[0] == today
+        return {
+            "enabled": bool(getattr(self.settings, "paper_regime_weak_pause", False)) and n > 0,
+            "ma": n,
+            "weak": (bool(self._weak_cache[1]) if cached else None),
+            "paused_count": (self._regime_paused if self._regime_day == today else 0),
+            # 弱市保留仓位比例：0=全暂停买入；>0=只压总仓位上限（页面按此分流文案）
+            "weak_exposure": float(getattr(self.settings, "paper_weak_exposure", 0.0) or 0.0),
+            "day": today,
+        }
 
     # ------------------------------------------------------------------
     # 费用计算
@@ -498,8 +534,34 @@ class PaperEngine:
             and int(self.settings.paper_regime_ma) > 0
             and await self._index_is_weak(today)
         )
+        #: 弱市保留仓位比例（0=全暂停；>0=不暂停买入，只把总仓位上限压到该比例）。
+        #: 回测 #59/#60：0.3~0.5 在急跌月小亏、换震荡/反弹时的收益，代价是涨市初期踏空。
+        weak_exposure = float(getattr(self.settings, "paper_weak_exposure", 0.0) or 0.0)
+        weak_pause_all = market_weak and weak_exposure <= 0
         if market_weak:
-            logger.info("大盘弱势（指数在 MA 下），暂停自动买入/轮动，仅执行卖出")
+            if self._regime_day != today:
+                self._regime_day = today
+                self._regime_paused = 0
+            self._regime_paused += 1
+            # 每 5 秒一条会把日志刷满（2026-10-30 全天 1999 条），只在首次与每 60 次留痕；
+            # 该计数同时经 /api/paper/live 的 regime 字段对外可见。
+            if self._regime_paused == 1 or self._regime_paused % 60 == 0:
+                # 每 60 次（约 5 分钟）把当日计数落库：内存计数重启即丢，而
+                # 「本周为什么没交易」必须能跨重启回答（scripts/weekly_review.py 读这个键）。
+                try:
+                    db.set_state(f"paper_regime_paused:{today}", str(self._regime_paused))
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("弱市计数落库失败: %s", exc)
+                if weak_pause_all:
+                    logger.info(
+                        "大盘弱势（指数在 MA 下），暂停自动买入/轮动，仅执行卖出（今日第 %d 次拦截）",
+                        self._regime_paused,
+                    )
+                else:
+                    logger.info(
+                        "大盘弱势（指数在 MA 下），总仓位压到 %.0f%%（今日第 %d 次触发）",
+                        weak_exposure * 100, self._regime_paused,
+                    )
 
         # ---- 轮动替换：满仓时用显著更高分的新票换掉最弱持仓 ----
         # 触发条件（全部满足）：开关开启 + 持仓已满 + 存在未持仓的买入候选 +
@@ -507,7 +569,7 @@ class PaperEngine:
         #   最弱持仓非当日买入（T+1）+ 当日轮动次数未达上限。
         if (
             self.settings.paper_rotation_enabled
-            and not market_weak
+            and not weak_pause_all
             and len(positions) >= self.settings.paper_max_positions
         ):
             fresh = [r for r in buy_candidates if r.code not in positions]
@@ -568,13 +630,18 @@ class PaperEngine:
         full_score = self.settings.paper_full_score
         half_score = self.settings.paper_half_score
         # 现有持仓市值 = 总资产 - 现金；总仓位上限扣掉已有仓位后才是本轮可投预算
-        exposure_cap = total_asset * self.settings.paper_max_total_exposure
+        effective_exposure = float(self.settings.paper_max_total_exposure)
+        if market_weak and weak_exposure > 0:
+            # 弱市降仓：总仓位上限压到 paper_weak_exposure，与回测 day_exposure 同口径
+            effective_exposure = min(effective_exposure, weak_exposure)
+        exposure_cap = total_asset * effective_exposure
         available_budget = max(0.0, exposure_cap - max(0.0, total_asset - cash))
         candidates: list[tuple[float, object, float]] = []
         for rec in buy_candidates:
             name = getattr(rec, "name", "") or rec.code
             # ④ 交易池前置闸：择时 / 已持仓 / 板块范围 / 名额
-            ok, why = self.entry_gate(rec, positions=positions, market_weak=market_weak)
+            #    只有「全暂停」档才在这里拒掉买入；降仓档放行，由 exposure_cap 控总量
+            ok, why = self.entry_gate(rec, positions=positions, market_weak=weak_pause_all)
             if not ok:
                 results.append(TradeResult(
                     rec.code, name, "skip", 0, 0.0, 0.0, 0.0, why))
@@ -625,7 +692,7 @@ class PaperEngine:
             if available_budget < price * LOT_SIZE:
                 results.append(TradeResult(
                     rec.code, getattr(rec, "name", ""), "skip", 0, price, 0.0, 0.0,
-                    f"总仓位已达上限({self.settings.paper_max_total_exposure:.0%})"))
+                    f"总仓位已达上限({effective_exposure:.0%})"))
                 continue
             # 目标金额 = 本轮可投预算 × 加权占比，再受单票上限与剩余现金约束
             share_of_pool = weight / weight_total if weight_total > 0 else 1.0

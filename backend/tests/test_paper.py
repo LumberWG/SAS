@@ -793,3 +793,100 @@ class TestBacklog:
         assert results[0].side == "skip"
         assert "持仓已满" in results[0].reason
         assert db.get_paper_position("600004") is not None
+
+
+class TestRegimeGateState:
+    """``/api/paper/live`` 的 regime 字段：把「今天为什么没买」变成可读数字。
+
+    2026-10-30 全天零成交，闸门每 5 秒打一条日志、共 1999 条，排查只能翻日志；
+    现在把判定结果与拦截计数直接挂到状态接口上。
+    """
+
+    def test_reports_pause_count_for_today(self, monkeypatch):
+        from datetime import datetime
+
+        from app.config import get_settings
+
+        settings = get_settings()
+        monkeypatch.setattr(settings, "paper_regime_ma", 60, raising=False)
+        monkeypatch.setattr(settings, "paper_regime_weak_pause", True, raising=False)
+
+        eng = PaperEngine()
+        today = datetime.now().strftime("%Y-%m-%d")
+        eng._regime_day, eng._regime_paused = today, 12
+        eng._weak_cache = (today, True)
+
+        state = eng.regime_state()
+        assert state["enabled"] is True
+        assert state["ma"] == 60
+        assert state["weak"] is True
+        assert state["paused_count"] == 12
+
+        # 换日后计数归零：不能让昨天的拦截次数一直挂在页面上
+        eng._regime_day = "2020-01-01"
+        assert eng.regime_state()["paused_count"] == 0
+
+    def test_index_is_weak_cached_per_day(self, monkeypatch):
+        from app.config import get_settings
+
+        settings = get_settings()
+        monkeypatch.setattr(settings, "paper_regime_ma", 60, raising=False)
+
+        eng = PaperEngine()
+        calls: list[str] = []
+
+        async def fake_uncached(today: str, n: int) -> bool:
+            calls.append(today)
+            return True
+
+        monkeypatch.setattr(eng, "_index_is_weak_uncached", fake_uncached)
+        eng._weak_cache = ("", False)
+
+        assert asyncio.run(eng._index_is_weak("2026-10-30")) is True
+        assert asyncio.run(eng._index_is_weak("2026-10-30")) is True
+        # tick 每 5 秒一次，判定只依赖前一日收盘 → 一天只读一次指数 parquet
+        assert calls == ["2026-10-30"]
+
+    @staticmethod
+    def _gate_on(monkeypatch, eng, *, weak_exposure: float):
+        """把弱市闸门打开并固定判为弱市，价格固定 10 元。"""
+        monkeypatch.setattr(eng.settings, "paper_regime_ma", 60, raising=False)
+        monkeypatch.setattr(eng.settings, "paper_regime_weak_pause", True, raising=False)
+        monkeypatch.setattr(eng.settings, "paper_weak_exposure", weak_exposure, raising=False)
+
+        async def _weak(today: str) -> bool:
+            return True
+
+        async def _price(code: str, prices):
+            return 10.0
+
+        monkeypatch.setattr(eng, "_index_is_weak", _weak)
+        monkeypatch.setattr(eng, "_latest_price", _price)
+
+    def test_weak_exposure_zero_pauses_buying(self, engine, monkeypatch):
+        """weak_exposure=0（默认）→ 弱市仍按原样拒掉全部买入。"""
+        eng, db, _ = engine
+        self._gate_on(monkeypatch, eng, weak_exposure=0.0)
+        eng.ensure_account()
+
+        results = asyncio.run(eng.execute_recommendations(
+            [FakeRec("600001", "暂停票", "buy", 60.0, "突破")]))
+
+        assert results[0].side == "skip"
+        assert "大盘弱势" in results[0].reason
+
+    def test_weak_exposure_keeps_buying(self, engine, monkeypatch):
+        """weak_exposure>0 → 弱市不拒买入，只把总仓位上限压到该比例。"""
+        eng, db, _ = engine
+        self._gate_on(monkeypatch, eng, weak_exposure=0.30)
+        monkeypatch.setattr(eng.settings, "paper_max_total_exposure", 0.80, raising=False)
+        eng.ensure_account()
+
+        results = asyncio.run(eng.execute_recommendations(
+            [FakeRec("600001", "降仓票", "buy", 60.0, "突破")]))
+
+        assert results[0].side == "buy"
+        # 30% 上限下，10 万本金最多建 3 万仓位
+        pos = db.get_paper_position("600001")
+        assert pos is not None
+        assert pos["shares"] * 10.0 <= 30000 + 1e-6

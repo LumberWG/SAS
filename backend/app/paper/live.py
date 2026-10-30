@@ -539,6 +539,8 @@ class LiveTrader:
             "entry_timeout_minutes": int(
                 getattr(self.settings, "paper_entry_timeout_minutes", 0) or 0),
             "entry_rejected": list(self._entry_rejected),
+            # 大盘择时闸门：今天是否弱市、已拦截多少次自动买入（0 次且 weak=True 说明还没 tick）
+            "regime": self.engine.regime_state(),
             "last_tick": self._last_tick.strftime("%H:%M:%S") if self._last_tick else None,
             "last_tick_at": (
                 self._last_tick.isoformat(timespec="seconds")

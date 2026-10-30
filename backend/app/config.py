@@ -14,10 +14,11 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 # 项目根目录（backend/ 的上一级）
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 
-# 数据根目录：程序运行数据（K线缓存 / SQLite），跟随项目放在 E 盘。
-# 注意：free-stockdb 的 26GB 原始历史数据另在 D:\Backup\SAS\fsdb，与本目录无关。
-# 可用环境变量 SAS_DATA_DIR 覆盖。
-DATA_DIR = Path(os.getenv("SAS_DATA_DIR", r"E:\Study\SAS\data"))
+# 数据根目录：全部数据统一放 D 盘备份区，与代码分离，避免误删代码目录时连带数据。
+#   D:\Backup\SAS\fsdb   26GB  free-stockdb 原始库（数据源，由「数据更新.exe」维护）
+#   D:\Backup\SAS\data   导出数据 + 程序运行数据（K线 parquet / 分钟线 / SQLite / logs）
+# 可用环境变量 SAS_DATA_DIR 覆盖（例如临时切回 E:\Study\SAS\data 做对照）。
+DATA_DIR = Path(os.getenv("SAS_DATA_DIR", r"D:\Backup\SAS\data"))
 
 
 class Settings(BaseSettings):
@@ -59,7 +60,11 @@ class Settings(BaseSettings):
     fetch_retries: int = 2
     # K线预热：后台批量缓存日K到本地Parquet，消除扫描时的实时网络拉取
     kline_warmup_concurrency: int = 10   # 预热并发（低于扫描并发，避免触发数据源限流）
-    kline_warmup_top_n: int = 2000       # 开机预热流动性前N只（其余由收盘调度补全）
+    # 收盘预热（16:00）覆盖的股票数：0 = 全市场。默认全市场——只热前 N 只时，
+    # 剩下的股票一旦某天没刷上就永远停在旧日期（增量预热按各自最后日期续拉，
+    # 不会主动发现落后），回测/影子账户会静默用旧 bar。开机预热不走这个值，
+    # 只补真正落后的股票（见 scheduler._warmup_stale）。
+    kline_warmup_top_n: int = 0
     # HTTP 请求超时（秒）
     request_timeout: float = 15.0
     # 实时快照内存缓存 TTL（秒）。全量刷新一次约 90 秒，
@@ -207,6 +212,10 @@ class Settings(BaseSettings):
     # ---- 模拟盘大盘择时买入闸门（弱市暂停自动买入） ----
     paper_regime_ma: int = 60           # 上证指数 MA 周期，<=0 关闭
     paper_regime_weak_pause: bool = True  # 弱市（指数在 MA 下）暂停自动买入
+    #: 弱市**保留仓位比例**（0=全暂停，即上面的开关注释行为；>0 时弱市不暂停买入，
+    #: 而是把「总仓位上限」压到该比例继续参与）。回测记录 #59/#60：0.3~0.5 在
+    #: 急跌月小亏换反弹时的收益，代价是涨市初期踏空。默认 0 保持既有行为不变。
+    paper_weak_exposure: float = 0.0
     # ---- 做T引擎（真实 tick：严格 T+1 多批次；默认全部关闭） ----
     paper_t_active: bool = False
     paper_t_size: float = 0.25             # 单次做T比例（相对总仓）

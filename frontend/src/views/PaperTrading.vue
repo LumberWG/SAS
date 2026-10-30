@@ -596,6 +596,32 @@ onUnmounted(() => {
       </div>
     </div>
 
+    <!-- 大盘择时闸门：弱市时自动买入被整体暂停，先摆出来，避免误判成「系统不工作了」 -->
+    <div
+      v-if="live?.regime?.enabled && live.regime.weak"
+      class="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border border-warn/40 bg-warn/10 px-4 py-3 text-[13px] text-warn"
+    >
+      <span class="font-medium">
+        大盘弱势：上证指数在 MA{{ live.regime.ma }} 下方
+      </span>
+      <span v-if="(live.regime.weak_exposure ?? 0) > 0" class="text-content-muted">
+        总仓位上限已压到
+        <span class="font-num">{{ ((live.regime.weak_exposure ?? 0) * 100).toFixed(0) }}%</span>
+        （卖出与止盈止损照常）· 今日已触发
+        <span class="font-num">{{ live.regime.paused_count }}</span> 次
+      </span>
+      <span v-else class="text-content-muted">
+        自动买入 / 轮动已暂停（卖出与止盈止损照常）· 今日已拦截
+        <span class="font-num">{{ live.regime.paused_count }}</span> 次
+      </span>
+      <RouterLink
+        to="/settings"
+        class="ml-auto text-[12.5px] text-primary-light hover:underline"
+      >
+        去设置页关闭闸门
+      </RouterLink>
+    </div>
+
     <!-- 队列容量（五段式③）：买入候选最多 M 只，超出按评分择优落选 -->
     <div v-if="tab === 'pool' && (live?.queue_top_m ?? 0) > 0" class="glass-card p-5">
       <div class="mb-3 flex flex-wrap items-center justify-between gap-2">
