@@ -12,7 +12,7 @@ from app.param_specs import (
     update_settings,
 )
 
-_KEYS = ("paper_max_positions", "paper_exclude_large_cap")
+_KEYS = ("paper_max_positions", "paper_exclude_large_cap", "paper_large_cap_yi")
 
 
 @pytest.fixture(autouse=True)
@@ -81,3 +81,23 @@ def test_type_validation():
         update_settings({"paper_max_positions": "abc"})
     with pytest.raises(ValueError):
         update_settings({"not_a_real_key": 1})
+
+
+def test_min_value_guard():
+    """数值下限集中在校验层，各入口不再各写一份。"""
+    with pytest.raises(ValueError):
+        update_settings({"paper_large_cap_yi": 0})
+
+
+def test_queue_filter_shares_same_write_layer():
+    """③ 交易队列页的开关与设置页写同一份状态，且共用同一套校验。"""
+    from fastapi import HTTPException
+
+    from app.api.paper import QueueFilterBody, set_queue_filter
+
+    set_queue_filter(QueueFilterBody(exclude_large_cap=True, large_cap_yi=150))
+    s = get_settings()
+    assert s.paper_large_cap_yi == 150
+    assert s.paper_exclude_large_cap is True
+    with pytest.raises(HTTPException):
+        set_queue_filter(QueueFilterBody(exclude_large_cap=True, large_cap_yi=0))

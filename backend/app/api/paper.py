@@ -69,11 +69,21 @@ def get_queue_filter() -> dict:
 
 @router.post("/queue-filter")
 def set_queue_filter(body: QueueFilterBody) -> dict:
-    """修改大盘股过滤设置：写 app_state（重启保留），立即对下一轮扫描/下单生效。"""
-    if body.large_cap_yi <= 0:
-        raise HTTPException(status_code=400, detail="市值阈值需大于 0（亿元）")
-    db.set_state("paper_exclude_large_cap", "1" if body.exclude_large_cap else "0")
-    db.set_state("paper_large_cap_yi", str(float(body.large_cap_yi)))
+    """修改大盘股过滤设置：委托 ``update_settings``（与设置页共用同一个写入层）。
+
+    这里刻意**不再自己拼 app_state 的键**——两套写逻辑意味着两套校验，
+    迟早漂移（曾经 queue-filter 拒绝阈值 ≤0、设置页却允许）。校验统一在
+    ``param_specs._MIN_EXCLUSIVE``。
+    """
+    from app.param_specs import update_settings
+
+    try:
+        update_settings({
+            "paper_exclude_large_cap": body.exclude_large_cap,
+            "paper_large_cap_yi": body.large_cap_yi,
+        })
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     logger.info(
         "交易队列大盘股过滤更新: exclude=%s limit=%.0f亿",
         body.exclude_large_cap, body.large_cap_yi,

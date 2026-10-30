@@ -341,14 +341,22 @@ class PaperEngine:
             return ok, why
         return self.entry_price_ok(rec, price, signal_price)
 
+    def _base_stop_ratio(self) -> float:
+        """固定止损比例：优先用 ``paper_stop_loss``（回测落盘可改），缺省回调常量。"""
+        return float(getattr(self.settings, "paper_stop_loss", STOP_LOSS_RATIO) or STOP_LOSS_RATIO)
+
+    def _take_profit_ratio(self) -> float:
+        """固定止盈比例：优先用 ``paper_take_profit``（回测落盘可改），缺省回调常量。"""
+        return float(getattr(self.settings, "paper_take_profit", TAKE_PROFIT_RATIO) or TAKE_PROFIT_RATIO)
+
     def _stop_distance(self, code: str) -> float:
-        """止损距离：固定 8%，开启 ATR 止损时取 max(8%, N×ATR%)，上限可配。
+        """止损距离：固定止损（``paper_stop_loss``），开启 ATR 止损时取 max(固定, N×ATR%)，上限可配。
 
         高波动票的日振幅常达 5~10%，固定 8% ≈ 1×ATR，止损必然被正常波动打掉
         （实盘 2 天 5 笔 −8% 止损全是「刚碰线就砍」）。ATR 版本只放宽不收紧，
         与回测里 ``e30_a15`` 的机制一致。
         """
-        base = STOP_LOSS_RATIO
+        base = self._base_stop_ratio()
         mult = float(getattr(self.settings, "paper_atr_stop_mult", 0.0) or 0.0)
         if mult <= 0:
             return base
@@ -597,6 +605,11 @@ class PaperEngine:
             eligible = eligible[:slots]
 
         weights = {rec.code: weight for _, rec, _, weight in eligible}
+        # 单票上限优先用 paper_single_position_max（回测落盘可改），缺省回调常量
+        single_max = float(
+            getattr(self.settings, "paper_single_position_max", SINGLE_POSITION_MAX_RATIO)
+            or SINGLE_POSITION_MAX_RATIO
+        )
 
         for _score, rec, price, weight in eligible:
             weights.pop(rec.code, None)
@@ -615,7 +628,7 @@ class PaperEngine:
             share_of_pool = weight / weight_total if weight_total > 0 else 1.0
             budget = min(
                 available_budget * share_of_pool,
-                total_asset * SINGLE_POSITION_MAX_RATIO,
+                total_asset * single_max,
                 cash,
                 available_budget,
             )
@@ -776,8 +789,8 @@ class PaperEngine:
             if price > peak:
                 peak = price
                 db.update_paper_peak(pos["code"], peak)
-            # 建仓时定死的止损线（含 ATR 放宽）；老持仓没有该字段时按固定 8% 现算
-            stop_price = float(pos.get("stop_price") or 0) or cost * (1 - STOP_LOSS_RATIO)
+            # 建仓时定死的止损线（含 ATR 放宽）；老持仓没有该字段时按当前固定止损现算
+            stop_price = float(pos.get("stop_price") or 0) or cost * (1 - self._base_stop_ratio())
             # 盈利保护：浮盈达 breakeven 上移止损到成本；达 trail_arm 后跟踪高点回撤
             if self.settings.paper_breakeven_pct > 0 and peak >= cost * (1 + self.settings.paper_breakeven_pct):
                 stop_price = max(stop_price, cost)
@@ -789,7 +802,7 @@ class PaperEngine:
                     f"止损触发（成本{cost:.2f}，现价{price:.2f}，{change:+.1%}，"
                     f"止损线{stop_price:.2f}）"
                 )
-            elif change >= TAKE_PROFIT_RATIO:
+            elif change >= self._take_profit_ratio():
                 reason = f"止盈触发（成本{cost:.2f}，现价{price:.2f}，{change:+.1%}）"
             if reason is None:
                 continue

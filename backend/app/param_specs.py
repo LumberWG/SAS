@@ -55,6 +55,23 @@ READONLY_KEYS: frozenset[str] = frozenset({
 #: 运行时覆盖在 app_state 里的前缀（`RUNTIME_KEYS` 那几项用无前缀的既有键）
 OVERRIDE_PREFIX = "cfg:"
 
+#: 必须严格大于该值的数值项（集中校验，避免每个入口各写一份）
+_MIN_EXCLUSIVE: dict[str, float] = {
+    "paper_large_cap_yi": 0.0,
+    "paper_max_positions": 0.0,
+    "paper_max_total_exposure": 0.0,
+    # 风控三项必须为正：0 会让「止损线=成本价」直接清仓，属于误操作而非关闭
+    "paper_stop_loss": 0.0,
+    "paper_take_profit": 0.0,
+    "paper_single_position_max": 0.0,
+}
+
+#: 设置页的补充说明（同一参数在别的页面也有快捷入口时提示一下）
+_NOTE_OVERRIDES: dict[str, str] = {
+    "paper_exclude_large_cap": "也可在「③ 三选 · 交易队列」页顶部快速切换",
+    "paper_large_cap_yi": "也可在「③ 三选 · 交易队列」页顶部调整",
+}
+
 #: 分组展示顺序
 GROUP_ORDER: tuple[str, ...] = (
     "基础与存储",
@@ -192,9 +209,8 @@ def _builtin_items() -> list[dict]:
     items = [
         grab("app.analysis.factors", "BUY_THRESHOLD", "买入评分阈值（≥ 即买入）", "分"),
         grab("app.analysis.factors", "SELL_THRESHOLD", "卖出评分阈值（≤ 即卖出）", "分"),
-        grab("app.backtest.pipeline", "STOP_LOSS_RATIO", "回测默认止损", "", lambda v: round(v * 100, 2)),
-        grab("app.backtest.pipeline", "TAKE_PROFIT_RATIO", "回测默认止盈", "", lambda v: round(v * 100, 2)),
-        grab("app.paper.engine", "SINGLE_POSITION_MAX_RATIO", "单票占总资产上限", "%", lambda v: round(v * 100, 1)),
+        grab("app.backtest.pipeline", "STOP_LOSS_RATIO", "回测默认止损（未传参时）", "", lambda v: round(v * 100, 2)),
+        grab("app.backtest.pipeline", "TAKE_PROFIT_RATIO", "回测默认止盈（未传参时）", "", lambda v: round(v * 100, 2)),
         grab("app.paper.engine", "LOT_SIZE", "整手股数", "股"),
         grab("app.paper.engine", "FEE_COMMISSION_RATE", "佣金费率（双向）", "%", lambda v: round(v * 10000, 2)),
         grab("app.paper.engine", "FEE_STAMP_RATE", "印花税（卖出）", "%", lambda v: round(v * 1000, 2)),
@@ -263,6 +279,9 @@ def update_settings(changes: dict[str, Any]) -> dict[str, Any]:
         if key in READONLY_KEYS:
             raise ValueError(f"{key} 不支持页面修改（路径/列表类，请改 .env 后重启）")
         value = _coerce_value(key, raw, field.default)
+        floor = _MIN_EXCLUSIVE.get(key)
+        if floor is not None and isinstance(value, (int, float)) and value <= floor:
+            raise ValueError(f"{key} 需大于 {floor}")
         target = key if key in RUNTIME_KEYS else OVERRIDE_PREFIX + key
         db.set_state(target, "1" if value is True else "0" if value is False else str(value))
         setattr(s, key, value)
@@ -372,7 +391,9 @@ def settings_overview() -> dict:
             "writable": kind != "readonly",
             "kind": kind,
             "runtime": runtime,
-            "note": "路径/列表类：仅启动时读取，请改 .env 后重启" if kind == "readonly" else "",
+            "note": "路径/列表类：仅启动时读取，请改 .env 后重启"
+            if kind == "readonly"
+            else _NOTE_OVERRIDES.get(key, ""),
         })
 
     builtin = _builtin_items()

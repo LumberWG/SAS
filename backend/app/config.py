@@ -176,8 +176,14 @@ class Settings(BaseSettings):
     # 页面上的开关与数值写进 app_state 覆盖这里的默认值（不用改 .env，重启后仍保留）。
     paper_exclude_large_cap: bool = True
     paper_large_cap_yi: float = 100.0
-    # 止损距离 = max(固定 8%, N×ATR%)，上限 paper_atr_stop_max。
-    # 0=关闭（沿用固定 8%）；高波动票自动放宽，与回测里 e30_a15 的机制一致
+    # ---- 固定止损/止盈/单票上限（与回测 stop_loss / take_profit / single_position_ratio 同口径） ----
+    # 此前这三项硬编码在 paper/engine.py，回测中心「将规则落盘保存到数据库」无法写入，
+    # 于是「回测调好的规则」和「实盘在用的规则」永远差一截。改成 Settings 字段后可落盘。
+    paper_stop_loss: float = 0.08      # 固定止损：成本价跌此比例卖出（回测 stop_loss）
+    paper_take_profit: float = 0.20    # 固定止盈：成本价涨此比例卖出（回测 take_profit）
+    paper_single_position_max: float = 0.20  # 单票市值占总资产上限（回测 single_position_ratio）
+    # 止损距离 = max(固定止损, N×ATR%)，上限 paper_atr_stop_max。
+    # 0=关闭（沿用固定止损）；高波动票自动放宽，与回测里 e30_a15 的机制一致
     paper_atr_stop_mult: float = 2.0
     paper_atr_stop_max: float = 0.20
     # ---- 模拟盘盈利保护（对齐回测 breakeven/trail） ----

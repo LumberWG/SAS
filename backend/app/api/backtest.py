@@ -18,14 +18,11 @@ from pydantic import BaseModel, Field
 
 from app.analysis.factors import BUY_THRESHOLD
 from app.api.utils import with_disclaimer
-from app.backtest.pipeline import (
-    STOP_LOSS_RATIO,
-    TAKE_PROFIT_RATIO,
-    PipelineParams,
-    run_pipeline,
-)
+from app.backtest.apply import persist_map, split_changes
+from app.backtest.pipeline import PipelineParams, run_pipeline
 from app.config import get_settings
 from app.data.cache import db
+from app.param_specs import update_settings
 
 logger = logging.getLogger("sas.api.backtest")
 router = APIRouter(prefix="/backtest", tags=["回测"])
@@ -42,6 +39,9 @@ class BacktestRequest(BaseModel):
 
     字段名与 :class:`app.backtest.pipeline.PipelineParams` 对齐——传入即覆盖
     本次回测（线上参数不受影响），用于参数实验与回归测试。
+
+    同一份请求体也是 ``POST /backtest/persist`` 的入参：那个接口才把参数写成
+    实盘配置（只取 :data:`app.backtest.apply.BACKTEST_TO_SETTING` 里映射得到的子集）。
     """
 
     start_date: str = Field(..., description="开始日期 YYYY-MM-DD")
@@ -139,6 +139,71 @@ async def _execute(job_id: str, params: PipelineParams) -> None:
         )
 
 
+def _defaults_payload() -> dict:
+    """回测参数与实盘对齐的默认值（两侧共用同一份计算，避免各自漂移）。"""
+    s = get_settings()
+    return {
+        # 基础
+        "initial_capital": float(s.paper_initial_capital),
+        "max_positions": int(s.paper_max_positions),
+        "universe_size": 500,
+        "board_prefixes": [],
+        "watch_cap": 60,
+        "add_per_day": 50,
+        # 选股 / 买入（0 = 不启用该过滤）
+        "rebalance_days": 1,
+        "buy_threshold": float(BUY_THRESHOLD),
+        "buy_top_pct": 0.0,
+        "max_open_gain": 0.0,
+        "max_gain_5d": 0.0,
+        "min_volume_ratio": 0.0,
+        "min_turnover_rate": 0.0,
+        "invert_score": False,
+        # 五段式③⑤（0 = 不启用）
+        "queue_top_m": 0,
+        "entry_max_chase": 0.0,
+        "entry_pullback": 0.0,
+        "entry_window_minutes": 0,
+        # 止损 / 止盈（实盘这三项已挪进 Settings，落盘后默认值同步变化）
+        "stop_loss": float(s.paper_stop_loss),
+        "take_profit": float(s.paper_take_profit),
+        "max_hold_days": 0,
+        "stop_atr_mult": 0.0,
+        "stop_atr_min": 0.03,
+        "stop_atr_max": 0.15,
+        "stop_confirm_close": False,
+        "partial_tp_at": 0.0,
+        "partial_tp_ratio": 0.5,
+        # 移动 / 保本
+        "breakeven_trigger": 0.0,
+        "trail_pct": 0.0,
+        "trail_arm": 0.0,
+        # 大盘择时
+        "regime_ma": 0,
+        "regime_fast_ma": 20,
+        "weak_exposure": 0.0,
+        "regime_flat_below": False,
+        # 仓位 / 评分 / 轮动
+        "max_total_exposure": float(s.paper_max_total_exposure),
+        "single_position_ratio": float(s.paper_single_position_max),
+        "full_score": float(s.paper_full_score),
+        "half_score": float(s.paper_half_score),
+        "rotation_enabled": bool(s.paper_rotation_enabled),
+        "rotation_gap": float(s.paper_rotation_gap),
+        "rotation_min_score": float(s.paper_rotation_min_score),
+        # 做T（0 / False = 关闭）
+        "t_active": False,
+        "t_size": 0.0,
+        "t_up_sell": 0.0,
+        "t_up_buyback": 0.0,
+        "t_down_add": 0.0,
+        "t_down_full": 0.0,
+        "t_rebound_sell": 0.0,
+        "t_limit_sell_half": False,
+        "t_crash_guard": 0.0,
+    }
+
+
 @router.get("/defaults")
 def backtest_defaults() -> dict:
     """回测参数的**线上默认值**（前端表单直接用具体数字展示，不再显示「默认」占位）。
@@ -150,68 +215,52 @@ def backtest_defaults() -> dict:
     约定：默认「关闭/不限」的参数返回 ``0``，前端在值为 0 时**不提交**该字段
     （与 ``PipelineParams`` 的 None 语义等价）。``bool`` 参数返回 ``False``。
     """
+    return with_disclaimer({"defaults": _defaults_payload()})
+
+
+@router.get("/persist-map")
+def backtest_persist_map() -> dict:
+    """哪些回测参数能落盘成实盘配置（以及当前实盘生效值 / 不能落盘的原因）。"""
+    return with_disclaimer(persist_map())
+
+
+@router.post("/persist")
+def persist_backtest_rules(req: BacktestRequest) -> dict:
+    """把回测参数落盘为实盘配置：写覆盖层 + 就地生效，重启保留（即新的默认值）。
+
+    只写 ``apply.BACKTEST_TO_SETTING`` 里映射得到的字段；实盘没有对应实现的项
+    （选股分位、调仓周期、分段止盈、分钟级切入点等）在 ``skipped`` 里说明原因，
+    绝不硬塞进不相干的字段——否则就是「页面显示改了、实盘没变」。
+    """
+    changes = req.model_dump(exclude_none=True)
+    # 只落盘调用方**显式提交**的项：未提交的沿用实盘现值，不因 Pydantic 默认值（如
+    # universe_size=500）被动改掉实盘配置
+    explicit = set(req.model_fields_set)
+    changes = {k: v for k, v in changes.items() if k in explicit}
+    changes.pop("start_date", None)
+    changes.pop("end_date", None)
+    applied, skipped = split_changes(changes)
+    if not applied:
+        raise HTTPException(status_code=400, detail="当前参数里没有可落盘到实盘的项")
+
     s = get_settings()
+    before = {key: getattr(s, key, None) for key in applied}
+    try:
+        done = update_settings(applied)
+    except ValueError as exc:  # 类型/下限不合法 → 400，前端原样展示
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    changed = [
+        {"setting": key, "old": before.get(key), "new": value}
+        for key, value in sorted(done.items())
+        if before.get(key) != value
+    ]
+    logger.info("回测规则已落盘：变更 %d 项，跳过 %d 项", len(changed), len(skipped))
     return with_disclaimer({
-        "defaults": {
-            # 基础
-            "initial_capital": float(s.paper_initial_capital),
-            "max_positions": int(s.paper_max_positions),
-            "universe_size": 500,
-            "board_prefixes": [],
-            "watch_cap": 60,
-            "add_per_day": 50,
-            # 选股 / 买入（0 = 不启用该过滤）
-            "rebalance_days": 1,
-            "buy_threshold": float(BUY_THRESHOLD),
-            "buy_top_pct": 0.0,
-            "max_open_gain": 0.0,
-            "max_gain_5d": 0.0,
-            "min_volume_ratio": 0.0,
-            "min_turnover_rate": 0.0,
-            "invert_score": False,
-            # 五段式③⑤（0 = 不启用）
-            "queue_top_m": 0,
-            "entry_max_chase": 0.0,
-            "entry_pullback": 0.0,
-            "entry_window_minutes": 0,
-            # 止损 / 止盈
-            "stop_loss": float(STOP_LOSS_RATIO),
-            "take_profit": float(TAKE_PROFIT_RATIO),
-            "max_hold_days": 0,
-            "stop_atr_mult": 0.0,
-            "stop_atr_min": 0.03,
-            "stop_atr_max": 0.15,
-            "stop_confirm_close": False,
-            "partial_tp_at": 0.0,
-            "partial_tp_ratio": 0.5,
-            # 移动 / 保本
-            "breakeven_trigger": 0.0,
-            "trail_pct": 0.0,
-            "trail_arm": 0.0,
-            # 大盘择时
-            "regime_ma": 0,
-            "regime_fast_ma": 20,
-            "weak_exposure": 0.0,
-            "regime_flat_below": False,
-            # 仓位 / 评分 / 轮动
-            "max_total_exposure": float(s.paper_max_total_exposure),
-            "single_position_ratio": 0.20,
-            "full_score": float(s.paper_full_score),
-            "half_score": float(s.paper_half_score),
-            "rotation_enabled": bool(s.paper_rotation_enabled),
-            "rotation_gap": float(s.paper_rotation_gap),
-            "rotation_min_score": float(s.paper_rotation_min_score),
-            # 做T（0 / False = 关闭）
-            "t_active": False,
-            "t_size": 0.0,
-            "t_up_sell": 0.0,
-            "t_up_buyback": 0.0,
-            "t_down_add": 0.0,
-            "t_down_full": 0.0,
-            "t_rebound_sell": 0.0,
-            "t_limit_sell_half": False,
-            "t_crash_guard": 0.0,
-        }
+        "applied": done,
+        "changed": changed,
+        "skipped": skipped,
+        "defaults": _defaults_payload(),
     })
 
 
