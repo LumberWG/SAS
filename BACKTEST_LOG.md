@@ -4888,3 +4888,85 @@ A 虽然 −13.12%，但触发发生在窗口末尾，暂停期未覆盖任何�
    用 `weekly_review.py` 比对「实盘超额 vs 回测 ≈2.1pp/21天」，看偏差方向；
 3. 若实盘长期低于回测，优先怀疑执行价与成交可行性（`#67` 已量化 1.4~2.5pp），
    而不是继续调策略参数。
+
+---
+
+## 记录 #70 · 2026-10-30 · 实盘对账基线冻结 —— 并更正：#63 的 0.3 档其实从未生效
+
+### 1. 触发
+
+使用者追问：「现在代码和参数都没变吗？要是变了跑实盘有意义吗？」
+
+这个问题问对了。核查结果是**两处不一致**，且方向都朝着「以为在跑 A，其实在跑 B」：
+
+### 2. 发现一：`paper_weak_exposure=0.3` 从未真正生效
+
+`#63` 记录写的是「`POST /api/settings` 已写入 0.3，落 `app_state`，重启重放」。实际三处都没有：
+
+| 检查位置 | 实际值 | 说明 |
+| --- | --- | --- |
+| `app_state` 表 | **没有 `paper_weak_exposure` 这个键**（只有 `paper_trade_mode='auto'`） | 运行时覆盖不存在 |
+| `backend/.env` | **没有任何 `PAPER_*`** | 环境变量未配 |
+| `config.py` 代码默认 | `paper_weak_exposure = 0.0` | 落回全暂停 |
+| `GET /api/paper/live` | `regime.weak_exposure = 0.0` | 线上确认 |
+
+**即 10-30 当天（以及之前）线上一直是「弱市全暂停买入」，不是「留三成仓」。** 最可能的原因：`#63` 写入时数据目录还是 `E:\Study\SAS\data`，后来 `config.py` 把 `DATA_DIR` 迁到 `D:\Backup\SAS\data`，旧库（`E:\Study\SAS\data\sas.db`）已不存在 —— **覆盖值随旧库一起丢了**。
+
+这是本仓库第一次出现「文档说已落地、实际没落地」的情况，写在这里以免回看时误读 `#63`。
+
+### 3. 发现二：线上代码此前是「未提交的工作区版本」
+
+`paper/engine.py`（+77）、`config.py`（+19）、`param_specs.py`（+23）、`paper/live.py`（+2）、
+`PaperTrading.vue`（+26）、`tests/test_paper.py`（+97）这批改动一直只在工作区，
+仓库 `HEAD` 的 `paper/engine.py` 仍是**没有降仓档能力的旧版**。
+意味着「线上在跑什么」无法从仓库回答，也无法回溯。
+
+### 4. 处置（本次执行）
+
+| 步骤 | 内容 | 结果 |
+| --- | --- | --- |
+| 1 | 提交这批策略/配置改动，使仓库 == 运行版本 | `53b6ad3`（6 文件 +232/−12），全量 **291 passed** |
+| 2 | 通过 `POST /api/settings` 写入档位 | `applied={"paper_weak_exposure": 0.3}`，`runtime_overrides=1` |
+| 3 | 验证 | `GET /api/paper/live` → `regime.weak_exposure = 0.3`；`app_state` 键 `paper_weak_exposure='0.3'`（`2026-10-30 22:17:41`） |
+
+### 5. 对账基线（本段实盘以此为起点）
+
+| 项 | 值 |
+| --- | --- |
+| 代码 | `53b6ad3`（main，`2fb51f7` → `a3bfcb5` → `53b6ad3`） |
+| `paper_weak_exposure` | **0.3**（运行时覆盖，代码默认仍 0.0） |
+| `paper_regime_ma` / `paper_regime_weak_pause` | 60 / True |
+| `paper_max_positions` / `paper_single_position_ratio` | 10 / 0.20 |
+| `paper_max_total_exposure` | 0.80（弱市时压到 min(0.80, 0.30)） |
+| `paper_stop_loss` / `paper_take_profit` | −8% / +20% |
+| `paper_entry_max_chase` | 1.5% |
+| `paper_rotation_enabled` | False |
+| `paper_t_active` | False（做T 关闭，`#66` 已否决） |
+| `paper_trade_mode` | auto |
+| 对账起点 | 2026-10-30 收盘后写入；**从下一个交易日（2026-11-02）起算** |
+
+### 6. 对账口径（2~4 周后回看）
+
+| 指标 | 回测预期 | 数据来源 |
+| --- | --- | --- |
+| 21 天超额 | **≈ +2.1pp**（`#68` 的扰动均值，不是窗口表的 +4~6pp） | `scripts/weekly_review.py` |
+| 单边滑点 | 已计入回测 0.3% 档；实测若 >0.1% 需再打折 | `scripts/slippage_audit.py` |
+| 弱市触发天数 / 弱市日实际仓位 | 弱市日总仓位应 ≤30% | `GET /api/paper/live` 的 `regime` + `paper_regime_paused:{日期}` |
+
+判读规则（先写死，避免事后解释）：实盘 21 天超额落在 **−1pp ~ +5pp** 视为与回测一致；
+低于 −1pp 先查执行价/成交可行性（`#67`），高于 +5pp 视为短期运气，不下结论。
+
+### 7. 本轮变更
+
+| 类型 | 内容 | 文件 |
+| --- | --- | --- |
+| 提交 | `53b6ad3`：`config.py` / `paper/engine.py` / `paper/live.py` / `param_specs.py` / `PaperTrading.vue` / `tests/test_paper.py` | — |
+| 运行时参数 | `paper_weak_exposure` 0 → **0.3**（`app_state`） | — |
+| 文档更正 | 本节澄清 `#63` 的落地状态；`#63` 正文不改（只追加原则） | `BACKTEST_LOG.md` |
+
+### 8. 下轮计划
+
+1. **11-02 起跑满 2 周**（约 10 个交易日）先看方向，4 周后再下结论；
+2. 期间每天只看两件事：`regime.paused_count`（弱市是否按预期触发）、`弱市日总仓位是否 ≤30%`；
+3. 若 11-02 开盘就遇到弱市，检查是否真的买到约 3 成仓（`#63` §5 的预期），
+   而不是继续被 `entry_gate` 全拒——这是本次唯一能立刻证伪的点。
