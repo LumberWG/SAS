@@ -125,9 +125,13 @@ def create_app() -> FastAPI:
                 name="assets",
             )
 
+        # index.html 必须每次回源校验：重新构建后 assets 的 hash 全变，
+        # 浏览器若抱着旧入口不放，会去请求已经被删掉的 chunk（表现为「页面还是老版本」）
+        html_headers = {"Cache-Control": "no-cache, must-revalidate"}
+
         @app.get("/", include_in_schema=False)
         def index() -> FileResponse:
-            return FileResponse(FRONTEND_DIST / "index.html")
+            return FileResponse(FRONTEND_DIST / "index.html", headers=html_headers)
 
         @app.get("/{full_path:path}", include_in_schema=False)
         def spa_fallback(full_path: str) -> FileResponse:
@@ -135,7 +139,7 @@ def create_app() -> FastAPI:
 
             注册在最后，/api/* 已注册路由优先匹配，不会拦截 API。
             """
-            return FileResponse(FRONTEND_DIST / "index.html")
+            return FileResponse(FRONTEND_DIST / "index.html", headers=html_headers)
 
         logger.info("前端静态托管已启用: %s", FRONTEND_DIST)
 
