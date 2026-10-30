@@ -144,8 +144,10 @@ action = buy   若 total ≥ +15
 
 ## 4. 模拟下单与风控公式（`paper/engine.py`）
 
-> 账户：默认初始资金 10 万，单账户，状态全落 SQLite。常量：
-> `SINGLE_POSITION_MAX_RATIO=0.20`、`STOP_LOSS_RATIO=0.08`、`TAKE_PROFIT_RATIO=0.20`、`LOT_SIZE=100`。
+> 账户：默认初始资金 10 万，单账户，状态全落 SQLite。常量 `LOT_SIZE=100`。
+> 风控三项 2026-10-30 起从硬编码挪进 `Settings`（设置页可改，也可由回测中心「落盘」写入）：
+> `paper_stop_loss=0.08`、`paper_take_profit=0.20`、`paper_single_position_max=0.20`；
+> engine 里保留 `STOP_LOSS_RATIO / TAKE_PROFIT_RATIO / SINGLE_POSITION_MAX_RATIO` 作缺省回退。
 
 ### 4.1 费用（A 股标准费率）
 ```
@@ -158,7 +160,7 @@ action = buy   若 total ≥ +15
 ```
 可投预算 available_budget = max(0, 总仓位上限 - max(0, 总资产 - 现金))
          总仓位上限 = 总资产 × paper_max_total_exposure (默认 0.80)
-目标金额 budget = min( available_budget × 加权占比, 总资产 × 0.20, 现金, available_budget )
+目标金额 budget = min( available_budget × 加权占比, 总资产 × paper_single_position_max(0.20), 现金, available_budget )
 股数     shares = floor(budget / price / 100) × 100      # 整手
 加权占比 = (max(score,1) × 档位系数) / Σ权重
 成本价   cost_price = (成交额 + 买入费用) / 股数          # 含费成本，止损/止盈都以它为基准
@@ -194,6 +196,10 @@ action = buy   若 total ≥ +15
 > 大盘股开关的运行时状态存 `app_state`（键 `paper_exclude_large_cap` / `paper_large_cap_yi`），
 > 接口 `GET/POST /api/paper/queue-filter`，页面在「③ 三选 · 交易队列」顶部。改完对**下一轮扫描**生效
 > （选股候选池同样按该规则剔除，见 §1.2），因此不需要重启服务。
+>
+> **单一写入层**：`POST /api/paper/queue-filter` 内部委托 `param_specs.update_settings()`，
+> 与「系统设置」页共用同一份 `app_state` 键与同一套校验（数值下限在 `_MIN_EXCLUSIVE`）。
+> 两个入口只是"快捷方式"，不会出现两套校验各说各话（曾有过：队列页拒绝阈值 ≤0、设置页却放行）。
 
 > **闸门顺序**：先 `_buy_allowed`（永久性原因：范围 / 大市值 / 名称 / 池子），再「大盘弱势」（临时性）。
 > 反过来会让弱市期间全部候选都显示「大盘弱势」，把 688 这类「本来就不该买」的票也伪装成临时拒绝
@@ -212,16 +218,16 @@ market_weak → 全部买入候选返回 skip「大盘弱势，暂停买入」�
 
 ### 4.7 止损 / 止盈 / 盈利保护
 ```
-止损距离 _stop_distance = max(0.08, min(N × ATR/close, paper_atr_stop_max(0.20)))
-                       N = paper_atr_stop_mult（默认 2.0；<=0 关闭 ATR 放宽 → 固定 8%）
+止损距离 _stop_distance = max(paper_stop_loss(0.08), min(N × ATR/close, paper_atr_stop_max(0.20)))
+                       N = paper_atr_stop_mult（默认 2.0；<=0 关闭 ATR 放宽 → 只用 paper_stop_loss）
 建仓时一次定死：stop_price = round(cost_price × (1 - _stop_distance), 3)，peak_price = cost_price
 
 逐 tick 检查（价格优先取实时报价）：
   1) peak = max(peak, price)                     # 持仓期最高价，落库
-  2) base = stop_price（老持仓无该字段时退化为 cost × (1-0.08)）
+  2) base = stop_price（老持仓无该字段时退化为 cost × (1 - paper_stop_loss)）
   3) 保本：peak ≥ cost × (1 + paper_breakeven_pct 0.10) → base = max(base, cost)
   4) 移动：peak ≥ cost × (1 + paper_trail_arm 0.00)     → base = max(base, peak × (1 - paper_trail_pct 0.10))
-  5) price ≤ base  → 止损卖出；price / cost - 1 ≥ 0.20 → 止盈卖出
+  5) price ≤ base  → 止损卖出；price / cost - 1 ≥ paper_take_profit(0.20) → 止盈卖出
 ```
 - 止损/止盈都以**含费成本**为基准，止损线（含 ATR 放宽）在建仓时定死，便于复盘「当时定的止损是多少」；
 - `paper_trail_arm=0` 表示移动止损**从建仓起就跟踪**：需 `peak × 0.9 > cost × 0.92`（即 peak > cost×1.022）才会抬升止损线；
@@ -331,6 +337,9 @@ paper_position_lots(code, shares, cost_price, buy_date, tag)
 | `paper_live_enabled` | True | 实时撮合引擎开关 | live |
 | `paper_max_positions` | 10 | 最大持仓只数 | engine |
 | `paper_max_total_exposure` | 0.80 | 总仓位上限（留 20% 现金） | engine |
+| `paper_stop_loss` | 0.08 | **固定止损**（相对含费成本；回测 `stop_loss` 同口径，可落盘） | engine |
+| `paper_take_profit` | 0.20 | **固定止盈**（相对含费成本；回测 `take_profit` 同口径，可落盘） | engine |
+| `paper_single_position_max` | 0.20 | **单票上限**（占总资产；回测 `single_position_ratio` 同口径，可落盘） | engine |
 | `paper_full_score` | 40 | 评分全额系数阈值 | engine |
 | `paper_half_score` | 25 | 评分半额系数阈值（低于只记录） | engine |
 | `paper_rotation_enabled` | **False** | 满仓轮动替换开关 | engine |
@@ -341,7 +350,7 @@ paper_position_lots(code, shares, cost_price, buy_date, tag)
 | `paper_pool_top_n` | 300 | 成交额 TopN 池（对齐回测，0=不限） | engine |
 | `paper_exclude_large_cap` | True | 大盘股开关（页面上可改，写 `app_state` 覆盖） | engine/scanner |
 | `paper_large_cap_yi` | 100 | 总市值阈值（亿元），> 该值不进队列 | engine/scanner |
-| `paper_atr_stop_mult / max` | 2.0 / 0.20 | ATR 止损放宽倍数/上限（0=固定 8%） | engine |
+| `paper_atr_stop_mult / max` | 2.0 / 0.20 | ATR 止损放宽倍数/上限（0=只用 `paper_stop_loss`） | engine |
 | `paper_breakeven_pct` | 0.10 | 浮盈达此比例止损上移到成本（保本） | engine |
 | `paper_trail_pct` | 0.10 | 从持仓期最高价回撤此比例卖出（移动止损） | engine |
 | `paper_trail_arm` | 0.00 | 移动止损启用门槛（浮盈达此比例后跟踪） | engine |
@@ -415,6 +424,43 @@ paper_position_lots(code, shares, cost_price, buy_date, tag)
   会静默回落到日K 边界。2024 及更早窗口无分钟数据，该开关等于无效（不会报错）。
 - **指数 K 线新鲜度**：`regime_ma` 依赖 `idx_sh000001.parquet`，该文件由开机预热与 16:00 日更刷新；
   滞后时会静默退化为「不弱」档。
+
+### 7.4 回测规则落盘（2026-10-30）
+
+回测中心的两条路径必须分清：
+
+| 操作 | 影响范围 | 落库 |
+|---|---|---|
+| 改参数 + 「开始回测」 | 只有本次回测（`PipelineParams` 覆盖） | 否 |
+| 「将规则落盘保存到数据库」 | 选股 + 模拟盘交易（`Settings` 单例 + `app_state` 覆盖） | 是，重启保留，成为新默认值 |
+
+映射表在 `app/backtest/apply.py` 的 `BACKTEST_TO_SETTING`，**只映射实盘真有落点的子集**：
+
+```
+stop_loss→paper_stop_loss            take_profit→paper_take_profit
+single_position_ratio→paper_single_position_max
+stop_atr_mult→paper_atr_stop_mult    stop_atr_max→paper_atr_stop_max
+breakeven_trigger→paper_breakeven_pct   trail_pct/trail_arm→paper_trail_pct/trail_arm
+max_positions→paper_max_positions    universe_size→paper_pool_top_n
+max_total_exposure/regime_ma/full_score/half_score/rotation_*→同名 paper_*
+queue_top_m→paper_trade_queue_top_m  entry_max_chase/entry_pullback→paper_entry_*
+t_*→paper_t_*
+```
+
+不映射的项一律在响应 `skipped` 里给出原因（前端原样展示），典型是：
+
+- **选股侧回测专属**：`board_prefixes`（实盘只支持排北交所）、`rebalance_days`、`buy_threshold`
+  （硬编码）、`buy_top_pct`、`max_gain_5d`、`min_volume_ratio`、`min_turnover_rate`、`invert_score`；
+- **卖出侧回测专属**：`max_hold_days`、`stop_atr_min`、`stop_confirm_close`、`partial_tp_at/ratio`；
+- **择时分档**：`regime_fast_ma`、`weak_exposure`、`regime_flat_below`（实盘只有单均线 + 弱市暂停买入）；
+- **账户级**：`initial_capital`（已有账户不会被重置）。
+
+两条约束保证「落盘 = 所见即所改」：
+
+1. `POST /backtest/persist` 只写调用方**显式提交**的字段（`model_fields_set`），
+   不会被 Pydantic 默认值（如 `universe_size=500`）被动覆盖实盘配置；
+2. 前端在确认框里列出「会变更的项：旧值 → 新值」，落盘后 `GET /backtest/defaults` 的基线随之刷新
+   （止损/止盈/单票上限现在读 `Settings`，不再写死）。
 
 ---
 
