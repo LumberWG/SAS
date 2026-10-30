@@ -469,8 +469,10 @@ export interface ParamItem {
   source: 'app_state' | 'env' | 'default' | 'code'
   /** 改了是否必须重启后端才生效 */
   restart_required: boolean
-  /** 是否允许页面修改（当前全部 false，可写化是下一步） */
+  /** 是否允许页面修改（路径/列表类为 false） */
   writable: boolean
+  /** 渲染控件：bool 开关 / number 数字框 / text 文本框 / readonly 只读 */
+  kind: 'bool' | 'number' | 'text' | 'readonly'
   runtime: boolean
   note: string
 }
@@ -484,6 +486,18 @@ export interface SettingsOverview {
 
 export function getSettingsOverview(): Promise<SettingsOverview> {
   return http.get('/settings').then((r) => r.data)
+}
+
+/** 修改配置项：立即生效并落库（重启保留）。返回修改后的总览。 */
+export function updateSettings(
+  changes: Record<string, string | number | boolean>,
+): Promise<SettingsOverview & { applied: Record<string, unknown> }> {
+  return http.post('/settings', { changes }).then((r) => r.data)
+}
+
+/** 还原为 .env/环境变量值；keys 为空 = 还原全部可编辑项。 */
+export function resetSettings(keys: string[] = []): Promise<SettingsOverview & { reset: string[] }> {
+  return http.post('/settings/reset', { keys }).then((r) => r.data)
 }
 
 /** 交易队列的大盘股过滤设置（「③ 三选 · 交易队列」页开关）。 */

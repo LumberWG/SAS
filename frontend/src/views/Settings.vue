@@ -1,25 +1,37 @@
 <script setup lang="ts">
 /**
- * 系统设置（只读总览）：回答「现在到底按什么规则在跑」。
+ * 系统设置：分组 tab + 可编辑。
  *
- * 参数散在四个地方——.env/config.py、app_state 运行时覆盖、页面局部门开关、
- * 硬编码常量（黑名单/阈值/费率）。这里把它们拉成一张表，每项标：
- *   当前值 / 来源（app_state > env > 默认 / 代码）/ 改了要不要重启。
+ * 写模型（后端 `app/param_specs.py`）：改动落 `app_state` 覆盖层，同时就地改
+ * `Settings` 单例 → 下一个 tick / 下一轮扫描即生效；重启时由启动流程重放，不会丢。
  *
- * 刻意**不做写操作**：78 项里大多数改了必须重启，做成可点开关只会制造
- * 「我点了为什么没变」。真正动态的开关（大盘股过滤、模拟盘模式）在各业务页面。
+ * 只读项：路径 / 列表类（`kline_dir`、`db_path`、`cors_origins` 等），它们在进程
+ * 启动时就被静态挂载、CORS、缓存目录捕获，运行中改只会造成「显示改了实际没变」。
  */
 import { computed, onMounted, ref } from 'vue'
-import { RefreshCw, Search } from 'lucide-vue-next'
+import { RefreshCw, RotateCcw, Save, Search } from 'lucide-vue-next'
 
-import { getSettingsOverview, type ParamItem, type SettingsOverview } from '../api'
+import {
+  getSettingsOverview,
+  resetSettings,
+  updateSettings,
+  type ParamItem,
+  type SettingsOverview,
+} from '../api'
 
 const data = ref<SettingsOverview | null>(null)
 const loading = ref(false)
+const saving = ref(false)
 const error = ref('')
+const toast = ref('')
 const keyword = ref('')
-const onlyRuntime = ref(false)
-const onlyNonDefault = ref(false)
+const activeGroup = ref('')
+const onlyChanged = ref(false)
+
+/** 编辑草稿：key → 输入值 */
+const draft = ref<Record<string, string | number | boolean>>({})
+/** 服务端当前生效值快照，用于算 dirty 与「单行还原」 */
+const baseline = ref<Record<string, string | number | boolean>>({})
 
 const sourceMeta: Record<string, { text: string; cls: string }> = {
   app_state: { text: '运行时', cls: 'border-primary/50 bg-primary/15 text-primary-light' },
@@ -28,38 +40,27 @@ const sourceMeta: Record<string, { text: string; cls: string }> = {
   code: { text: '硬编码', cls: 'border-base-600 bg-base-700 text-content-muted' },
 }
 
-function fmtValue(it: ParamItem): string {
-  if (it.type === 'bool') return it.value ? '开' : '关'
-  if (it.value === '' || it.value === null || it.value === undefined) return '（空）'
-  if (Array.isArray(it.value)) return it.value.join(', ')
-  return String(it.value)
+function hydrate(overview: SettingsOverview) {
+  data.value = overview
+  const d: Record<string, string | number | boolean> = {}
+  const b: Record<string, string | number | boolean> = {}
+  for (const g of overview.groups) {
+    for (const it of g.items) {
+      const v = it.value === null || it.value === undefined ? '' : (it.value as string | number | boolean)
+      d[it.key] = v
+      b[it.key] = v
+    }
+  }
+  draft.value = d
+  baseline.value = b
+  if (!activeGroup.value && overview.groups.length) activeGroup.value = overview.groups[0].name
 }
-
-const filtered = computed(() => {
-  const kw = keyword.value.trim().toLowerCase()
-  const groups = (data.value?.groups ?? []).map((g) => ({
-    name: g.name,
-    items: g.items.filter((it) => {
-      if (onlyRuntime.value && !it.runtime) return false
-      if (onlyNonDefault.value && it.source === 'default') return false
-      if (!kw) return true
-      return (
-        it.key.toLowerCase().includes(kw) ||
-        it.label.toLowerCase().includes(kw) ||
-        fmtValue(it).toLowerCase().includes(kw)
-      )
-    }),
-  }))
-  return groups.filter((g) => g.items.length > 0)
-})
-
-const shownCount = computed(() => filtered.value.reduce((n, g) => n + g.items.length, 0))
 
 async function load() {
   loading.value = true
   error.value = ''
   try {
-    data.value = await getSettingsOverview()
+    hydrate(await getSettingsOverview())
   } catch (e: unknown) {
     error.value = e instanceof Error ? e.message : '加载失败（后端可能未重启）'
   } finally {
@@ -67,44 +68,152 @@ async function load() {
   }
 }
 
+function fmtValue(it: ParamItem): string {
+  const v = baseline.value[it.key]
+  if (it.kind === 'bool') return v ? '开' : '关'
+  if (v === '' || v === null || v === undefined) return '（空）'
+  if (Array.isArray(v)) return v.join(', ')
+  return String(v)
+}
+
+/** 草稿与生效值是否不同（数字按数值比，避免 '10' vs 10 误判） */
+function isDirty(it: ParamItem): boolean {
+  if (!it.writable) return false
+  const a = draft.value[it.key]
+  const b = baseline.value[it.key]
+  if (it.kind === 'bool') return Boolean(a) !== Boolean(b)
+  if (it.kind === 'number') return Number(a) !== Number(b)
+  return String(a ?? '') !== String(b ?? '')
+}
+
+const dirtyKeys = computed(() => {
+  const keys: string[] = []
+  for (const g of data.value?.groups ?? []) {
+    for (const it of g.items) if (isDirty(it)) keys.push(it.key)
+  }
+  return keys
+})
+
+const groups = computed(() =>
+  (data.value?.groups ?? []).map((g) => ({
+    name: g.name,
+    total: g.items.length,
+    changed: g.items.filter((it) => it.source === 'app_state').length,
+  })),
+)
+
+const currentItems = computed(() => {
+  const g = (data.value?.groups ?? []).find((x) => x.name === activeGroup.value)
+  if (!g) return [] as ParamItem[]
+  const kw = keyword.value.trim().toLowerCase()
+  return g.items.filter((it) => {
+    if (onlyChanged.value && it.source !== 'app_state') return false
+    if (!kw) return true
+    return (
+      it.key.toLowerCase().includes(kw) ||
+      it.label.toLowerCase().includes(kw) ||
+      fmtValue(it).toLowerCase().includes(kw)
+    )
+  })
+})
+
+async function save() {
+  const changes: Record<string, string | number | boolean> = {}
+  for (const g of data.value?.groups ?? []) {
+    for (const it of g.items) {
+      if (isDirty(it)) changes[it.key] = draft.value[it.key]
+    }
+  }
+  if (!Object.keys(changes).length) return
+  saving.value = true
+  error.value = ''
+  try {
+    hydrate(await updateSettings(changes))
+    toast.value = `已保存 ${Object.keys(changes).length} 项，立即生效`
+    window.setTimeout(() => (toast.value = ''), 2500)
+  } catch (e: unknown) {
+    error.value = e instanceof Error ? e.message : '保存失败'
+  } finally {
+    saving.value = false
+  }
+}
+
+async function resetKeys(keys: string[]) {
+  if (!keys.length) return
+  saving.value = true
+  error.value = ''
+  try {
+    hydrate(await resetSettings(keys))
+    toast.value = `已还原 ${keys.length} 项为 .env 值`
+    window.setTimeout(() => (toast.value = ''), 2500)
+  } catch (e: unknown) {
+    error.value = e instanceof Error ? e.message : '还原失败'
+  } finally {
+    saving.value = false
+  }
+}
+
+/** 单行还原：只是把草稿拉回生效值（真正落库走「还原」按钮） */
+function revertRow(it: ParamItem) {
+  draft.value[it.key] = baseline.value[it.key]
+}
+
 onMounted(load)
 </script>
 
 <template>
   <div class="space-y-3">
-    <!-- 概览条 -->
-    <div class="glass-card flex flex-wrap items-center gap-4 px-4 py-3">
-      <div>
+    <!-- 概览 + 操作 -->
+    <div class="glass-card flex flex-wrap items-center gap-3 px-4 py-2">
+      <div class="min-w-0">
         <div class="text-[13px] font-semibold text-content">当前生效配置</div>
-        <p class="mt-0.5 max-w-[640px] text-[11px] leading-relaxed text-content-faint">
+        <p class="mt-0.5 max-w-[620px] text-[11px] leading-relaxed text-content-faint">
           {{ data?.hint ?? '加载中…' }}
         </p>
       </div>
-      <div class="ml-auto flex items-center gap-2">
-        <div class="rounded-lg border border-base-600 px-3 py-1 text-center">
-          <div class="font-num text-[16px] font-semibold leading-none text-content">
+      <div class="ml-auto flex flex-wrap items-center gap-2">
+        <div class="rounded border border-base-600 px-2.5 py-1 text-center">
+          <div class="font-num text-[15px] font-semibold leading-none text-content">
             {{ data?.total ?? '--' }}
           </div>
-          <div class="text-[10px] text-content-faint">参数总数</div>
+          <div class="text-[10px] text-content-faint">参数</div>
         </div>
-        <div class="rounded-lg border border-primary/40 bg-primary/10 px-3 py-1 text-center">
-          <div class="font-num text-[16px] font-semibold leading-none text-primary-light">
+        <div class="rounded border border-primary/40 bg-primary/10 px-2.5 py-1 text-center">
+          <div class="font-num text-[15px] font-semibold leading-none text-primary-light">
             {{ data?.runtime_overrides ?? 0 }}
           </div>
-          <div class="text-[10px] text-content-faint">运行时覆盖</div>
+          <div class="text-[10px] text-content-faint">已覆盖</div>
         </div>
+        <button
+          class="flex items-center gap-1 rounded border border-primary/60 bg-primary/15 px-2.5 py-1 text-[12px] font-medium text-primary-light transition-colors hover:bg-primary/25 disabled:opacity-40"
+          :disabled="!dirtyKeys.length || saving"
+          @click="save"
+        >
+          <Save class="h-3.5 w-3.5" />
+          保存{{ dirtyKeys.length ? ` (${dirtyKeys.length})` : '' }}
+        </button>
+        <button
+          class="flex items-center gap-1 rounded border border-base-600 bg-base-700 px-2.5 py-1 text-[11px] text-content-muted transition-colors hover:border-down/60 hover:text-down disabled:opacity-40"
+          :disabled="saving || !(data?.runtime_overrides ?? 0)"
+          title="把所有已覆盖项还原为 .env / 环境变量里的值"
+          @click="resetKeys(dirtyKeys.length ? dirtyKeys : [])"
+        >
+          <RotateCcw class="h-3.5 w-3.5" />还原
+        </button>
         <button
           class="flex items-center gap-1 rounded border border-base-600 bg-base-700 px-2 py-1 text-[11px] text-content-muted transition-colors hover:border-primary/60 hover:text-primary"
           :disabled="loading"
           @click="load"
         >
-          <RefreshCw class="h-3.5 w-3.5" :class="loading ? 'animate-spin' : ''" />刷新
+          <RefreshCw class="h-3.5 w-3.5" :class="loading ? 'animate-spin' : ''" />
         </button>
       </div>
+      <div v-if="toast" class="w-full text-[11px] text-down">{{ toast }}</div>
+      <div v-if="error" class="w-full text-[11px] text-up">{{ error }}</div>
     </div>
 
     <!-- 过滤 -->
-    <div class="glass-card flex flex-wrap items-center gap-3 px-4 py-2">
+    <div class="flex flex-wrap items-center gap-2">
       <label class="flex items-center gap-1.5 rounded border border-base-600 bg-base-700 px-2 py-1">
         <Search class="h-3.5 w-3.5 text-content-faint" />
         <input
@@ -115,66 +224,119 @@ onMounted(load)
       </label>
       <button
         class="rounded border px-2 py-1 text-[11px] transition-colors"
-        :class="onlyRuntime ? 'border-primary/60 bg-primary/15 text-primary-light' : 'border-base-600 bg-base-700 text-content-muted'"
-        @click="onlyRuntime = !onlyRuntime"
+        :class="onlyChanged ? 'border-primary/60 bg-primary/15 text-primary-light' : 'border-base-600 bg-base-700 text-content-muted'"
+        @click="onlyChanged = !onlyChanged"
       >
-        只看运行时
+        只看已覆盖
       </button>
-      <button
-        class="rounded border px-2 py-1 text-[11px] transition-colors"
-        :class="onlyNonDefault ? 'border-primary/60 bg-primary/15 text-primary-light' : 'border-base-600 bg-base-700 text-content-muted'"
-        @click="onlyNonDefault = !onlyNonDefault"
-      >
-        只看非默认
-      </button>
-      <span class="text-[11px] text-content-faint">显示 {{ shownCount }} 项</span>
-      <span v-if="error" class="text-[11px] text-up">{{ error }}</span>
+      <span class="text-[11px] text-content-faint">共 {{ currentItems.length }} 项</span>
     </div>
 
-    <!-- 分组表 -->
-    <div class="grid grid-cols-1 gap-3 xl:grid-cols-2">
-      <section v-for="g in filtered" :key="g.name" class="glass-card px-4 py-3">
-        <div class="mb-1.5 flex items-center justify-between">
-          <h3 class="text-[13px] font-semibold text-content">{{ g.name }}</h3>
-          <span class="font-num text-[10px] text-content-faint">{{ g.items.length }} 项</span>
-        </div>
-        <div class="flex flex-col">
-          <div
-            v-for="it in g.items"
-            :key="it.key"
-            class="grid grid-cols-[minmax(0,1fr)_auto_auto_auto] items-center gap-2 border-t border-base-600/30 py-1 first:border-t-0"
-            :title="`${it.key}${it.note ? ' · ' + it.note : ''}`"
-          >
-            <div class="min-w-0">
-              <div class="truncate text-[11px] text-content">{{ it.label }}</div>
-              <div class="font-num truncate text-[10px] text-content-faint">{{ it.key }}</div>
+    <!-- 分组 tab -->
+    <div class="glass-card p-3">
+      <div class="flex flex-wrap items-center gap-0.5 border-b border-base-600/60 pb-1">
+        <button
+          v-for="g in groups"
+          :key="g.name"
+          type="button"
+          class="flex items-center gap-1 rounded px-2 py-1 text-[11px] font-medium transition-colors"
+          :class="
+            activeGroup === g.name
+              ? 'bg-primary/15 text-primary-light shadow-[inset_0_0_0_1px_rgba(56,189,248,0.25)]'
+              : 'text-content-muted hover:bg-base-700/60 hover:text-content'
+          "
+          @click="activeGroup = g.name"
+        >
+          {{ g.name }}
+          <span class="font-num text-[10px] text-content-faint">{{ g.total }}</span>
+          <span v-if="g.changed" class="rounded bg-primary/20 px-1 font-num text-[10px] text-primary-light">
+            {{ g.changed }}
+          </span>
+        </button>
+      </div>
+
+      <!-- 参数行：标签 + 控件 + 来源 -->
+      <div class="mt-2 grid grid-cols-1 gap-1 lg:grid-cols-2 2xl:grid-cols-3">
+        <div
+          v-for="it in currentItems"
+          :key="it.key"
+          class="flex items-center justify-between gap-2 rounded border px-2 py-1"
+          :class="
+            isDirty(it)
+              ? 'border-primary/60 bg-primary/10'
+              : 'border-base-600/40 bg-base-700/30'
+          "
+          :title="`${it.key}${it.note ? ' · ' + it.note : ''}`"
+        >
+          <div class="min-w-0 flex-1">
+            <div class="truncate text-[11px] text-content">{{ it.label }}</div>
+            <div class="font-num truncate text-[10px] text-content-faint">
+              {{ it.key }} · {{ fmtValue(it) }}
             </div>
-            <div class="font-num max-w-[180px] truncate text-right text-[12px] text-content">
-              {{ fmtValue(it) }}
-            </div>
-            <span
-              class="rounded border px-1.5 py-0.5 text-[10px]"
-              :class="sourceMeta[it.source]?.cls ?? 'border-base-600 text-content-faint'"
-            >
-              {{ sourceMeta[it.source]?.text ?? it.source }}
-            </span>
-            <span
-              class="rounded border px-1.5 py-0.5 text-[10px]"
-              :class="
-                it.restart_required
-                  ? 'border-base-600 bg-base-700 text-content-faint'
-                  : 'border-primary/40 bg-primary/10 text-primary-light'
-              "
-            >
-              {{ it.restart_required ? '需重启' : '即时' }}
-            </span>
           </div>
-        </div>
-      </section>
-    </div>
 
-    <p v-if="!loading && filtered.length === 0" class="py-8 text-center text-[12px] text-content-faint">
-      没有匹配的参数
-    </p>
+          <!-- 开关 -->
+          <button
+            v-if="it.kind === 'bool'"
+            type="button"
+            class="relative h-4 w-8 shrink-0 rounded-full transition-colors"
+            :class="draft[it.key] ? 'bg-primary' : 'bg-base-600'"
+            @click="draft[it.key] = !draft[it.key]"
+          >
+            <span
+              class="absolute top-0.5 h-3 w-3 rounded-full bg-white transition-all"
+              :class="draft[it.key] ? 'left-[18px]' : 'left-0.5'"
+            ></span>
+          </button>
+
+          <!-- 数字 -->
+          <input
+            v-else-if="it.kind === 'number'"
+            v-model.number="draft[it.key]"
+            type="number"
+            step="any"
+            class="h-6 w-[76px] shrink-0 rounded border bg-base-800/60 px-1 text-right font-num text-[12px] text-content outline-none focus:border-primary"
+            :class="isDirty(it) ? 'border-primary/60' : 'border-base-600'"
+          />
+
+          <!-- 文本 -->
+          <input
+            v-else-if="it.kind === 'text'"
+            v-model="draft[it.key]"
+            type="text"
+            class="h-6 w-[130px] shrink-0 rounded border bg-base-800/60 px-1 text-right font-num text-[12px] text-content outline-none focus:border-primary"
+            :class="isDirty(it) ? 'border-primary/60' : 'border-base-600'"
+          />
+
+          <!-- 只读（路径/列表） -->
+          <span
+            v-else
+            class="shrink-0 rounded border border-base-600 px-1.5 py-0.5 text-[10px] text-content-faint"
+          >
+            需重启
+          </span>
+
+          <span
+            class="shrink-0 rounded border px-1.5 py-0.5 text-[10px]"
+            :class="sourceMeta[it.source]?.cls ?? 'border-base-600 text-content-faint'"
+          >
+            {{ sourceMeta[it.source]?.text ?? it.source }}
+          </span>
+
+          <button
+            v-if="isDirty(it)"
+            class="shrink-0 rounded p-0.5 text-content-faint transition-colors hover:text-primary"
+            title="撤销这一行的改动"
+            @click="revertRow(it)"
+          >
+            <RotateCcw class="h-3 w-3" />
+          </button>
+        </div>
+      </div>
+
+      <p v-if="!currentItems.length" class="py-6 text-center text-[12px] text-content-faint">
+        没有匹配的参数
+      </p>
+    </div>
   </div>
 </template>
