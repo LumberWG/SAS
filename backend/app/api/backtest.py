@@ -87,6 +87,10 @@ class BacktestRequest(BaseModel):
     weak_exposure: float | None = Field(None, gt=0, le=1, description="弱市总仓位上限（需 regime_ma）")
     regime_flat_below: bool | None = Field(None, description="最弱档清仓")
     regime_ramp_days: int | None = Field(None, ge=0, le=20, description="弱转强后爬坡天数（0=关闭）")
+    dd_pause_at: float | None = Field(
+        None, gt=0, le=1, description="组合回撤断路器阈值（净值回撤达到即暂停买入）"
+    )
+    dd_pause_days: int | None = Field(None, ge=1, le=120, description="暂停买入的交易日数")
     # ---- 仓位 / 评分 / 轮动 ----
     max_total_exposure: float | None = Field(None, gt=0, le=1, description="总仓位上限")
     single_position_ratio: float | None = Field(None, gt=0, le=1, description="单票仓位上限")

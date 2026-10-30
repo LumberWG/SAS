@@ -114,6 +114,12 @@ class PipelineParams:
     partial_tp_at: float | None = None     # 分段止盈触发涨幅（相对成本），首次达到时卖出一部分
     partial_tp_ratio: float = 0.5          # 分段止盈卖出比例（按整手取整）
     stop_confirm_close: bool = False       # 止损改收盘确认：收盘跌破止损线，次日开盘卖出
+    # ---- E49：组合级回撤断路器（记录 #69）----
+    #: 组合权益相对自身历史峰值的回撤达到该比例时，**暂停新开仓** N 个交易日（仓位与卖出不受影响）。
+    #: None = 关闭（默认）。与 #59 的弱市择时的区别：那个看指数，这个看**策略自己的净值**。
+    #: 目的：不提升中位，只压尾部（#61 §7 点名的「组合级回撤断路器」是剩下未测的形态方向）。
+    dd_pause_at: float | None = None
+    dd_pause_days: int = 10                # 触发后暂停买入的交易日数
     # ---- E13：组合层面择时（大盘走弱时降总仓位，而不是砍个股） ----
     weak_exposure: float | None = None     # 弱市总仓位上限（需同时设置 regime_ma）
     # ---- E33：反转版选股（把 14 因子总分的符号翻转） ----
@@ -783,6 +789,8 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
     pending_buys: list[dict] = []
     pending_sells: dict[str, str] = {}
     bench_value = 1.0
+    paused_until: int | None = None     # E49：暂停买入到该 day_idx（不含）
+    dd_peak = initial_capital           # E49：组合净值的历史峰值
 
     def price_on(code: str, date: str, field: str = "close") -> float | None:
         idx = pos_index.get(code, {}).get(date)
@@ -1268,6 +1276,9 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
     for day_idx, date in enumerate(dates):
         rotation_used = 0  # 每日轮动次数上限独立计数
         rebalance = day_idx % rebalance_every == 0  # 交易日序号对齐，避免周末/停牌导致漂移
+        # E49 组合级回撤断路器：暂停期内不生成买入委托（止损/止盈/信号卖出照常）
+        if paused_until is not None and day_idx < paused_until:
+            rebalance = False
 
         # ---------- 1) 开盘执行昨日收盘产生的委托 ----------
         for code, reason in list(pending_sells.items()):
@@ -1628,11 +1639,24 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
             bench_value *= 1 + sum(pcts) / len(pcts)
         # 基准净值与策略净值同轴（均按 initial_capital 起算），前端可叠加对比
         mv = market_value(date)
+        eq_close = cash + mv
         equity_curve.append({
-            "date": date, "equity": round(cash + mv, 2),
+            "date": date, "equity": round(eq_close, 2),
             "benchmark": round(bench_value * initial_capital, 2),
             "cash": round(cash, 2), "positions": len(positions),
         })
+        # E49：组合级回撤断路器——当日收盘触发，次日起暂停新开仓 N 个交易日
+        if params.dd_pause_at is not None:
+            dd_peak = max(dd_peak, eq_close)
+            drawdown = eq_close / dd_peak - 1 if dd_peak > 0 else 0.0
+            if drawdown <= -float(params.dd_pause_at):
+                n_pause = max(1, int(params.dd_pause_days or 10))
+                if paused_until is None or paused_until <= day_idx:
+                    paused_until = day_idx + n_pause
+                    logger.info(
+                        "回撤断路器触发 %s：回撤 %.2f%% ≤ −%.0f%%，暂停买入至第 %d 个交易日",
+                        date, drawdown * 100, float(params.dd_pause_at) * 100, paused_until,
+                    )
 
     # ---------- 收尾 ----------
     last = dates[-1]
@@ -1712,6 +1736,8 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
             "partial_tp_ratio": params.partial_tp_ratio,
             "stop_confirm_close": params.stop_confirm_close,
             "weak_exposure": params.weak_exposure,
+            "dd_pause_at": params.dd_pause_at,
+            "dd_pause_days": int(params.dd_pause_days or 0),
             "regime_fast_ma": params.regime_fast_ma,
             "regime_tiers": list(params.regime_tiers) if params.regime_tiers else None,
             "regime_flat_below": params.regime_flat_below,

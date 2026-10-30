@@ -530,6 +530,13 @@ PROFILES: dict[str, dict] = {
     "add30": {"add_per_day": 30},
     "add80": {"add_per_day": 80},
     "maxpos12": {"max_positions": 12},
+    # ---- E49：组合级回撤断路器（记录 #69）----
+    # 与 #59 的弱市择时不同：那个看指数（外部），这个看策略自己的净值（内部）。
+    # 目标不是提中位，而是压尾部（#61 §7 点名的剩余方向）；卖出与止损照常，只停新开仓。
+    "ddc10": {"dd_pause_at": 0.10, "dd_pause_days": 10},
+    "ddc15": {"dd_pause_at": 0.15, "dd_pause_days": 10},
+    "ddc10_20": {"dd_pause_at": 0.10, "dd_pause_days": 20},
+    "ddc10_s30": {"dd_pause_at": 0.10, "dd_pause_days": 10, "slippage": 0.003},
 }
 
 # ---- E48：成交价随机扰动（稳健性检验，BACKTEST_LOG #67 §8）----
