@@ -49,6 +49,20 @@
      GIANT_CODES 黑名单（银行/石油石化/保险/券商权重/白酒等 34 只）→ giant
      名称含 *ST / ST / 退 → st
 ```
+
+> `exclude_giant` 参数（默认 `True`）用于「③ 交易队列」的大盘股开关：开关关闭时传 `False`，
+> 黑名单与 `total_mv > 100 亿` 阈值同时放开。回测侧不传该参数（口径不变）。
+
+**范围过滤是三道，不只是候选池**（2026-10-30 补齐）：
+
+| 环节 | 位置 | 说明 |
+|---|---|---|
+| 候选池 | `scanner` 扫描前 | 池子按 `is_tradable` 过滤（原有） |
+| 写自选 | `scanner._auto_watch_hits` / `scheduler.auto_watch_top_hits` | 兜底再判一次，范围外的不写入（曾是漏洞：盘后选股路径可把 688 写进自选） |
+| 分析 | `recommender.analyze_watchlist` | 范围外的票不参与分析（已持仓的例外，仍需卖出建议）；否则它们会长期占住「建议买入」「切入点判定」面板 |
+
+> 名称在**入库时**就用 `clean_name()` 清洗（`db.add_watch` / `add_watch_many`），
+> 乱码（GBK 误读）不会再写进 `watchlist`；接口另有回填逻辑，历史脏数据会被修。
 > 该函数只按「代码 + 名称」判断，不查股票池，因此可脱库使用。
 > 实战坑：`600000` 是浦发银行、在巨无霸黑名单里，用它做测试代码会被下单准入直接拒绝（曾导致 16 个单测红）。
 
@@ -165,12 +179,25 @@ action = buy   若 total ≥ +15
 > 默认 `paper_rotation_enabled=False`：回测实测轮动在 Top300 池下几乎不触发，却是强制卖出与
 > 换手（月换手约 2.2 个资本）的主要来源，故线上关闭。
 
-### 4.5 买入准入 `_buy_allowed()`（四道闸，任一不满足即 skip）
+### 4.5 买入准入 `_buy_allowed()`（五道闸，任一不满足即 skip）
 1. **北交所**：`paper_exclude_bj` 且代码属北交所（920/43/83/87/4/8）→ `北交所股票已排除`；
-2. **板块范围**：`is_tradable(code, name)` 为假 → `不在沪深主板+创业板范围（scope 过滤）`；
-3. **名称可信** `_name_ok()`：非空、不等于代码、无乱码（`\ufffd` / GBK-UTF8 往返不一致）→ 否则拒绝（股票池可能不完整）；
-4. **成交额池**：`paper_pool_top_n(默认300) > 0` 时，代码须在当日成交额 TopN 集合内（与回测股票池口径对齐）；
+2. **板块范围**：`is_tradable(code, name, exclude_giant=large_on)` 为假 → `不在沪深主板+创业板范围（scope 过滤）`；
+3. **大市值**：`large_cap_rule()` 为开（默认开）时
+   - `GIANT_CODES` 黑名单生效（即上一条的 `exclude_giant=True`）；
+   - 且 `总市值(total_mv) > paper_large_cap_yi(默认 100) 亿` → `总市值 N亿 > M亿（大盘股已排除）`；
+   - 市值取不到（快照抖动）时**不拦**，与成交额池同一原则；
+   - 开关**关闭**时上述两条同时失效 → 银行/石油等大市值票才允许进队列；
+4. **名称可信** `_name_ok()`：非空、不等于代码、无乱码（`\ufffd` / GBK-UTF8 往返不一致）→ 否则拒绝（股票池可能不完整）；
+5. **成交额池**：`paper_pool_top_n(默认300) > 0` 时，代码须在当日成交额 TopN 集合内（与回测股票池口径对齐）；
    快照拿不到时本轮不限制（不让数据源抖动直接停交易）。
+
+> 大盘股开关的运行时状态存 `app_state`（键 `paper_exclude_large_cap` / `paper_large_cap_yi`），
+> 接口 `GET/POST /api/paper/queue-filter`，页面在「③ 三选 · 交易队列」顶部。改完对**下一轮扫描**生效
+> （选股候选池同样按该规则剔除，见 §1.2），因此不需要重启服务。
+
+> **闸门顺序**：先 `_buy_allowed`（永久性原因：范围 / 大市值 / 名称 / 池子），再「大盘弱势」（临时性）。
+> 反过来会让弱市期间全部候选都显示「大盘弱势」，把 688 这类「本来就不该买」的票也伪装成临时拒绝
+> ——2026-10-30 的「切入点判定」面板就是这个症状（5 只里 4 只是科创板，全部标着「大盘弱势」）。
 
 ### 4.6 大盘择时买入闸门（弱市暂停买入）
 ```
@@ -287,6 +314,11 @@ paper_position_lots(code, shares, cost_price, buy_date, tag)
 
 ## 6. 关键可调参数清单
 
+> 本表是**文档口径**的参考值。要查「当前实际在跑什么」，看 `/settings` 页或 `GET /api/settings`
+> ——它由 `app/param_specs.py` 从 `Settings.model_fields` + 源码注释生成，标注每项的
+> 当前生效值 / 来源（app_state 覆盖 > .env > 默认 > 硬编码）/ 是否需重启，不会再与代码漂移。
+> 新增配置项时**只需在 `config.py` 写好注释**，设置页会自动带出中文标签。
+
 | 配置项 | 默认 | 含义 | 出处 |
 |---|---|---|---|
 | `paper_initial_capital` | 100000 | 模拟账户初始资金 | engine |
@@ -302,6 +334,8 @@ paper_position_lots(code, shares, cost_price, buy_date, tag)
 | `paper_trade_queue_top_m` | 5 | 交易队列**买入**容量 topM（0=不限，卖出不受限） | live |
 | `paper_exclude_bj` | True | 排除北交所 | engine |
 | `paper_pool_top_n` | 300 | 成交额 TopN 池（对齐回测，0=不限） | engine |
+| `paper_exclude_large_cap` | True | 大盘股开关（页面上可改，写 `app_state` 覆盖） | engine/scanner |
+| `paper_large_cap_yi` | 100 | 总市值阈值（亿元），> 该值不进队列 | engine/scanner |
 | `paper_atr_stop_mult / max` | 2.0 / 0.20 | ATR 止损放宽倍数/上限（0=固定 8%） | engine |
 | `paper_breakeven_pct` | 0.10 | 浮盈达此比例止损上移到成本（保本） | engine |
 | `paper_trail_pct` | 0.10 | 从持仓期最高价回撤此比例卖出（移动止损） | engine |
@@ -334,6 +368,9 @@ paper_position_lots(code, shares, cost_price, buy_date, tag)
 - **成交时点**：实盘买入收敛到开盘窗口（默认 09:30 起 5 分钟内），与回测"次日开盘价成交"对齐。
 - **股票池**：实盘买入准入强制"当日成交额 TopN 池"（`paper_pool_top_n=300`），与回测每日成交额 TopN 同一口径。
 - **范围过滤**：实盘 `_buy_allowed` 与回测 `board_prefixes` / `scope.is_tradable` 同源，回测选不到的票实盘也买不到。
+- **大盘股过滤是实盘独有（回测无法建模）**：`total_mv` 只存在实时快照里，`data/klines/` 没有市值字段，
+  回测池子不按市值剔除。所以线上开着 100 亿阈值时，实盘的可选集合比回测**窄**，
+  两边的超额不能直接对读——对比时应把回测限制在「当日市值 ≤ 阈值」的子集，或临时关掉开关。
 - **评分模型**：`compute_factors` 在选股建议与回测中复用同一套权重与阈值，外部 `weights` 仅做参数实验，自动归一化回 100 分制。
 - **止损口径**：回测止损用 `max(8%, 2×ATR%)` 建仓时定死，与 `_stop_distance` 一致。
 
