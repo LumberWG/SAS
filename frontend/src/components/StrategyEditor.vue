@@ -92,7 +92,7 @@ function resetDefaults() {
           <Settings2 class="h-4 w-4 text-primary-light" />
           <div>
             <h3 class="text-subheading">{{ strategy.name }} · 参数编辑</h3>
-            <p class="mt-0.5 text-[11px] text-content-faint">
+            <p class="mt-0.5 text-[12.5px] text-content-faint">
               {{ strategy.category }} · 最少 {{ strategy.min_bars }} 根K线
               <span
                 v-if="strategy.custom"
@@ -112,21 +112,21 @@ function resetDefaults() {
 
       <!-- 策略说明 -->
       <div
-        class="border-b border-base-600/60 bg-base-700/30 px-5 py-3 text-[12px] leading-relaxed text-content-muted"
+        class="border-b border-base-600/60 bg-base-700/30 px-5 py-3 text-[13.5px] leading-relaxed text-content-muted"
       >
         {{ strategy.description }}
       </div>
 
       <!-- 参数表单 -->
       <div class="max-h-[50vh] space-y-4 overflow-y-auto px-5 py-4">
-        <p v-if="!hasParams" class="py-6 text-center text-[13px] text-content-faint">
+        <p v-if="!hasParams" class="py-6 text-center text-[14.5px] text-content-faint">
           该策略无可调参数
         </p>
 
         <div v-for="(spec, key) in strategy.parameters" :key="key" class="space-y-1.5">
           <!-- 布尔：开关 -->
           <div v-if="spec.type === 'bool'" class="flex items-center justify-between">
-            <span class="text-[13px] text-content">{{ spec.label }}</span>
+            <span class="text-[14.5px] text-content">{{ spec.label }}</span>
             <button
               class="relative h-5 w-9 rounded-full transition-colors"
               :class="form[key] ? 'bg-primary' : 'bg-base-600'"
@@ -144,10 +144,10 @@ function resetDefaults() {
             v-else-if="spec.type === 'select'"
             class="flex items-center justify-between gap-3"
           >
-            <span class="shrink-0 text-[13px] text-content">{{ spec.label }}</span>
+            <span class="shrink-0 text-[14.5px] text-content">{{ spec.label }}</span>
             <select
               :value="form[key]"
-              class="rounded-lg border border-base-600 bg-base-700 px-3 py-1.5 text-[13px] text-content outline-none focus:border-primary"
+              class="rounded-lg border border-base-600 bg-base-700 px-3 py-1.5 text-[14.5px] text-content outline-none focus:border-primary"
               @change="form[key] = ($event.target as HTMLSelectElement).value"
             >
               <option v-for="opt in spec.options ?? []" :key="opt[0]" :value="opt[0]">
@@ -159,7 +159,7 @@ function resetDefaults() {
           <!-- 数值：输入框 + 滑块 -->
           <div v-else>
             <div class="flex items-center justify-between">
-              <span class="text-[13px] text-content">{{ spec.label }}</span>
+              <span class="text-[14.5px] text-content">{{ spec.label }}</span>
               <div class="flex items-center gap-1.5">
                 <input
                   type="number"
@@ -167,10 +167,10 @@ function resetDefaults() {
                   :max="spec.max ?? undefined"
                   :step="spec.step ?? undefined"
                   :value="form[key]"
-                  class="w-20 rounded-lg border border-base-600 bg-base-700 px-2 py-1 text-right font-num text-[13px] text-content outline-none focus:border-primary"
+                  class="w-20 rounded-lg border border-base-600 bg-base-700 px-2 py-1 text-right font-num text-[14.5px] text-content outline-none focus:border-primary"
                   @input="form[key] = Number(($event.target as HTMLInputElement).value)"
                 />
-                <span v-if="spec.unit" class="w-6 text-[11px] text-content-faint">{{
+                <span v-if="spec.unit" class="w-6 text-[12.5px] text-content-faint">{{
                   spec.unit
                 }}</span>
               </div>
@@ -196,17 +196,17 @@ function resetDefaults() {
 
       <!-- 底部操作 -->
       <div class="border-t border-base-600/60 px-5 py-4">
-        <p v-if="errorMsg" class="mb-2 text-[12px] text-up">{{ errorMsg }}</p>
+        <p v-if="errorMsg" class="mb-2 text-[13.5px] text-up">{{ errorMsg }}</p>
         <div class="flex items-center gap-2">
           <input
             v-model="customName"
             type="text"
             maxlength="30"
             placeholder="策略名称"
-            class="min-w-0 flex-1 rounded-lg border border-base-600 bg-base-700 px-3 py-2 text-[13px] text-content outline-none transition-colors placeholder:text-content-faint focus:border-primary"
+            class="min-w-0 flex-1 rounded-lg border border-base-600 bg-base-700 px-3 py-2 text-[14.5px] text-content outline-none transition-colors placeholder:text-content-faint focus:border-primary"
           />
           <button
-            class="btn btn-primary px-4 py-2 text-[13px]"
+            class="btn btn-primary px-4 py-2 text-[14.5px]"
             :disabled="saving || !customName.trim() || !hasParams"
             @click="save"
           >
@@ -215,19 +215,19 @@ function resetDefaults() {
           </button>
           <button
             v-if="strategy.custom"
-            class="rounded-lg border border-down/40 px-3 py-2 text-[13px] text-down transition-colors hover:bg-down/10"
+            class="rounded-lg border border-down/40 px-3 py-2 text-[14.5px] text-down transition-colors hover:bg-down/10"
             @click="remove"
           >
             删除
           </button>
           <button
-            class="rounded-lg border border-base-600 px-3 py-2 text-[13px] text-content-muted transition-colors hover:border-primary/50 hover:text-primary-light"
+            class="rounded-lg border border-base-600 px-3 py-2 text-[14.5px] text-content-muted transition-colors hover:border-primary/50 hover:text-primary-light"
             @click="resetDefaults"
           >
             重置
           </button>
         </div>
-        <p class="mt-2 text-[11px] text-content-faint">
+        <p class="mt-2 text-[12.5px] text-content-faint">
           另存为将创建新策略（可重命名），不会修改内置策略；保存后即可在扫描与回测中选择
         </p>
       </div>

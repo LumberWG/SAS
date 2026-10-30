@@ -10,7 +10,7 @@ const props = defineProps<{
 }>()
 
 const cls = computed(() => {
-  const base = props.size === 'lg' ? 'px-4 py-1.5 text-[15px]' : 'px-2.5 py-0.5 text-[11px]'
+  const base = props.size === 'lg' ? 'px-4 py-1.5 text-[16.5px]' : 'px-2.5 py-0.5 text-[12.5px]'
   switch (props.conclusion) {
     case '买入':
       return `${base} border-up/50 bg-up/15 text-up`

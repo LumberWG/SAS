@@ -166,8 +166,8 @@ onUnmounted(() => {
           <Lightbulb class="h-5 w-5 text-white" />
         </div>
         <div>
-          <h2 class="text-[17px] font-semibold text-content">智能盯盘建议</h2>
-          <p class="mt-0.5 text-[11px] leading-relaxed text-content-faint">
+          <h2 class="text-[18.5px] font-semibold text-content">智能盯盘建议</h2>
+          <p class="mt-0.5 text-[12.5px] leading-relaxed text-content-faint">
             第 2 次排序：自选股按 14 因子加权评分（±100 分）排名，总分 ≥ +15 买入、≤ -15 卖出；
             建议产生后由模拟盘按评分加权仓位实时撮合。盘后 15:35 生成次日关注，收盘评分 Top
             {{ summary?.auto_watch_top_n ?? 10 }} 自动加入自选
@@ -176,24 +176,24 @@ onUnmounted(() => {
       </div>
       <div class="flex items-center gap-3">
         <div class="rounded-lg border border-up/30 bg-up/10 px-4 py-2 text-center">
-          <div class="font-num text-[22px] font-bold leading-none text-up">
+          <div class="font-num text-[23.5px] font-bold leading-none text-up">
             {{ summary?.buy_count ?? 0 }}
           </div>
-          <div class="mt-1 text-[11px] text-content-faint">建议买入</div>
+          <div class="mt-1 text-[12.5px] text-content-faint">建议买入</div>
         </div>
         <div class="rounded-lg border border-down/30 bg-down/10 px-4 py-2 text-center">
-          <div class="font-num text-[22px] font-bold leading-none text-down">
+          <div class="font-num text-[23.5px] font-bold leading-none text-down">
             {{ summary?.sell_count ?? 0 }}
           </div>
-          <div class="mt-1 text-[11px] text-content-faint">建议卖出</div>
+          <div class="mt-1 text-[12.5px] text-content-faint">建议卖出</div>
         </div>
         <div class="rounded-lg border border-warn/30 bg-warn/10 px-4 py-2 text-center">
-          <div class="font-num text-[22px] font-bold leading-none text-warn">
+          <div class="font-num text-[23.5px] font-bold leading-none text-warn">
             {{ summary?.focus_count ?? 0 }}
           </div>
-          <div class="mt-1 text-[11px] text-content-faint">明日关注</div>
+          <div class="mt-1 text-[12.5px] text-content-faint">明日关注</div>
         </div>
-        <span v-if="updatedAt" class="text-[11px] text-content-faint">更新于 {{ updatedAt }}</span>
+        <span v-if="updatedAt" class="text-[12.5px] text-content-faint">更新于 {{ updatedAt }}</span>
       </div>
     </div>
 
@@ -215,21 +215,21 @@ onUnmounted(() => {
           ></span>
         </span>
         <span
-          class="text-[12px] font-medium"
+          class="text-[13.5px] font-medium"
           :class="filter.exclude_large_cap ? 'text-primary' : 'text-content-muted'"
         >
           排除大盘股
         </span>
       </button>
 
-      <label class="flex items-center gap-1 text-[11px] text-content-muted">
+      <label class="flex items-center gap-1 text-[12.5px] text-content-muted">
         {{ filter.basis }} &gt;
         <input
           v-model.number="capYiInput"
           type="number"
           min="1"
           step="10"
-          class="h-6 w-[64px] rounded border border-base-600 bg-base-700 px-1 text-right font-num text-[12px] text-content outline-none focus:border-primary"
+          class="h-6 w-[64px] rounded border border-base-600 bg-base-700 px-1 text-right font-num text-[13.5px] text-content outline-none focus:border-primary"
           @keyup.enter="saveFilter"
           @blur="saveFilter"
         />
@@ -238,12 +238,12 @@ onUnmounted(() => {
 
       <span
         v-if="filter.exclude_large_cap"
-        class="rounded border border-base-600 px-1.5 py-0.5 font-num text-[10px] text-content-faint"
+        class="rounded border border-base-600 px-1.5 py-0.5 font-num text-[11.5px] text-content-faint"
       >
         挡掉 {{ filter.excluded_count }} / {{ filter.universe }} 只
       </span>
 
-      <span class="ml-auto text-[10px] text-content-faint">
+      <span class="ml-auto text-[11.5px] text-content-faint">
         {{
           filter.exclude_large_cap
             ? '银行/石油等大市值票不进建议与队列'
@@ -260,7 +260,7 @@ onUnmounted(() => {
             <ArrowUpCircle class="h-4 w-4 text-up" />
             <h3 class="text-subheading">建议买入</h3>
           </div>
-          <span class="text-[11px] text-content-faint">{{ buys.length }} 只</span>
+          <span class="text-[12.5px] text-content-faint">{{ buys.length }} 只</span>
         </div>
         <div class="max-h-[480px] space-y-2 overflow-y-auto">
           <div
@@ -273,24 +273,24 @@ onUnmounted(() => {
               <div class="flex items-center gap-2">
                 <span
                   v-if="item.rank"
-                  class="rounded border border-up/40 bg-up/10 px-1.5 py-0.5 font-num text-[10px] font-semibold text-up"
+                  class="rounded border border-up/40 bg-up/10 px-1.5 py-0.5 font-num text-[11.5px] font-semibold text-up"
                   title="第 2 次排序名次"
                 >
                   #{{ item.rank }}
                 </span>
-                <span class="text-[14px] font-semibold text-content">{{ item.name }}</span>
-                <span class="font-num text-[11px] text-content-faint">{{ item.code }}</span>
+                <span class="text-[15.5px] font-semibold text-content">{{ item.name }}</span>
+                <span class="font-num text-[12.5px] text-content-faint">{{ item.code }}</span>
               </div>
               <span
-                class="font-num text-[15px] font-bold"
+                class="font-num text-[16.5px] font-bold"
                 :class="scoreClass(item.score)"
                 :title="`综合评分 ${item.score.toFixed(2)}（买卖阈值 ±15）`"
               >
                 {{ scoreText(item.score) }}
               </span>
             </div>
-            <p class="mt-1.5 text-[11px] leading-relaxed text-content-muted">{{ item.reason }}</p>
-            <div class="mt-2 flex items-center gap-4 font-num text-[11px]">
+            <p class="mt-1.5 text-[12.5px] leading-relaxed text-content-muted">{{ item.reason }}</p>
+            <div class="mt-2 flex items-center gap-4 font-num text-[12.5px]">
               <span class="text-content" :title="`建议价 ${item.price.toFixed(2)}`">
                 现价 {{ currentPrice(item).toFixed(2) }}
                 <span v-if="item.realtime" :class="pctClass(item.realtime.pct_change)">
@@ -303,7 +303,7 @@ onUnmounted(() => {
             </div>
             <div v-if="item.detail && item.detail.length > 0" class="mt-2">
               <button
-                class="flex items-center gap-1 text-[11px] text-content-faint transition-colors hover:text-content"
+                class="flex items-center gap-1 text-[12.5px] text-content-faint transition-colors hover:text-content"
                 @click.stop="toggleDetail(item.code)"
               >
                 <ChevronDown
@@ -319,7 +319,7 @@ onUnmounted(() => {
                 <div
                   v-for="f in item.detail"
                   :key="f.key"
-                  class="flex items-center justify-between gap-2 text-[11px]"
+                  class="flex items-center justify-between gap-2 text-[12.5px]"
                 >
                   <span class="text-content-muted">
                     <span class="text-content-faint">{{ f.group }} ·</span> {{ f.label }}
@@ -337,8 +337,8 @@ onUnmounted(() => {
           </div>
           <div v-if="buys.length === 0" class="flex flex-col items-center gap-2 py-10 text-content-faint">
             <ArrowUpCircle class="h-8 w-8 opacity-30" />
-            <p class="text-[12px]">暂无买入建议</p>
-            <p class="text-[11px]">交易时段每分钟自动分析自选股，建议产生后即时撮合成交；未配置自选股时无建议</p>
+            <p class="text-[13.5px]">暂无买入建议</p>
+            <p class="text-[12.5px]">交易时段每分钟自动分析自选股，建议产生后即时撮合成交；未配置自选股时无建议</p>
           </div>
         </div>
       </section>
@@ -350,7 +350,7 @@ onUnmounted(() => {
             <ArrowDownCircle class="h-4 w-4 text-down" />
             <h3 class="text-subheading">建议卖出</h3>
           </div>
-          <span class="text-[11px] text-content-faint">{{ sells.length }} 只</span>
+          <span class="text-[12.5px] text-content-faint">{{ sells.length }} 只</span>
         </div>
         <div class="max-h-[480px] space-y-2 overflow-y-auto">
           <div
@@ -363,24 +363,24 @@ onUnmounted(() => {
               <div class="flex items-center gap-2">
                 <span
                   v-if="item.rank"
-                  class="rounded border border-down/40 bg-down/10 px-1.5 py-0.5 font-num text-[10px] font-semibold text-down"
+                  class="rounded border border-down/40 bg-down/10 px-1.5 py-0.5 font-num text-[11.5px] font-semibold text-down"
                   title="第 2 次排序名次"
                 >
                   #{{ item.rank }}
                 </span>
-                <span class="text-[14px] font-semibold text-content">{{ item.name }}</span>
-                <span class="font-num text-[11px] text-content-faint">{{ item.code }}</span>
+                <span class="text-[15.5px] font-semibold text-content">{{ item.name }}</span>
+                <span class="font-num text-[12.5px] text-content-faint">{{ item.code }}</span>
               </div>
               <span
-                class="font-num text-[15px] font-bold"
+                class="font-num text-[16.5px] font-bold"
                 :class="scoreClass(item.score)"
                 :title="`综合评分 ${item.score.toFixed(2)}（买卖阈值 ±15）`"
               >
                 {{ scoreText(item.score) }}
               </span>
             </div>
-            <p class="mt-1.5 text-[11px] leading-relaxed text-content-muted">{{ item.reason }}</p>
-            <div class="mt-2 flex items-center gap-4 font-num text-[11px]">
+            <p class="mt-1.5 text-[12.5px] leading-relaxed text-content-muted">{{ item.reason }}</p>
+            <div class="mt-2 flex items-center gap-4 font-num text-[12.5px]">
               <span class="text-content" :title="`建议价 ${item.price.toFixed(2)}`">
                 现价 {{ currentPrice(item).toFixed(2) }}
                 <span v-if="item.realtime" :class="pctClass(item.realtime.pct_change)">
@@ -392,7 +392,7 @@ onUnmounted(() => {
             </div>
             <div v-if="item.detail && item.detail.length > 0" class="mt-2">
               <button
-                class="flex items-center gap-1 text-[11px] text-content-faint transition-colors hover:text-content"
+                class="flex items-center gap-1 text-[12.5px] text-content-faint transition-colors hover:text-content"
                 @click.stop="toggleDetail(item.code)"
               >
                 <ChevronDown
@@ -408,7 +408,7 @@ onUnmounted(() => {
                 <div
                   v-for="f in item.detail"
                   :key="f.key"
-                  class="flex items-center justify-between gap-2 text-[11px]"
+                  class="flex items-center justify-between gap-2 text-[12.5px]"
                 >
                   <span class="text-content-muted">
                     <span class="text-content-faint">{{ f.group }} ·</span> {{ f.label }}
@@ -426,8 +426,8 @@ onUnmounted(() => {
           </div>
           <div v-if="sells.length === 0" class="flex flex-col items-center gap-2 py-10 text-content-faint">
             <ArrowDownCircle class="h-8 w-8 opacity-30" />
-            <p class="text-[12px]">暂无卖出建议</p>
-            <p class="text-[11px]">自选股综合评分 ≤ -15（趋势/动量转弱）时出现在此列表</p>
+            <p class="text-[13.5px]">暂无卖出建议</p>
+            <p class="text-[12.5px]">自选股综合评分 ≤ -15（趋势/动量转弱）时出现在此列表</p>
           </div>
         </div>
       </section>
@@ -441,12 +441,12 @@ onUnmounted(() => {
           <h3 class="text-subheading">明日关注</h3>
           <span
             v-if="focusDate"
-            class="rounded-md border border-warn/40 bg-warn/10 px-2 py-0.5 text-[11px] text-warn"
+            class="rounded-md border border-warn/40 bg-warn/10 px-2 py-0.5 text-[12.5px] text-warn"
           >
             {{ focusDate }} 开盘重点关注
           </span>
         </div>
-        <span class="text-[11px] text-content-faint">
+        <span class="text-[12.5px] text-content-faint">
           盘后 15:35 全市场扫描评分 Top {{ summary?.focus_count ?? 10 }}
         </span>
       </div>
@@ -460,15 +460,15 @@ onUnmounted(() => {
           <div class="flex items-center gap-2.5">
             <Star class="h-3.5 w-3.5 text-warn" />
             <div>
-              <div class="text-[13px] font-medium text-content">{{ item.name }}</div>
-              <div class="font-num text-[11px] text-content-faint">{{ item.code }}</div>
+              <div class="text-[14.5px] font-medium text-content">{{ item.name }}</div>
+              <div class="font-num text-[12.5px] text-content-faint">{{ item.code }}</div>
             </div>
           </div>
           <div class="text-right">
-            <div class="font-num text-[14px] font-bold" :class="scoreClass(item.score)">
+            <div class="font-num text-[15.5px] font-bold" :class="scoreClass(item.score)">
               {{ item.score > 0 ? '+' : '' }}{{ item.score.toFixed(1) }}
             </div>
-            <div class="font-num text-[11px] text-content-muted" :title="`建议价 ${item.price.toFixed(2)}`">
+            <div class="font-num text-[12.5px] text-content-muted" :title="`建议价 ${item.price.toFixed(2)}`">
               {{ currentPrice(item).toFixed(2) }}
               <span v-if="item.realtime" class="ml-1" :class="pctClass(item.realtime.pct_change)">
                 {{ fmtPct(item.realtime.pct_change) }}
@@ -481,8 +481,8 @@ onUnmounted(() => {
           class="col-span-full flex flex-col items-center gap-2 py-10 text-content-faint"
         >
           <CalendarClock class="h-8 w-8 opacity-30" />
-          <p class="text-[12px]">暂无明日关注</p>
-          <p class="text-[11px]">每个交易日 15:35 盘后自动生成（需后端保持运行）</p>
+          <p class="text-[13.5px]">暂无明日关注</p>
+          <p class="text-[12.5px]">每个交易日 15:35 盘后自动生成（需后端保持运行）</p>
         </div>
       </div>
     </section>

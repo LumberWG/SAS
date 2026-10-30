@@ -12,15 +12,12 @@ import { BarChart, LineChart } from 'echarts/charts'
 import { GridComponent, TooltipComponent } from 'echarts/components'
 
 import { getAlerts, getIndexKline, getOverview, type MarketAlert, type MarketOverview } from '../api'
-import { chart, tooltipStyle } from '../lib/chartTheme'
+import { chartTheme, tooltipStyle } from '../lib/chartTheme'
 import { useMarketStore } from '../stores/market'
 
 use([CanvasRenderer, BarChart, LineChart, GridComponent, TooltipComponent])
 
 const market = useMarketStore()
-
-const UP = chart.up
-const DOWN = chart.down
 
 const overview = ref<MarketOverview | null>(null)
 const alerts = ref<MarketAlert[]>([])
@@ -138,14 +135,16 @@ function weightBorder(weight: number): string {
 
 // 温度环颜色跟随情绪权重
 const sentimentStroke = computed(() => {
+  const c = chartTheme()
   const w = overview.value?.sentiment?.weight ?? 0
-  if (w > 0) return UP
-  if (w < 0) return DOWN
-  return chart.textFaint
+  if (w > 0) return c.up
+  if (w < 0) return c.down
+  return c.textFaint
 })
 
 // 迷你走势 option
 function sparkOption(data: (number | null)[]) {
+  const c = chartTheme()
   return {
     animation: false,
     grid: { left: 0, right: 0, top: 4, bottom: 0 },
@@ -157,7 +156,7 @@ function sparkOption(data: (number | null)[]) {
         data,
         smooth: true,
         symbol: 'none',
-        lineStyle: { width: 1.5, color: chart.primaryLight },
+        lineStyle: { width: 1.5, color: c.primaryLight },
         areaStyle: {
           color: {
             type: 'linear',
@@ -166,8 +165,8 @@ function sparkOption(data: (number | null)[]) {
             x2: 0,
             y2: 1,
             colorStops: [
-              { offset: 0, color: `${chart.primaryLight}40` },
-              { offset: 1, color: `${chart.primaryLight}00` },
+              { offset: 0, color: `${c.primaryLight}40` },
+              { offset: 1, color: `${c.primaryLight}00` },
             ],
           },
         },
@@ -180,36 +179,37 @@ function sparkOption(data: (number | null)[]) {
 const breadthOption = computed(() => {
   const b = overview.value?.breadth
   if (!b) return {}
+  const c = chartTheme()
   return {
     animation: false,
-    grid: { left: 46, right: 34, top: 6, bottom: 4 },
+    grid: { left: 48, right: 36, top: 6, bottom: 4 },
     tooltip: {
       trigger: 'axis',
-      ...tooltipStyle,
+      ...tooltipStyle(c),
     },
     xAxis: {
       type: 'value',
-      axisLabel: { color: chart.textFaint, fontSize: 10 },
-      splitLine: { lineStyle: { color: chart.splitLine } },
+      axisLabel: { color: c.textFaint, fontSize: 11 },
+      splitLine: { lineStyle: { color: c.splitLine } },
     },
     yAxis: {
       type: 'category',
       data: ['跌停', '下跌', '平盘', '上涨', '涨停'],
-      axisLabel: { color: chart.textMuted, fontSize: 10 },
+      axisLabel: { color: c.textMuted, fontSize: 11 },
       axisTick: { show: false },
     },
     series: [
       {
         type: 'bar',
         data: [
-          { value: b.limit_down, itemStyle: { color: DOWN } },
-          { value: b.down, itemStyle: { color: `${chart.down}8C` } },
-          { value: b.flat, itemStyle: { color: chart.textFaint } },
-          { value: b.up, itemStyle: { color: `${chart.up}8C` } },
-          { value: b.limit_up, itemStyle: { color: UP } },
+          { value: b.limit_down, itemStyle: { color: c.down } },
+          { value: b.down, itemStyle: { color: `${c.down}8C` } },
+          { value: b.flat, itemStyle: { color: c.textFaint } },
+          { value: b.up, itemStyle: { color: `${c.up}8C` } },
+          { value: b.limit_up, itemStyle: { color: c.up } },
         ],
         barWidth: 10,
-        label: { show: true, position: 'right', color: chart.text, fontSize: 10 },
+        label: { show: true, position: 'right', color: c.text, fontSize: 11 },
       },
     ],
   }
@@ -220,7 +220,7 @@ const breadthOption = computed(() => {
   <div class="space-y-3">
     <!-- 操作栏 -->
     <div class="flex items-center justify-between">
-      <div class="flex items-center gap-2 text-[12px] text-content-faint">
+      <div class="flex items-center gap-2 text-[13.5px] text-content-faint">
         <span v-if="overview">数据更新于 {{ overview.updated_at }}</span>
       </div>
       <div class="flex items-center gap-2">
@@ -244,14 +244,14 @@ const breadthOption = computed(() => {
         class="glass-card px-3 py-2"
       >
         <div class="flex items-center justify-between gap-1">
-          <span class="truncate text-[11px] text-content-muted">{{ idx.name }}</span>
-          <span class="font-num shrink-0 text-[10px] text-content-faint">
+          <span class="truncate text-[12.5px] text-content-muted">{{ idx.name }}</span>
+          <span class="font-num shrink-0 text-[11.5px] text-content-faint">
             {{ fmtAmount(idx.amount ?? 0) }}
           </span>
         </div>
         <div class="mt-0.5 flex items-baseline gap-1.5">
           <span
-            class="font-num text-[19px] font-semibold leading-none"
+            class="font-num text-[20.5px] font-semibold leading-none"
             :class="{
               'text-up': tone(idx.pct_change) === 'up',
               'text-down': tone(idx.pct_change) === 'down',
@@ -261,7 +261,7 @@ const breadthOption = computed(() => {
             {{ idx.price?.toFixed(2) ?? '--' }}
           </span>
           <span
-            class="font-num text-[11px]"
+            class="font-num text-[12.5px]"
             :class="{
               'text-up': tone(idx.pct_change) === 'up',
               'text-down': tone(idx.pct_change) === 'down',
@@ -282,8 +282,8 @@ const breadthOption = computed(() => {
       <!-- 涨跌家数 -->
       <div class="glass-card px-3 py-2 lg:col-span-2">
         <div class="flex items-center justify-between">
-          <h3 class="text-[13px] font-medium text-content">涨跌家数</h3>
-          <span class="text-[11px] text-content-faint">
+          <h3 class="text-[14.5px] font-medium text-content">涨跌家数</h3>
+          <span class="text-[12.5px] text-content-faint">
             共 {{ overview?.breadth.total ?? 0 }} 只
             <template v-if="(overview?.breadth.untraded ?? 0) > 0">
               （未成交 {{ overview?.breadth.untraded }}）
@@ -311,20 +311,20 @@ const breadthOption = computed(() => {
             />
           </svg>
           <div class="absolute flex flex-col items-center">
-            <span class="font-num text-[18px] font-semibold leading-none text-content">
+            <span class="font-num text-[20px] font-semibold leading-none text-content">
               {{ overview?.temperature?.toFixed(1) ?? '--' }}
             </span>
-            <span class="text-[10px] text-content-muted">{{ tempLabel(overview?.temperature ?? 50) }}</span>
+            <span class="text-[11.5px] text-content-muted">{{ tempLabel(overview?.temperature ?? 50) }}</span>
           </div>
         </div>
         <div class="min-w-0 flex-1">
           <div class="flex items-center gap-1.5 text-content-muted">
             <Thermometer class="h-3.5 w-3.5" />
-            <span class="text-[12px]">市场情绪</span>
+            <span class="text-[13.5px]">市场情绪</span>
           </div>
           <div v-if="overview?.sentiment" class="mt-1">
             <span
-              class="inline-block rounded-full border px-2 py-0.5 text-[11px] font-semibold"
+              class="inline-block rounded-full border px-2 py-0.5 text-[12.5px] font-semibold"
               :class="weightBorder(overview.sentiment.weight)"
             >
               {{ overview.sentiment.level }}
@@ -332,11 +332,11 @@ const breadthOption = computed(() => {
                 {{ overview.sentiment.weight > 0 ? '+' : '' }}{{ overview.sentiment.weight }}
               </span>
             </span>
-            <p class="mt-1 line-clamp-2 text-[10px] leading-snug text-content-faint">
+            <p class="mt-1 line-clamp-2 text-[11.5px] leading-snug text-content-faint">
               {{ overview.sentiment.advice }}
             </p>
           </div>
-          <div class="mt-1 flex gap-3 font-num text-[11px]">
+          <div class="mt-1 flex gap-3 font-num text-[12.5px]">
             <span class="text-up">涨停 {{ overview?.breadth.limit_up ?? 0 }}</span>
             <span class="text-down">跌停 {{ overview?.breadth.limit_down ?? 0 }}</span>
           </div>
@@ -345,11 +345,11 @@ const breadthOption = computed(() => {
 
       <!-- 成交额汇总 -->
       <div class="glass-card flex flex-col justify-center px-3 py-2">
-        <div class="text-[11px] text-content-muted">全市场成交额</div>
-        <div class="font-num text-[20px] font-semibold leading-tight text-content">
+        <div class="text-[12.5px] text-content-muted">全市场成交额</div>
+        <div class="font-num text-[21.5px] font-semibold leading-tight text-content">
           {{ fmtAmount(overview?.total_amount ?? 0) }}
         </div>
-        <div class="font-num text-[10px] leading-snug text-content-faint">
+        <div class="font-num text-[11.5px] leading-snug text-content-faint">
           上涨 {{ overview?.breadth.up ?? 0 }} · 下跌 {{ overview?.breadth.down ?? 0 }} · 平盘
           {{ overview?.breadth.flat ?? 0 }}
         </div>
@@ -360,12 +360,12 @@ const breadthOption = computed(() => {
     <div class="glass-card px-3 py-2">
       <div class="mb-1.5 flex items-center justify-between">
         <div class="flex items-center gap-2">
-          <h3 class="text-[13px] font-medium text-content">异动提醒</h3>
-          <span class="rounded border border-base-600 px-1.5 py-0.5 text-[10px] text-content-faint">
+          <h3 class="text-[14.5px] font-medium text-content">异动提醒</h3>
+          <span class="rounded border border-base-600 px-1.5 py-0.5 text-[11.5px] text-content-faint">
             涨跌停 / 放量突破 / 急涨急跌
           </span>
         </div>
-        <span class="text-[11px] text-content-faint">最近 {{ alerts.length }} 条</span>
+        <span class="text-[12.5px] text-content-faint">最近 {{ alerts.length }} 条</span>
       </div>
 
       <div
@@ -378,28 +378,28 @@ const breadthOption = computed(() => {
           class="flex items-center justify-between gap-2 rounded border border-base-600/50 bg-base-700/30 px-2 py-1 transition-colors hover:border-primary/40"
         >
           <div class="flex min-w-0 items-center gap-1.5">
-            <span class="shrink-0 rounded border px-1.5 py-0.5 text-[10px] font-medium" :class="alertBadgeClass(alert.type)">
+            <span class="shrink-0 rounded border px-1.5 py-0.5 text-[11.5px] font-medium" :class="alertBadgeClass(alert.type)">
               {{ alert.type }}
             </span>
             <div class="min-w-0">
-              <div class="truncate text-[12px] font-medium text-content">{{ alert.name }}</div>
-              <div class="font-num truncate text-[10px] text-content-faint">
+              <div class="truncate text-[13.5px] font-medium text-content">{{ alert.name }}</div>
+              <div class="font-num truncate text-[11.5px] text-content-faint">
                 {{ alert.code }}<span v-if="alert.volume_ratio"> · 量比 {{ alert.volume_ratio.toFixed(1) }}</span>
               </div>
             </div>
           </div>
           <div class="shrink-0 text-right">
-            <div class="font-num text-[13px] font-semibold" :class="alertTone(alert.type)">
+            <div class="font-num text-[14.5px] font-semibold" :class="alertTone(alert.type)">
               {{ alert.pct_change > 0 ? '+' : '' }}{{ alert.pct_change.toFixed(2) }}%
             </div>
-            <div class="font-num text-[10px] text-content-faint">{{ alert.time }}</div>
+            <div class="font-num text-[11.5px] text-content-faint">{{ alert.time }}</div>
           </div>
         </div>
       </div>
 
       <div v-else class="flex flex-col items-center gap-1 py-6 text-content-faint">
-        <p class="text-[12px]">暂无异动记录</p>
-        <p class="text-[11px]">调度器每 5 分钟检测一次（需后端运行且处于数据可达网络）</p>
+        <p class="text-[13.5px]">暂无异动记录</p>
+        <p class="text-[12.5px]">调度器每 5 分钟检测一次（需后端运行且处于数据可达网络）</p>
       </div>
     </div>
   </div>

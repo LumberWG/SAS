@@ -11,7 +11,7 @@ import { LineChart } from 'echarts/charts'
 import { GridComponent, TooltipComponent } from 'echarts/components'
 
 import ConfirmDialog from '../components/ConfirmDialog.vue'
-import { chart, tooltipStyle } from '../lib/chartTheme'
+import { chartTheme, tooltipStyle } from '../lib/chartTheme'
 import { useNotifyStore } from '../stores/notify'
 import {
   getBacktestDefaults,
@@ -472,31 +472,39 @@ onMounted(async () => {
   }
 })
 
-const equityOption = ref({})
-function buildEquityOption(data: BacktestResult) {
+/**
+ * 净值曲线：直接由 `result` 派生（computed）。
+ *
+ * 早前这里是「ref + buildEquityOption()」，但那次重构漏了调用点，图表永远是空的；
+ * 改成 computed 后既修掉这个 bug，也让切主题时自动重算配色。
+ */
+const equityOption = computed(() => {
+  const data = result.value
+  if (!data?.equity_curve?.length) return {}
+  const c = chartTheme()
   const dates = data.equity_curve.map((p) => p.date)
   const equity = data.equity_curve.map((p) => p.equity)
   const benchmark = data.equity_curve.map((p) => p.benchmark ?? null)
-  equityOption.value = {
+  return {
     animation: false,
     backgroundColor: 'transparent',
-    grid: { left: 70, right: 20, top: 20, bottom: 40 },
+    grid: { left: 74, right: 20, top: 20, bottom: 40 },
     tooltip: {
       trigger: 'axis',
-      ...tooltipStyle,
+      ...tooltipStyle(c),
       valueFormatter: (v: number) => v.toLocaleString('zh-CN', { maximumFractionDigits: 0 }) + ' 元',
     },
     xAxis: {
       type: 'category',
       data: dates,
-      axisLabel: { color: chart.textFaint, fontSize: 10 },
-      axisLine: { lineStyle: { color: chart.axisLine } },
+      axisLabel: { color: c.textFaint, fontSize: 11 },
+      axisLine: { lineStyle: { color: c.axisLine } },
     },
     yAxis: {
       type: 'value',
       scale: true,
-      axisLabel: { color: chart.textFaint, fontSize: 10, formatter: (v: number) => (v / 10000).toFixed(0) + '万' },
-      splitLine: { lineStyle: { color: chart.splitLine } },
+      axisLabel: { color: c.textFaint, fontSize: 11, formatter: (v: number) => (v / 10000).toFixed(0) + '万' },
+      splitLine: { lineStyle: { color: c.splitLine } },
     },
     series: [
       {
@@ -505,14 +513,14 @@ function buildEquityOption(data: BacktestResult) {
         data: equity,
         smooth: true,
         symbol: 'none',
-        lineStyle: { width: 2, color: chart.primaryLight },
+        lineStyle: { width: 2, color: c.primaryLight },
         areaStyle: {
           color: {
             type: 'linear',
             x: 0, y: 0, x2: 0, y2: 1,
             colorStops: [
-              { offset: 0, color: `${chart.primaryLight}40` },
-              { offset: 1, color: `${chart.primaryLight}00` },
+              { offset: 0, color: `${c.primaryLight}40` },
+              { offset: 1, color: `${c.primaryLight}00` },
             ],
           },
         },
@@ -523,11 +531,11 @@ function buildEquityOption(data: BacktestResult) {
         data: benchmark,
         smooth: true,
         symbol: 'none',
-        lineStyle: { width: 1.5, color: chart.neutral, type: 'dashed' },
+        lineStyle: { width: 1.5, color: c.neutral, type: 'dashed' },
       },
     ],
   }
-}
+})
 
 function metricTone(v: number): string {
   if (v > 0) return 'text-up'
@@ -543,22 +551,22 @@ function metricTone(v: number): string {
       <div class="flex flex-wrap items-center gap-x-3 gap-y-2">
         <h3 class="text-subheading whitespace-nowrap">回测参数</h3>
         <div class="flex flex-wrap items-center gap-2">
-          <label class="flex items-center gap-1 text-[11px] text-content-muted">
+          <label class="flex items-center gap-1 text-[12.5px] text-content-muted">
             开始
-            <input v-model="form.start_date" type="date" class="h-7 w-[122px] rounded border border-base-600 bg-base-700 px-1.5 font-num text-[12px] text-content outline-none focus:border-primary" />
+            <input v-model="form.start_date" type="date" class="h-7 w-[122px] rounded border border-base-600 bg-base-700 px-1.5 font-num text-[13.5px] text-content outline-none focus:border-primary" />
           </label>
-          <label class="flex items-center gap-1 text-[11px] text-content-muted">
+          <label class="flex items-center gap-1 text-[12.5px] text-content-muted">
             结束
-            <input v-model="form.end_date" type="date" class="h-7 w-[122px] rounded border border-base-600 bg-base-700 px-1.5 font-num text-[12px] text-content outline-none focus:border-primary" />
+            <input v-model="form.end_date" type="date" class="h-7 w-[122px] rounded border border-base-600 bg-base-700 px-1.5 font-num text-[13.5px] text-content outline-none focus:border-primary" />
           </label>
         </div>
         <span class="flex-1"></span>
-        <span v-if="changedTotal" class="rounded-full bg-up/15 px-2 py-0.5 font-num text-[11px] text-up">
+        <span v-if="changedTotal" class="rounded-full bg-up/15 px-2 py-0.5 font-num text-[12.5px] text-up">
           已改 {{ changedTotal }} 项
         </span>
         <button
           type="button"
-          class="flex items-center gap-1 rounded border border-base-600 bg-base-700 px-2 py-1 text-[11px] text-content-muted transition-colors hover:border-primary/60 hover:text-primary"
+          class="flex items-center gap-1 rounded border border-base-600 bg-base-700 px-2 py-1 text-[12.5px] text-content-muted transition-colors hover:border-primary/60 hover:text-primary"
           @click="resetDefaults"
         >
           <RotateCcw class="h-3.5 w-3.5" />重置
@@ -576,13 +584,13 @@ function metricTone(v: number): string {
       <!-- 说明 + 落盘：默认只影响回测，点按钮才写实盘并成为默认值 -->
       <div class="mt-3 rounded-lg border border-primary/25 bg-primary/[0.06] px-3 py-2.5">
         <div class="flex flex-col gap-2 lg:flex-row lg:items-center">
-          <p class="min-w-0 flex-1 text-[11.5px] leading-relaxed text-content-muted">
+          <p class="min-w-0 flex-1 text-[13px] leading-relaxed text-content-muted">
             <span class="font-medium text-primary-light">此处参数更改只影响回测功能，不影响交易。</span>
             点「开始回测」只跑这一次模拟；确认规则有效后，再点右侧按钮把它写入实盘配置。
           </p>
           <button
             type="button"
-            class="flex shrink-0 items-center justify-center gap-1.5 rounded-lg border border-primary/50 bg-primary/10 px-3 py-1.5 text-[12px] font-medium text-primary-light transition-colors hover:bg-primary/20 disabled:cursor-not-allowed disabled:opacity-50"
+            class="flex shrink-0 items-center justify-center gap-1.5 rounded-lg border border-primary/50 bg-primary/10 px-3 py-1.5 text-[13.5px] font-medium text-primary-light transition-colors hover:bg-primary/20 disabled:cursor-not-allowed disabled:opacity-50"
             :disabled="persisting || !persistMap"
             @click="askPersist"
           >
@@ -590,7 +598,7 @@ function metricTone(v: number): string {
             {{ persisting ? '保存中...' : '将规则落盘保存到数据库' }}
           </button>
         </div>
-        <div class="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-[10.5px] text-content-faint">
+        <div class="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-[12px] text-content-faint">
           <span v-if="persistMap">可同步 {{ liveCount }} 项（股票池/仓位/止损止盈/择时/做T） · {{ backtestOnlyCount }} 项仅回测生效</span>
           <span v-else>落盘映射未加载，按钮暂不可用（不影响回测）</span>
           <span>落盘 = 写数据库 + 立即生效 + 重启保留 + 成为默认值</span>
@@ -599,44 +607,44 @@ function metricTone(v: number): string {
 
       <!-- 落盘结果：改了哪些、哪些跳过（含原因） -->
       <div v-if="persistResult" class="mt-2 rounded-lg border border-primary/25 bg-primary/[0.04] px-3 py-2">
-        <div class="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px]">
+        <div class="flex flex-wrap items-center gap-x-3 gap-y-1 text-[12.5px]">
           <span class="font-medium text-primary-light">已落盘 {{ Object.keys(persistResult.applied).length }} 项</span>
           <span class="text-content-muted">实际变更 {{ persistResult.changed.length }} 项</span>
           <span class="text-content-faint">{{ persistResult.skipped.length }} 项仅回测生效</span>
           <span class="flex-1"></span>
           <button
             type="button"
-            class="text-[11px] text-content-muted transition-colors hover:text-primary"
+            class="text-[12.5px] text-content-muted transition-colors hover:text-primary"
             @click="persistDetailOpen = !persistDetailOpen"
           >
             {{ persistDetailOpen ? '收起明细' : '查看明细' }}
           </button>
         </div>
         <div v-if="persistDetailOpen" class="mt-2 space-y-1.5 border-t border-base-600/40 pt-2">
-          <div v-if="persistResult.changed.length" class="flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-content-muted">
+          <div v-if="persistResult.changed.length" class="flex flex-wrap gap-x-3 gap-y-1 text-[12.5px] text-content-muted">
             <span class="text-content-faint">已变更：</span>
             <span v-for="c in persistResult.changed" :key="c.setting" class="whitespace-nowrap">
               {{ labelOfSetting(c.setting) }}
               <span class="font-num text-content">{{ fmtValue(c.old) }} → {{ fmtValue(c.new) }}</span>
             </span>
           </div>
-          <div v-if="persistResult.skipped.length" class="flex flex-wrap gap-x-3 gap-y-1 text-[11px] leading-relaxed text-content-faint">
+          <div v-if="persistResult.skipped.length" class="flex flex-wrap gap-x-3 gap-y-1 text-[12.5px] leading-relaxed text-content-faint">
             <span>未同步：</span>
             <span v-for="s in persistResult.skipped" :key="s.key">{{ labelOfKey(s.key) }}（{{ s.reason }}）</span>
           </div>
         </div>
       </div>
 
-      <div v-if="defaultsError" class="mt-2 rounded border border-up/40 bg-up/10 px-2 py-1 text-[11px] text-up">
+      <div v-if="defaultsError" class="mt-2 rounded border border-up/40 bg-up/10 px-2 py-1 text-[12.5px] text-up">
         {{ defaultsError }}（点「重置」重试）
       </div>
-      <div v-if="error" class="mt-2 text-[11px] text-up">{{ error }}</div>
-      <div v-if="loading" class="mt-2 text-[11px] text-content-muted">回测在后台运行，约需 1~3 分钟，请勿关闭页面</div>
+      <div v-if="error" class="mt-2 text-[12.5px] text-up">{{ error }}</div>
+      <div v-if="loading" class="mt-2 text-[12.5px] text-content-muted">回测在后台运行，约需 1~3 分钟，请勿关闭页面</div>
 
       <div v-show="formOpen" class="mt-3">
         <!-- 预设：一键把心得策略载入表单 -->
         <div class="flex flex-wrap items-center gap-1.5 rounded-lg border border-base-600/50 bg-base-700/25 px-2.5 py-2">
-          <span class="text-[11px] text-content-muted">预设</span>
+          <span class="text-[12.5px] text-content-muted">预设</span>
           <button
             v-for="p in presets"
             :key="p.name"
@@ -646,7 +654,7 @@ function metricTone(v: number): string {
           >
             {{ p.name }}
           </button>
-          <span class="text-[10px] text-content-faint">只改预设列出的项，其余保持线上值</span>
+          <span class="text-[11.5px] text-content-faint">只改预设列出的项，其余保持线上值</span>
         </div>
 
         <!-- 参数分组（tab）：一次只显示当前组，避免九组全铺开 -->
@@ -660,7 +668,7 @@ function metricTone(v: number): string {
             @click="activeGroup = g.name"
           >
             {{ g.name }}
-            <span v-if="groupChangedCount(g)" class="rounded bg-up/20 px-1 font-num text-[10px] text-up">
+            <span v-if="groupChangedCount(g)" class="rounded bg-up/20 px-1 font-num text-[11.5px] text-up">
               {{ groupChangedCount(g) }}
             </span>
           </button>
@@ -668,12 +676,12 @@ function metricTone(v: number): string {
 
         <div v-for="g in groups" v-show="activeGroup === g.name" :key="g.name" class="mt-2.5">
           <div class="mb-2 flex flex-wrap items-baseline gap-x-2 gap-y-1">
-            <span class="text-[12px] font-medium text-content">{{ g.name }}</span>
-            <span class="text-[10.5px] text-content-faint">
+            <span class="text-[13.5px] font-medium text-content">{{ g.name }}</span>
+            <span class="text-[12px] text-content-faint">
               {{ g.items.length }} 项 · 悬停可看线上值与落盘去向 · 0 = 不启用
             </span>
             <span class="flex-1"></span>
-            <span v-if="groupChangedCount(g)" class="text-[10.5px] text-up">已改 {{ groupChangedCount(g) }} 项</span>
+            <span v-if="groupChangedCount(g)" class="text-[12px] text-up">已改 {{ groupChangedCount(g) }} 项</span>
           </div>
 
           <!-- 卡片式：标签一行、输入框占满一行，标签不再被 60px 输入框挤到截断 -->
@@ -685,8 +693,8 @@ function metricTone(v: number): string {
                 :title="defaultHint(it)"
               >
                 <span class="flex items-baseline gap-1.5">
-                  <span class="min-w-0 flex-1 truncate text-[11px] leading-tight text-content-muted">{{ it.label }}</span>
-                  <span v-if="it.unit" class="shrink-0 text-[10px] text-content-faint">{{ it.unit }}</span>
+                  <span class="min-w-0 flex-1 truncate text-[12.5px] leading-tight text-content-muted">{{ it.label }}</span>
+                  <span v-if="it.unit" class="shrink-0 text-[11.5px] text-content-faint">{{ it.unit }}</span>
                 </span>
                 <input
                   v-model.number="form[it.key]"
@@ -694,7 +702,7 @@ function metricTone(v: number): string {
                   :min="it.min"
                   :max="it.max"
                   :step="it.step"
-                  class="h-7 w-full rounded border bg-base-800/60 px-2 text-right font-num text-[12px] text-content outline-none focus:border-primary"
+                  class="h-7 w-full rounded border bg-base-800/60 px-2 text-right font-num text-[13.5px] text-content outline-none focus:border-primary"
                   :class="inputTone(it)"
                 />
               </label>
@@ -704,7 +712,7 @@ function metricTone(v: number): string {
                 :title="defaultHint(it)"
               >
                 <span
-                  class="min-w-0 flex-1 truncate text-[11px]"
+                  class="min-w-0 flex-1 truncate text-[12.5px]"
                   :class="isChanged(it) ? diffTone(it) : 'text-content-muted'"
                 >{{ it.label }}</span>
                 <input v-model="form[it.key]" type="checkbox" class="h-4 w-4 shrink-0 accent-primary" />
@@ -714,20 +722,20 @@ function metricTone(v: number): string {
                 class="col-span-full rounded-lg border border-base-600/50 bg-base-700/25 px-2.5 py-2"
               >
                 <div class="flex flex-wrap items-center gap-1.5">
-                  <span class="text-[11px] text-content-muted">{{ it.label }}</span>
+                  <span class="text-[12.5px] text-content-muted">{{ it.label }}</span>
                   <button
                     v-for="[val, lab] in it.options"
                     :key="val"
                     type="button"
                     @click="toggleBoard(val)"
-                    class="rounded border px-1.5 py-0.5 text-[11px] transition-colors"
+                    class="rounded border px-1.5 py-0.5 text-[12.5px] transition-colors"
                     :class="
                       form[it.key].includes(val)
                         ? 'border-primary/60 bg-primary/20 text-primary'
                         : 'border-base-600 bg-base-700 text-content-muted'
                     "
                   >{{ lab }}</button>
-                  <span v-if="!form[it.key].length" class="text-[10px] text-content-faint">不选 = 全市场</span>
+                  <span v-if="!form[it.key].length" class="text-[11.5px] text-content-faint">不选 = 全市场</span>
                 </div>
               </div>
             </template>
@@ -741,16 +749,16 @@ function metricTone(v: number): string {
       <!-- 绩效指标卡 -->
       <div class="grid grid-cols-2 gap-4 md:grid-cols-4">
         <div class="glass-card p-4">
-          <div class="text-[12px] text-content-muted">总收益率</div>
-          <div class="font-num mt-1 text-[24px] font-semibold" :class="metricTone(result.metrics.total_return)">
+          <div class="text-[13.5px] text-content-muted">总收益率</div>
+          <div class="font-num mt-1 text-[26px] font-semibold" :class="metricTone(result.metrics.total_return)">
             {{ result.metrics.total_return > 0 ? '+' : '' }}{{ result.metrics.total_return.toFixed(2) }}%
           </div>
-          <div class="mt-1 text-[11px] text-content-faint">
+          <div class="mt-1 text-[12.5px] text-content-faint">
             年化 {{ result.metrics.annualized_return.toFixed(2) }}%
           </div>
           <div
             v-if="result.metrics.benchmark_return !== undefined"
-            class="mt-0.5 text-[11px]"
+            class="mt-0.5 text-[12.5px]"
             :class="(result.metrics.total_return - result.metrics.benchmark_return) >= 0 ? 'text-up' : 'text-down'"
           >
             跑赢基准 {{ (result.metrics.total_return - result.metrics.benchmark_return) >= 0 ? '+' : '' }}{{ (result.metrics.total_return - result.metrics.benchmark_return).toFixed(2) }}%
@@ -758,25 +766,25 @@ function metricTone(v: number): string {
           </div>
         </div>
         <div class="glass-card p-4">
-          <div class="text-[12px] text-content-muted">最大回撤</div>
-          <div class="font-num mt-1 text-[24px] font-semibold text-down">
+          <div class="text-[13.5px] text-content-muted">最大回撤</div>
+          <div class="font-num mt-1 text-[26px] font-semibold text-down">
             {{ result.metrics.max_drawdown.toFixed(2) }}%
           </div>
-          <div class="mt-1 text-[11px] text-content-faint">期末净值 {{ result.metrics.final_equity.toLocaleString('zh-CN') }}</div>
+          <div class="mt-1 text-[12.5px] text-content-faint">期末净值 {{ result.metrics.final_equity.toLocaleString('zh-CN') }}</div>
         </div>
         <div class="glass-card p-4">
-          <div class="text-[12px] text-content-muted">夏普比率</div>
-          <div class="font-num mt-1 text-[24px] font-semibold text-content">
+          <div class="text-[13.5px] text-content-muted">夏普比率</div>
+          <div class="font-num mt-1 text-[26px] font-semibold text-content">
             {{ result.metrics.sharpe.toFixed(2) }}
           </div>
-          <div class="mt-1 text-[11px] text-content-faint">年化，无风险利率 0</div>
+          <div class="mt-1 text-[12.5px] text-content-faint">年化，无风险利率 0</div>
         </div>
         <div class="glass-card p-4">
-          <div class="text-[12px] text-content-muted">胜率</div>
-          <div class="font-num mt-1 text-[24px] font-semibold text-content">
+          <div class="text-[13.5px] text-content-muted">胜率</div>
+          <div class="font-num mt-1 text-[26px] font-semibold text-content">
             {{ result.metrics.win_rate.toFixed(1) }}%
           </div>
-          <div class="mt-1 text-[11px] text-content-faint">{{ result.metrics.trade_count }} 笔交易 / {{ result.metrics.trading_days }} 交易日</div>
+          <div class="mt-1 text-[12.5px] text-content-faint">{{ result.metrics.trade_count }} 笔交易 / {{ result.metrics.trading_days }} 交易日</div>
         </div>
       </div>
 
@@ -784,18 +792,18 @@ function metricTone(v: number): string {
       <div v-if="result.review" class="glass-card p-5">
         <div class="flex flex-wrap items-baseline justify-between gap-2">
           <h3 class="text-subheading">亏损归因</h3>
-          <span class="text-[11px] text-content-faint">
+          <span class="text-[12.5px] text-content-faint">
             平均持有 {{ result.review.avg_hold_days }} 个交易日 · 费用 {{ result.review.cost.fee_total.toFixed(0) }} 元
             （占亏损 {{ result.review.cost.fee_vs_loss_pct }}%）
           </span>
         </div>
-        <p class="mt-2 text-[12px] text-content-muted">{{ result.review.summary }}</p>
+        <p class="mt-2 text-[13.5px] text-content-muted">{{ result.review.summary }}</p>
 
         <div class="mt-4 grid grid-cols-1 gap-5 lg:grid-cols-2">
           <div>
-            <div class="mb-2 text-[12px] text-content-muted">按卖出原因</div>
-            <table class="w-full text-left text-[12px]">
-              <thead class="text-[11px] text-content-faint">
+            <div class="mb-2 text-[13.5px] text-content-muted">按卖出原因</div>
+            <table class="w-full text-left text-[13.5px]">
+              <thead class="text-[12.5px] text-content-faint">
                 <tr class="border-b border-base-600/60">
                   <th class="py-1.5 font-medium">原因</th>
                   <th class="py-1.5 text-right font-medium">笔数</th>
@@ -816,9 +824,9 @@ function metricTone(v: number): string {
             </table>
           </div>
           <div>
-            <div class="mb-2 text-[12px] text-content-muted">按持有天数</div>
-            <table class="w-full text-left text-[12px]">
-              <thead class="text-[11px] text-content-faint">
+            <div class="mb-2 text-[13.5px] text-content-muted">按持有天数</div>
+            <table class="w-full text-left text-[13.5px]">
+              <thead class="text-[12.5px] text-content-faint">
                 <tr class="border-b border-base-600/60">
                   <th class="py-1.5 font-medium">持有</th>
                   <th class="py-1.5 text-right font-medium">笔数</th>
@@ -841,7 +849,7 @@ function metricTone(v: number): string {
         </div>
 
         <div class="mt-5">
-          <div class="mb-2 text-[12px] text-content-muted">调参建议（按优先级）</div>
+          <div class="mb-2 text-[13.5px] text-content-muted">调参建议（按优先级）</div>
           <ul class="space-y-2">
             <li
               v-for="(s, i) in result.review.suggestions"
@@ -850,13 +858,13 @@ function metricTone(v: number): string {
             >
               <div class="flex flex-wrap items-center gap-2">
                 <span
-                  class="rounded-md px-1.5 py-0.5 text-[10px]"
+                  class="rounded-md px-1.5 py-0.5 text-[11.5px]"
                   :class="s.priority === '高' ? 'bg-down/15 text-down' : s.priority === '中' ? 'bg-base-600/50 text-content' : 'bg-base-600/30 text-content-muted'"
                 >{{ s.priority }}</span>
-                <span class="text-[12px] font-medium text-content">{{ s.target }}</span>
-                <span class="font-num text-[11px] text-content-muted">{{ s.current }} → {{ s.suggest }}</span>
+                <span class="text-[13.5px] font-medium text-content">{{ s.target }}</span>
+                <span class="font-num text-[12.5px] text-content-muted">{{ s.current }} → {{ s.suggest }}</span>
               </div>
-              <p class="mt-1 text-[11px] leading-relaxed text-content-faint">{{ s.reason }}</p>
+              <p class="mt-1 text-[12.5px] leading-relaxed text-content-faint">{{ s.reason }}</p>
             </li>
           </ul>
         </div>
@@ -866,7 +874,7 @@ function metricTone(v: number): string {
       <div class="glass-card p-5">
         <div class="mb-3 flex flex-wrap items-center justify-between gap-2">
           <h3 class="text-subheading">净值曲线</h3>
-          <div class="flex items-center gap-4 text-[11px] text-content-muted">
+          <div class="flex items-center gap-4 text-[12.5px] text-content-muted">
             <span class="flex items-center gap-1.5">
               <span class="inline-block h-2 w-4 rounded-full bg-primary-light"></span>策略净值
             </span>
@@ -883,8 +891,8 @@ function metricTone(v: number): string {
         <div class="border-b border-base-600/60 px-5 py-3">
           <h3 class="text-subheading">交易明细</h3>
         </div>
-        <table class="w-full text-left text-[13px]">
-          <thead class="text-[11px] text-content-faint">
+        <table class="w-full text-left text-[14.5px]">
+          <thead class="text-[12.5px] text-content-faint">
             <tr class="border-b border-base-600/60">
               <th class="px-5 py-2.5 font-medium">代码</th>
               <th class="px-5 py-2.5 font-medium">名称</th>
@@ -908,20 +916,20 @@ function metricTone(v: number): string {
                 {{ t.pnl_pct > 0 ? '+' : '' }}{{ t.pnl_pct.toFixed(2) }}%
               </td>
               <td class="px-5 py-2.5">
-                <span class="rounded-md border border-base-600 px-2 py-0.5 text-[11px] text-content-muted">{{ t.reason }}</span>
+                <span class="rounded-md border border-base-600 px-2 py-0.5 text-[12.5px] text-content-muted">{{ t.reason }}</span>
               </td>
             </tr>
           </tbody>
         </table>
-        <div v-if="result.trades.length === 0" class="p-8 text-center text-[13px] text-content-faint">
+        <div v-if="result.trades.length === 0" class="p-8 text-center text-[14.5px] text-content-faint">
           回测区间内无交易
         </div>
       </div>
     </template>
 
     <div v-else-if="!loading" class="glass-card flex h-64 flex-col items-center justify-center gap-2 text-content-faint">
-      <p class="text-[13px]">设置参数后点击「开始回测」</p>
-      <p class="text-[11px]">缺省股票池为实时成交额前 N 只，K线优先使用本地缓存</p>
+      <p class="text-[14.5px]">设置参数后点击「开始回测」</p>
+      <p class="text-[12.5px]">缺省股票池为实时成交额前 N 只，K线优先使用本地缓存</p>
     </div>
 
     <!-- 落盘确认：改成实盘默认值是不可逆的（影响后续交易），必须先让用户看到会改哪几项 -->

@@ -187,7 +187,7 @@ onActivated(async () => {
           <Star class="h-4 w-4 text-warn" />
           <h3 class="text-subheading">我的自选股</h3>
         </div>
-        <span class="text-[11px] text-content-faint">{{ counts.total }} 只</span>
+        <span class="text-[12.5px] text-content-faint">{{ counts.total }} 只</span>
       </div>
 
       <!-- 来源标签 -->
@@ -199,7 +199,7 @@ onActivated(async () => {
         >
           <Sparkles class="h-3.5 w-3.5" />
           程序自选
-          <span class="font-num text-[11px] opacity-80">{{ counts.auto }}</span>
+          <span class="font-num text-[12.5px] opacity-80">{{ counts.auto }}</span>
         </button>
         <button
           class="seg-item flex flex-1 items-center justify-center gap-1.5"
@@ -208,7 +208,7 @@ onActivated(async () => {
         >
           <Star class="h-3.5 w-3.5" />
           手动自选
-          <span class="font-num text-[11px] opacity-80">{{ counts.manual }}</span>
+          <span class="font-num text-[12.5px] opacity-80">{{ counts.manual }}</span>
         </button>
       </div>
 
@@ -219,15 +219,15 @@ onActivated(async () => {
           type="text"
           maxlength="6"
           placeholder="输入 6 位代码，如 600519"
-          class="min-w-0 flex-1 rounded-lg border border-base-600 bg-base-700 px-3 py-2 font-num text-[13px] text-content outline-none transition-colors placeholder:text-content-faint focus:border-primary"
+          class="min-w-0 flex-1 rounded-lg border border-base-600 bg-base-700 px-3 py-2 font-num text-[14.5px] text-content outline-none transition-colors placeholder:text-content-faint focus:border-primary"
           @keyup.enter="add"
         />
-        <button class="btn btn-primary px-4 py-2 text-[13px]" :disabled="adding" @click="add">
+        <button class="btn btn-primary px-4 py-2 text-[14.5px]" :disabled="adding" @click="add">
           <Plus class="h-3.5 w-3.5" />
           添加
         </button>
       </div>
-      <p v-if="tab === 'manual' && addError" class="mb-2 text-[11px] text-up">{{ addError }}</p>
+      <p v-if="tab === 'manual' && addError" class="mb-2 text-[12.5px] text-up">{{ addError }}</p>
 
       <!-- 程序自选：批量转入工具栏 -->
       <div
@@ -235,12 +235,12 @@ onActivated(async () => {
         class="mb-3 flex items-center justify-between gap-2 rounded-lg border border-base-600/60 bg-base-700/30 px-3 py-2"
       >
         <button
-          class="flex items-center gap-1.5 text-[12px] text-content-muted transition-colors hover:text-primary-light"
+          class="flex items-center gap-1.5 text-[13.5px] text-content-muted transition-colors hover:text-primary-light"
           @click="toggleAll"
         >
           <component :is="allChecked ? CheckSquare : Square" class="h-3.5 w-3.5" />
           {{ allChecked ? '取消全选' : '全选' }}
-          <span v-if="checked.length" class="font-num text-[11px]">已选 {{ checked.length }}</span>
+          <span v-if="checked.length" class="font-num text-[12.5px]">已选 {{ checked.length }}</span>
         </button>
         <button
           class="btn btn-primary-soft btn-sm"
@@ -257,12 +257,12 @@ onActivated(async () => {
         <!-- 加载态 -->
         <div v-if="watchLoading" class="flex flex-col items-center gap-2 py-12 text-content-faint">
           <div class="h-6 w-6 animate-spin rounded-full border-2 border-primary-light border-t-transparent" />
-          <p class="text-[12px]">自选股加载中...</p>
+          <p class="text-[13.5px]">自选股加载中...</p>
         </div>
 
         <!-- 错误态（保留旧数据 + 重试） -->
         <div v-else-if="watchError && watchlist.length === 0" class="flex flex-col items-center gap-3 py-12 text-content-faint">
-          <p class="text-[13px] text-up">{{ watchError }}</p>
+          <p class="text-[14.5px] text-up">{{ watchError }}</p>
           <button class="btn btn-outline" @click="loadWatchlist">重试</button>
         </div>
 
@@ -283,15 +283,15 @@ onActivated(async () => {
             />
             <div class="min-w-0">
               <div class="flex items-center gap-1.5">
-                <span class="truncate text-[13px] font-medium text-content">{{ item.name }}</span>
+                <span class="truncate text-[14.5px] font-medium text-content">{{ item.name }}</span>
                 <!-- 来源备注只在手动自选展示：程序自选页签内整列都是程序来源 -->
                 <span
                   v-if="item.note && tab === 'manual'"
-                  class="shrink-0 rounded bg-base-700 px-1.5 py-0.5 text-[10px] text-content-faint"
+                  class="shrink-0 rounded bg-base-700 px-1.5 py-0.5 text-[11.5px] text-content-faint"
                   >{{ item.note }}</span
                 >
               </div>
-              <div class="font-num flex items-center gap-2 text-[11px] text-content-faint">
+              <div class="font-num flex items-center gap-2 text-[12.5px] text-content-faint">
                 <span>{{ item.code }}</span>
                 <span v-if="item.amount != null">成交 {{ fmtAmount(item.amount) }}</span>
                 <span v-if="item.turnover_rate != null">换手 {{ item.turnover_rate.toFixed(1) }}%</span>
@@ -300,10 +300,10 @@ onActivated(async () => {
           </div>
           <div class="flex shrink-0 items-center gap-3">
             <div class="text-right">
-              <div class="font-num text-[15px] font-semibold" :class="priceTone(item.pct_change)">
+              <div class="font-num text-[16.5px] font-semibold" :class="priceTone(item.pct_change)">
                 {{ item.price?.toFixed(2) ?? '--' }}
               </div>
-              <div class="font-num text-[11px]" :class="pctClass(item.pct_change)">
+              <div class="font-num text-[12.5px]" :class="pctClass(item.pct_change)">
                 {{ fmtPct(item.pct_change) }}
               </div>
             </div>
@@ -318,8 +318,8 @@ onActivated(async () => {
 
         <div v-if="!watchLoading && visibleItems.length === 0" class="flex flex-col items-center gap-2 py-12 text-content-faint">
           <component :is="tab === 'auto' ? Sparkles : Star" class="h-8 w-8 opacity-30" />
-          <p v-if="tab === 'auto'" class="text-[13px]">暂无程序自选，去选股中心跑一轮扫描</p>
-          <p v-else class="text-[13px]">暂无手动自选，输入代码添加或从程序自选转入</p>
+          <p v-if="tab === 'auto'" class="text-[14.5px]">暂无程序自选，去选股中心跑一轮扫描</p>
+          <p v-else class="text-[14.5px]">暂无手动自选，输入代码添加或从程序自选转入</p>
         </div>
       </div>
     </section>
@@ -331,7 +331,7 @@ onActivated(async () => {
           <Bell class="h-4 w-4 text-primary-light" />
           <h3 class="text-subheading">历史信号流水</h3>
         </div>
-        <span class="text-[11px] text-content-faint">最近 {{ signals.length }} 条</span>
+        <span class="text-[12.5px] text-content-faint">最近 {{ signals.length }} 条</span>
       </div>
 
       <div class="min-h-0 flex-1 space-y-2 overflow-y-auto">
@@ -342,18 +342,18 @@ onActivated(async () => {
         >
           <div class="flex items-center justify-between">
             <div class="flex cursor-pointer items-center gap-2" @click="goDetail(sig.code)">
-              <span class="text-[13px] font-medium text-content">{{ sig.name }}</span>
-              <span class="font-num text-[11px] text-content-faint">{{ sig.code }}</span>
-              <span class="rounded-md border border-primary/40 bg-primary/10 px-2 py-0.5 text-[11px] text-primary-light">
+              <span class="text-[14.5px] font-medium text-content">{{ sig.name }}</span>
+              <span class="font-num text-[12.5px] text-content-faint">{{ sig.code }}</span>
+              <span class="rounded-md border border-primary/40 bg-primary/10 px-2 py-0.5 text-[12.5px] text-primary-light">
                 {{ sig.strategy }}
               </span>
             </div>
-            <span class="font-num text-[11px] text-content-faint">{{ sig.scan_date }}</span>
+            <span class="font-num text-[12.5px] text-content-faint">{{ sig.scan_date }}</span>
           </div>
           <div class="mt-2 flex items-center justify-between">
-            <span class="text-[11px] leading-relaxed text-content-muted">{{ sig.reason }}</span>
+            <span class="text-[12.5px] leading-relaxed text-content-muted">{{ sig.reason }}</span>
             <span
-              class="font-num shrink-0 text-[12px] text-content"
+              class="font-num shrink-0 text-[13.5px] text-content"
               :title="`信号触发价 ${sig.price.toFixed(2)}`"
             >
               <!-- 现价（后端按实时快照附带），无快照时显示触发价 -->
@@ -369,7 +369,7 @@ onActivated(async () => {
 
         <div v-if="signals.length === 0" class="flex flex-col items-center gap-2 py-12 text-content-faint">
           <Bell class="h-8 w-8 opacity-30" />
-          <p class="text-[13px]">暂无信号，去选股中心跑一轮扫描</p>
+          <p class="text-[14.5px]">暂无信号，去选股中心跑一轮扫描</p>
         </div>
       </div>
     </section>
@@ -377,7 +377,7 @@ onActivated(async () => {
     <!-- 轻量 toast -->
     <div
       v-if="toastMsg"
-      class="fixed bottom-6 left-1/2 z-50 -translate-x-1/2 rounded-lg border border-primary/40 bg-base-800/95 px-4 py-2 text-[13px] text-content shadow-card backdrop-blur"
+      class="fixed bottom-6 left-1/2 z-50 -translate-x-1/2 rounded-lg border border-primary/40 bg-base-800/95 px-4 py-2 text-[14.5px] text-content shadow-card backdrop-blur"
     >
       {{ toastMsg }}
     </div>

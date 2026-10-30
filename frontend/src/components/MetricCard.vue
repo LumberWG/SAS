@@ -21,11 +21,11 @@ const emit = defineEmits<{ click: [] }>()
     @click="clickable && emit('click')"
   >
     <div class="mb-1.5 flex items-center justify-between">
-      <span class="text-[12px] text-content-muted">{{ title }}</span>
+      <span class="text-[13.5px] text-content-muted">{{ title }}</span>
       <slot name="icon" />
     </div>
     <div
-      class="font-num text-[24px] font-semibold leading-tight tracking-tight"
+      class="font-num text-[26px] font-semibold leading-tight tracking-tight"
       :class="{
         'text-up': tone === 'up',
         'text-down': tone === 'down',
@@ -34,7 +34,7 @@ const emit = defineEmits<{ click: [] }>()
     >
       {{ value }}
     </div>
-    <div v-if="sub" class="mt-1 text-[11px] text-content-faint">{{ sub }}</div>
+    <div v-if="sub" class="mt-1 text-[12.5px] text-content-faint">{{ sub }}</div>
     <slot />
   </div>
 </template>

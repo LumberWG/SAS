@@ -391,11 +391,11 @@ onMounted(async () => {
       <!-- 策略加载失败提示（含重试） -->
       <div
         v-if="loadError"
-        class="flex items-center justify-between gap-3 rounded-lg border border-down/40 bg-down/10 px-4 py-3 text-[12px] text-down"
+        class="flex items-center justify-between gap-3 rounded-lg border border-down/40 bg-down/10 px-4 py-3 text-[13.5px] text-down"
       >
         <span>{{ loadError }}</span>
         <button
-          class="shrink-0 rounded-md border border-down/40 px-2.5 py-1 text-[12px] transition-colors hover:bg-down/20"
+          class="shrink-0 rounded-md border border-down/40 px-2.5 py-1 text-[13.5px] transition-colors hover:bg-down/20"
           :disabled="loadingStrategies"
           @click="loadStrategies"
         >
@@ -412,7 +412,7 @@ onMounted(async () => {
             {{ warming ? '预热中...' : '预热K线' }}
           </button>
           <button
-            class="btn btn-primary px-5 py-2.5 text-[13px] font-semibold"
+            class="btn btn-primary px-5 py-2.5 text-[14.5px] font-semibold"
             :disabled="running || selected.length === 0"
             :title="selected.length === 0 ? '请先在左侧勾选至少一个策略' : ''"
             @click="start"
@@ -422,7 +422,7 @@ onMounted(async () => {
           </button>
 
           <!-- 当前策略/范围摘要 -->
-          <div class="hidden min-w-0 flex-1 text-[12px] text-content-faint md:block">
+          <div class="hidden min-w-0 flex-1 text-[13.5px] text-content-faint md:block">
             <span class="text-content-muted">{{ selected.length }}</span> 个策略 ·
             <span class="text-content-muted">{{ scopeLabel }}</span>
             <span
@@ -437,7 +437,7 @@ onMounted(async () => {
 
           <!-- 进度区 -->
           <div v-if="task" class="min-w-0 flex-1">
-            <div class="mb-1.5 flex items-center justify-between text-[12px]">
+            <div class="mb-1.5 flex items-center justify-between text-[13.5px]">
               <span class="flex items-center gap-1.5 text-content-muted">
                 <Search v-if="task.status === 'running'" class="h-3.5 w-3.5 animate-pulse text-primary-light" />
                 <CheckCircle2 v-else-if="task.status === 'done'" class="h-3.5 w-3.5 text-up" />
@@ -458,7 +458,7 @@ onMounted(async () => {
               <span class="font-num text-content">{{ task.progress }}%</span>
             </div>
             <!-- 阶段提示：进度还是 0 的时候告诉用户在干什么，避免误以为卡死 -->
-            <p v-if="phaseHint" class="mb-1.5 text-[11px] text-content-faint">
+            <p v-if="phaseHint" class="mb-1.5 text-[12.5px] text-content-faint">
               {{ phaseHint }}
             </p>
             <div class="relative h-2 overflow-hidden rounded-full bg-base-700">
@@ -483,26 +483,26 @@ onMounted(async () => {
           class="mt-4 grid grid-cols-2 gap-3 border-t border-base-600/50 pt-4 sm:grid-cols-4"
         >
           <div class="rounded-lg bg-base-700/40 p-3 text-center">
-            <div class="font-num text-[24px] font-semibold leading-none text-primary-light">
+            <div class="font-num text-[26px] font-semibold leading-none text-primary-light">
               {{ hitStockCount }}
             </div>
-            <div class="mt-1 text-[11px] text-content-faint">
+            <div class="mt-1 text-[12.5px] text-content-faint">
               命中股票<span class="text-content-faint/70">（{{ task.hit_count }} 信号）</span>
             </div>
           </div>
           <div class="rounded-lg bg-base-700/40 p-3 text-center">
-            <div class="font-num text-[24px] font-bold leading-none text-up">
+            <div class="font-num text-[26px] font-bold leading-none text-up">
               {{ upCount }}
             </div>
-            <div class="mt-1 text-[11px] text-content-faint">
+            <div class="mt-1 text-[12.5px] text-content-faint">
               <TrendingUp class="inline h-3 w-3" /> 收阳
             </div>
           </div>
           <div class="rounded-lg bg-base-700/40 p-3 text-center">
-            <div class="font-num text-[24px] font-bold leading-none text-content">
+            <div class="font-num text-[26px] font-bold leading-none text-content">
               {{ task.total }}
             </div>
-            <div class="mt-1 text-[11px] text-content-faint">扫描股票</div>
+            <div class="mt-1 text-[12.5px] text-content-faint">扫描股票</div>
           </div>
           <!-- 扫描时市场情绪 -->
           <div
@@ -518,12 +518,12 @@ onMounted(async () => {
             :title="task.sentiment.advice"
           >
             <div
-              class="text-[15px] font-semibold leading-none"
+              class="text-[16.5px] font-semibold leading-none"
               :class="task.sentiment.weight > 0 ? 'text-up' : task.sentiment.weight < 0 ? 'text-down' : 'text-content'"
             >
               {{ task.sentiment.level }}
             </div>
-            <div class="font-num mt-1 text-[11px] text-content-faint">
+            <div class="font-num mt-1 text-[12.5px] text-content-faint">
               权重 {{ task.sentiment.weight > 0 ? '+' : '' }}{{ task.sentiment.weight }} · 扫描时情绪
             </div>
           </div>
@@ -555,7 +555,7 @@ onMounted(async () => {
     <!-- 轻量 toast 反馈（独立放置，避免插入 v-if/v-else 之间导致配对错位） -->
     <div
       v-if="toastMsg"
-      class="fixed bottom-6 left-1/2 z-50 -translate-x-1/2 rounded-lg border border-primary/40 bg-base-800/95 px-4 py-2 text-[13px] text-content shadow-card backdrop-blur"
+      class="fixed bottom-6 left-1/2 z-50 -translate-x-1/2 rounded-lg border border-primary/40 bg-base-800/95 px-4 py-2 text-[14.5px] text-content shadow-card backdrop-blur"
     >
       {{ toastMsg }}
     </div>

@@ -179,23 +179,23 @@ function statusColor(status: string) {
         <div class="flex items-center gap-5">
           <div>
             <div class="flex items-center gap-2.5">
-              <h2 class="text-[22px] font-semibold text-content">{{ quote?.name ?? code }}</h2>
-              <span class="font-num rounded-md bg-base-700 px-2 py-0.5 text-[12px] text-content-muted">{{ code }}</span>
+              <h2 class="text-[23.5px] font-semibold text-content">{{ quote?.name ?? code }}</h2>
+              <span class="font-num rounded-md bg-base-700 px-2 py-0.5 text-[13.5px] text-content-muted">{{ code }}</span>
             </div>
             <div class="mt-2 flex items-baseline gap-3">
-              <span class="font-num text-[32px] font-bold leading-none" :class="pctTone">
+              <span class="font-num text-[34px] font-bold leading-none" :class="pctTone">
                 {{ quote?.price?.toFixed(2) ?? '--' }}
               </span>
-              <span class="font-num text-[15px]" :class="pctTone">
+              <span class="font-num text-[16.5px]" :class="pctTone">
                 {{ quote?.pct_change != null ? (quote.pct_change > 0 ? '+' : '') + quote.pct_change.toFixed(2) + '%' : '--' }}
               </span>
-              <span v-if="watchMsg" class="text-[11px] text-content-faint">{{ watchMsg }}</span>
+              <span v-if="watchMsg" class="text-[12.5px] text-content-faint">{{ watchMsg }}</span>
             </div>
           </div>
         </div>
         <!-- 加入/移除自选股 -->
         <button
-          class="flex items-center gap-2 rounded-lg border px-4 py-2 text-[13px] font-medium transition-all disabled:cursor-not-allowed disabled:opacity-50"
+          class="flex items-center gap-2 rounded-lg border px-4 py-2 text-[14.5px] font-medium transition-all disabled:cursor-not-allowed disabled:opacity-50"
           :class="
             inWatchlist
               ? 'border-warn/50 bg-warn/10 text-warn hover:bg-warn/20'
@@ -208,7 +208,7 @@ function statusColor(status: string) {
           {{ inWatchlist ? '已自选' : '加入自选' }}
         </button>
       </div>
-      <div class="grid grid-cols-2 gap-x-8 gap-y-2 text-[12px] sm:grid-cols-4">
+      <div class="grid grid-cols-2 gap-x-8 gap-y-2 text-[13.5px] sm:grid-cols-4">
         <div><div class="text-content-faint">今开</div><div class="font-num text-content">{{ quote?.open?.toFixed(2) ?? '--' }}</div></div>
         <div><div class="text-content-faint">最高</div><div class="font-num text-up">{{ quote?.high?.toFixed(2) ?? '--' }}</div></div>
         <div><div class="text-content-faint">最低</div><div class="font-num text-down">{{ quote?.low?.toFixed(2) ?? '--' }}</div></div>
@@ -235,7 +235,7 @@ function statusColor(status: string) {
               {{ tab.label }}
             </button>
           </div>
-          <span class="text-[11px] text-content-faint">
+          <span class="text-[12.5px] text-content-faint">
             {{ chartTab === 'intraday' ? intradayHint : 'MA5 天蓝 · MA10 黄 · MA20 紫' }}
           </span>
         </div>
@@ -256,8 +256,8 @@ function statusColor(status: string) {
             class="flex h-[440px] flex-col items-center justify-center gap-2 text-content-faint"
           >
             <AlertTriangle class="h-8 w-8 text-warn" />
-            <span class="text-[13px]">行情数据源暂不可用</span>
-            <span class="text-[11px]">分时数据加载失败，可切换「日K」查看历史走势</span>
+            <span class="text-[14.5px]">行情数据源暂不可用</span>
+            <span class="text-[12.5px]">分时数据加载失败，可切换「日K」查看历史走势</span>
           </div>
           <div v-else class="flex h-[440px] items-center justify-center text-content-faint">
             分时加载中...
@@ -278,8 +278,8 @@ function statusColor(status: string) {
             class="flex h-[440px] flex-col items-center justify-center gap-2 text-content-faint"
           >
             <AlertTriangle class="h-8 w-8 text-warn" />
-            <span class="text-[13px]">行情数据源暂不可用</span>
-            <span class="text-[11px]">K线加载失败，请稍后重试（已尽量使用本地缓存）</span>
+            <span class="text-[14.5px]">行情数据源暂不可用</span>
+            <span class="text-[12.5px]">K线加载失败，请稍后重试（已尽量使用本地缓存）</span>
           </div>
           <div v-else class="flex h-[440px] items-center justify-center text-content-faint">
             K线加载中...
@@ -297,20 +297,20 @@ function statusColor(status: string) {
         <div v-if="analyzing" class="flex flex-1 items-center justify-center text-content-faint">
           <div class="flex flex-col items-center gap-2">
             <div class="h-6 w-6 animate-spin rounded-full border-2 border-primary-light border-t-transparent" />
-            <span class="text-[12px]">分析中...</span>
+            <span class="text-[13.5px]">分析中...</span>
           </div>
         </div>
 
         <template v-else-if="dashboard">
           <div class="mb-4 flex flex-wrap items-center gap-3">
             <ConclusionBadge :conclusion="dashboard.conclusion" size="lg" />
-            <span class="text-[11px] text-content-faint">
+            <span class="text-[12.5px] text-content-faint">
               {{ dashboard.degraded ? '规则降级' : dashboard.model }}
             </span>
             <!-- 市场情绪上下文 -->
             <span
               v-if="dashboard.sentiment?.level"
-              class="rounded-full border px-2.5 py-0.5 text-[11px] font-medium"
+              class="rounded-full border px-2.5 py-0.5 text-[12.5px] font-medium"
               :class="
                 dashboard.sentiment.weight > 0
                   ? 'border-up/40 bg-up/10 text-up'
@@ -324,21 +324,21 @@ function statusColor(status: string) {
               {{ dashboard.sentiment.weight > 0 ? '+' : '' }}{{ dashboard.sentiment.weight }}
             </span>
           </div>
-          <p class="mb-4 text-[13px] leading-relaxed text-content-muted">{{ dashboard.summary }}</p>
+          <p class="mb-4 text-[14.5px] leading-relaxed text-content-muted">{{ dashboard.summary }}</p>
 
           <!-- 三档价格 -->
           <div class="mb-4 grid grid-cols-3 gap-2 text-center">
             <div class="rounded-lg border border-up/30 bg-up/10 p-2">
-              <div class="text-[10px] text-content-faint">入场价</div>
-              <div class="font-num text-[15px] font-semibold text-up">{{ dashboard.entry_price?.toFixed(2) ?? '--' }}</div>
+              <div class="text-[11.5px] text-content-faint">入场价</div>
+              <div class="font-num text-[16.5px] font-semibold text-up">{{ dashboard.entry_price?.toFixed(2) ?? '--' }}</div>
             </div>
             <div class="rounded-lg border border-down/30 bg-down/10 p-2">
-              <div class="text-[10px] text-content-faint">止损价</div>
-              <div class="font-num text-[15px] font-semibold text-down">{{ dashboard.stop_loss?.toFixed(2) ?? '--' }}</div>
+              <div class="text-[11.5px] text-content-faint">止损价</div>
+              <div class="font-num text-[16.5px] font-semibold text-down">{{ dashboard.stop_loss?.toFixed(2) ?? '--' }}</div>
             </div>
             <div class="rounded-lg border border-warn/30 bg-warn/10 p-2">
-              <div class="text-[10px] text-content-faint">目标价</div>
-              <div class="font-num text-[15px] font-semibold text-warn">{{ dashboard.target_price?.toFixed(2) ?? '--' }}</div>
+              <div class="text-[11.5px] text-content-faint">目标价</div>
+              <div class="font-num text-[16.5px] font-semibold text-warn">{{ dashboard.target_price?.toFixed(2) ?? '--' }}</div>
             </div>
           </div>
 
@@ -351,15 +351,15 @@ function statusColor(status: string) {
             >
               <component :is="statusIcon(item.status)" class="mt-0.5 h-3.5 w-3.5 shrink-0" :class="statusColor(item.status)" />
               <div class="min-w-0 flex-1">
-                <div class="flex items-center justify-between text-[12px]">
+                <div class="flex items-center justify-between text-[13.5px]">
                   <span class="font-medium text-content">{{ item.label }}</span>
                 </div>
-                <div class="text-[11px] text-content-faint">{{ item.detail }}</div>
+                <div class="text-[12.5px] text-content-faint">{{ item.detail }}</div>
               </div>
             </div>
           </div>
 
-          <div class="mt-4 border-t border-base-600/50 pt-3 text-[10px] leading-relaxed text-content-faint">
+          <div class="mt-4 border-t border-base-600/50 pt-3 text-[11.5px] leading-relaxed text-content-faint">
             {{ dashboard.generated_at }} 生成 · 仅供学习研究，不构成投资建议
           </div>
         </template>

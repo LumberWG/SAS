@@ -183,7 +183,7 @@ function exportCsv() {
     <div class="panel-hd justify-between">
       <div class="flex items-center gap-2">
         <span class="eyebrow">策略筛选</span>
-        <select v-model="strategyFilter" class="field h-7 px-2 text-[12px]">
+        <select v-model="strategyFilter" class="field h-7 px-2 text-[13.5px]">
           <option value="">全部（{{ grouped.length }} 只 / {{ hits.length }} 信号）</option>
           <option v-for="name in strategyOptions" :key="name" :value="name">
             {{ name }}（{{ hits.filter((h) => h.strategy === name).length }}）
@@ -198,8 +198,8 @@ function exportCsv() {
 
     <!-- 表格：单元格不换行，列宽不足时横向滚动 -->
     <div class="min-h-0 flex-1 overflow-auto">
-      <table class="w-full min-w-[1180px] whitespace-nowrap text-left text-[13px]">
-        <thead class="sticky top-0 z-10 bg-base-700/90 text-[11px] tracking-wider text-content-faint backdrop-blur">
+      <table class="w-full min-w-[1180px] whitespace-nowrap text-left text-[14.5px]">
+        <thead class="sticky top-0 z-10 bg-base-700/90 text-[12.5px] tracking-wider text-content-faint backdrop-blur">
           <tr class="border-b border-base-600/60">
             <th class="px-4 py-2.5 font-medium">代码</th>
             <th class="px-4 py-2.5 font-medium">名称</th>
@@ -208,7 +208,7 @@ function exportCsv() {
               title="★ 已进自选（二选选中）；☆ 未进自选（仅留在股票池）"
             >
               自选
-              <span class="ml-1 font-num text-[10px] text-content-faint">
+              <span class="ml-1 font-num text-[11.5px] text-content-faint">
                 {{ watchHitCount }}/{{ grouped.length }}
               </span>
             </th>
@@ -259,7 +259,7 @@ function exportCsv() {
             <td class="px-2 py-2.5">
               <span v-if="watchSet.has(row.code)" class="inline-flex items-center gap-1">
                 <Star class="h-3.5 w-3.5 fill-current text-warn" title="已在自选股" />
-                <span class="text-[10px] text-warn">已进</span>
+                <span class="text-[11.5px] text-warn">已进</span>
               </span>
               <button
                 v-else
@@ -268,14 +268,14 @@ function exportCsv() {
                 @click.stop="emit('addWatch', row.best)"
               >
                 <Star class="h-3.5 w-3.5" />
-                <span class="text-[10px]">未进</span>
+                <span class="text-[11.5px]">未进</span>
               </button>
             </td>
             <td class="px-3 py-2.5 text-right">
               <span class="inline-flex items-center justify-end gap-1.5">
                 <span
                   v-if="row.rank"
-                  class="rounded border border-warn/35 bg-warn/[0.10] px-1.5 py-0.5 font-num text-[10px] text-warn"
+                  class="rounded border border-warn/35 bg-warn/[0.10] px-1.5 py-0.5 font-num text-[11.5px] text-warn"
                   :title="`本轮第 ${row.rank} 名`"
                 >
                   #{{ row.rank }}
@@ -318,7 +318,7 @@ function exportCsv() {
                 <span
                   v-for="s in row.strategies"
                   :key="s"
-                  class="rounded-md border border-primary/30 bg-primary/[0.10] px-1.5 py-0.5 text-[10.5px] text-primary-light"
+                  class="rounded-md border border-primary/30 bg-primary/[0.10] px-1.5 py-0.5 text-[12px] text-primary-light"
                 >
                   {{ s }}
                 </span>

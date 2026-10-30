@@ -109,8 +109,8 @@ const activePath = computed(() =>
           <Activity class="h-4 w-4 text-white" />
         </div>
         <div class="min-w-0">
-          <div class="text-[14px] font-semibold leading-tight tracking-wide text-content">SAS</div>
-          <div class="truncate text-[11px] leading-tight text-content-faint">A股智能分析系统</div>
+          <div class="text-[15.5px] font-semibold leading-tight tracking-wide text-content">SAS</div>
+          <div class="truncate text-[12.5px] leading-tight text-content-faint">A股智能分析系统</div>
         </div>
       </div>
 
@@ -121,7 +121,7 @@ const activePath = computed(() =>
             v-for="item in group.items"
             :key="item.path"
             :to="item.path"
-            class="group relative flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-[12.5px] font-medium transition-colors duration-150"
+            class="group relative flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-[14px] font-medium transition-colors duration-150"
             :class="
               activePath === item.path
                 ? 'bg-primary/[0.12] text-content'
@@ -145,7 +145,7 @@ const activePath = computed(() =>
       <!-- 免责声明（侧栏底部常驻） -->
       <div class="border-t border-base-600/60 p-3">
         <div
-          class="flex items-start gap-2 rounded-lg border border-warn/25 bg-warn/[0.07] px-2.5 py-2 text-[10.5px] leading-relaxed text-warn/90"
+          class="flex items-start gap-2 rounded-lg border border-warn/25 bg-warn/[0.07] px-2.5 py-2 text-[12px] leading-relaxed text-warn/90"
         >
           <ShieldAlert class="mt-px h-3.5 w-3.5 shrink-0" />
           <span>{{ market.disclaimer }}</span>
@@ -173,7 +173,7 @@ const activePath = computed(() =>
           </span>
         </div>
         <div class="flex items-center gap-2">
-          <span class="font-num text-[12.5px] text-content-muted">{{ now }}</span>
+          <span class="font-num text-[14px] text-content-muted">{{ now }}</span>
           <span class="mx-1 hidden h-4 w-px bg-base-600 sm:block"></span>
           <span
             v-if="scopeStats"

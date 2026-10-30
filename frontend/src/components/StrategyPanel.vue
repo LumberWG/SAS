@@ -56,14 +56,14 @@ const allSelected = computed(
         <ChevronsRight class="h-4 w-4" />
       </button>
       <span
-        class="font-num shrink-0 rounded bg-primary/15 px-1 py-0.5 text-[10px] font-semibold text-primary-light"
+        class="font-num shrink-0 rounded bg-primary/15 px-1 py-0.5 text-[11.5px] font-semibold text-primary-light"
         :title="`已选 ${selected.length}/${strategies.length} 个策略`"
       >
         {{ selected.length }}
       </span>
       <div class="flex min-h-0 flex-1 items-center justify-center">
         <span
-          class="select-none whitespace-nowrap text-[11px] tracking-wide text-content-faint"
+          class="select-none whitespace-nowrap text-[12.5px] tracking-wide text-content-faint"
           style="writing-mode: vertical-rl"
         >
           选股策略
@@ -80,7 +80,7 @@ const allSelected = computed(
           <h3 class="truncate text-subheading">选股策略</h3>
         </div>
         <div class="flex shrink-0 items-center gap-1.5">
-          <span class="text-[11px] text-content-faint">{{ selected.length }}/{{ strategies.length }}</span>
+          <span class="text-[12.5px] text-content-faint">{{ selected.length }}/{{ strategies.length }}</span>
           <button
             class="flex h-6 w-6 items-center justify-center rounded-md text-content-faint transition-colors hover:bg-base-700/60 hover:text-primary-light"
             title="收起策略面板"
@@ -94,14 +94,14 @@ const allSelected = computed(
       <!-- 全选 / 清空 -->
       <div class="mb-3 flex overflow-hidden rounded-lg border border-base-600">
         <button
-          class="flex-1 border-r border-base-600 px-2 py-1.5 text-[11px] text-content-muted transition-colors last:border-r-0 hover:bg-primary/10 hover:text-primary-light disabled:cursor-not-allowed disabled:opacity-40"
+          class="flex-1 border-r border-base-600 px-2 py-1.5 text-[12.5px] text-content-muted transition-colors last:border-r-0 hover:bg-primary/10 hover:text-primary-light disabled:cursor-not-allowed disabled:opacity-40"
           :disabled="running || allSelected"
           @click="emit('selectAll')"
         >
           全选
         </button>
         <button
-          class="flex-1 px-2 py-1.5 text-[11px] text-content-muted transition-colors hover:bg-primary/10 hover:text-primary-light disabled:cursor-not-allowed disabled:opacity-40"
+          class="flex-1 px-2 py-1.5 text-[12.5px] text-content-muted transition-colors hover:bg-primary/10 hover:text-primary-light disabled:cursor-not-allowed disabled:opacity-40"
           :disabled="running || selected.length === 0"
           @click="emit('clearAll')"
         >
@@ -111,10 +111,10 @@ const allSelected = computed(
 
       <!-- 扫描范围 -->
       <label class="mb-4 flex flex-col gap-1.5">
-        <span class="text-[11px] text-content-muted">扫描范围</span>
+        <span class="text-[12.5px] text-content-muted">扫描范围</span>
         <select
           :value="scope"
-          class="rounded-lg border border-base-600 bg-base-700 px-3 py-2 text-[13px] text-content outline-none transition-colors focus:border-primary disabled:opacity-50"
+          class="rounded-lg border border-base-600 bg-base-700 px-3 py-2 text-[14.5px] text-content outline-none transition-colors focus:border-primary disabled:opacity-50"
           :disabled="running"
           @change="emit('update:scope', ($event.target as HTMLSelectElement).value)"
         >
@@ -125,7 +125,7 @@ const allSelected = computed(
       <!-- 策略列表（按分类分组） -->
       <div class="min-h-0 flex-1 space-y-4 overflow-y-auto">
         <div v-for="(list, category) in grouped" :key="category">
-          <div class="mb-2 flex items-center gap-2 text-[11px] font-medium tracking-wide text-content-faint">
+          <div class="mb-2 flex items-center gap-2 text-[12.5px] font-medium tracking-wide text-content-faint">
             <span class="h-1 w-1 rounded-full bg-primary-light" />
             {{ category }}
           </div>
@@ -148,17 +148,17 @@ const allSelected = computed(
               />
               <div class="min-w-0 flex-1">
                 <div class="flex items-center justify-between gap-2">
-                  <span class="text-[13px] font-medium text-content">{{ s.name }}</span>
+                  <span class="text-[14.5px] font-medium text-content">{{ s.name }}</span>
                   <span class="flex shrink-0 items-center gap-1">
                     <span
                       v-if="s.custom"
-                      class="rounded bg-accent/20 px-1.5 py-0.5 text-[10px] text-accent"
+                      class="rounded bg-accent/20 px-1.5 py-0.5 text-[11.5px] text-accent"
                       title="自定义策略"
                       >自定义</span
                     >
                     <span
                       v-if="todayHits[s.name]"
-                      class="rounded-full bg-up/15 px-1.5 py-0.5 font-num text-[10px] font-semibold text-up"
+                      class="rounded-full bg-up/15 px-1.5 py-0.5 font-num text-[11.5px] font-semibold text-up"
                       :title="`今日已命中 ${todayHits[s.name]} 只`"
                     >
                       {{ todayHits[s.name] }}
@@ -172,7 +172,7 @@ const allSelected = computed(
                     </button>
                   </span>
                 </div>
-                <div class="mt-0.5 text-[11px] leading-relaxed text-content-faint">
+                <div class="mt-0.5 text-[12.5px] leading-relaxed text-content-faint">
                   {{ s.description }}
                 </div>
               </div>

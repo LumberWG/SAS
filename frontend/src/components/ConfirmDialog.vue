@@ -72,8 +72,8 @@ onUnmounted(() => window.removeEventListener('keydown', onKeydown))
         </div>
 
         <div class="px-5 py-4">
-          <p class="text-[13px] leading-relaxed text-content-muted">{{ message }}</p>
-          <p v-if="hint" class="mt-2 text-[11px] leading-relaxed text-content-faint">{{ hint }}</p>
+          <p class="text-[14.5px] leading-relaxed text-content-muted">{{ message }}</p>
+          <p v-if="hint" class="mt-2 text-[12.5px] leading-relaxed text-content-faint">{{ hint }}</p>
         </div>
 
         <div class="flex items-center justify-end gap-2 border-t border-base-600/60 px-5 py-3">

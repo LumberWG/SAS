@@ -3,26 +3,140 @@
 @tailwind utilities;
 
 /* ============================================================================
-   设计令牌（深色金融仪表盘）
+   主题令牌
    ----------------------------------------------------------------------------
-   层次只用三级表面 + 一档边框表达（背景 900 / 卡片 800 / 悬浮 700 / 边框 600），
-   不叠加多层光晕；强调色只有 primary 一支，红绿只留给涨跌数据。
+   所有颜色都收敛成 RGB 三元组变量，Tailwind 的 `bg-base-800` / `text-content`
+   与图表（src/lib/chartTheme.ts）都读同一批变量 —— 换主题只改这里。
+
+   主题清单（与 src/stores/theme.ts 一一对应）：
+     dark      石墨黑（默认，深色盯盘）
+     midnight  深海蓝（深色，偏冷，接近行情终端）
+     light     象牙白（浅色，办公/投屏）
+     sand      暖沙（浅色，低饱和米色，纸感阅读）
    ============================================================================ */
 @layer base {
-  :root {
-    --background: #0a0c10;
-    --card: #101319;
-    --elevated: #171b23;
-    --border: #252b37;
-    --content: #e8ebf1;
-    --content-muted: #98a2b3;
-    --content-faint: #697386;
-    --primary: #3b82f6;
-    --primary-light: #93c5fd;
-    --up: #f04452; /* A股红涨 */
-    --down: #12b76a; /* A股绿跌 */
-    --warn: #f5a524;
-    --accent: #8b5cf6;
+  :root,
+  [data-theme="dark"] {
+    color-scheme: dark;
+
+    --c-base-900: 10 12 16;
+    --c-base-800: 16 19 25;
+    --c-base-700: 23 27 35;
+    --c-base-600: 37 43 55;
+    --c-base-500: 51 58 73;
+
+    --c-content: 232 235 241;
+    --c-content-muted: 152 162 179;
+    --c-content-faint: 105 115 134;
+
+    --c-primary: 59 130 246;
+    --c-primary-light: 147 197 253;
+    --c-primary-dark: 29 78 216;
+
+    --c-up: 240 68 82;
+    --c-down: 18 183 106;
+    --c-warn: 245 165 36;
+    --c-accent: 139 92 246;
+
+    --body-glow:
+      radial-gradient(1100px 520px at 50% -12%, rgba(59, 130, 246, 0.07), transparent 70%),
+      radial-gradient(760px 420px at 100% 100%, rgba(139, 92, 246, 0.04), transparent 70%);
+
+    --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.32), 0 10px 26px -18px rgba(0, 0, 0, 0.65);
+    --shadow-pop: 0 18px 44px -14px rgba(0, 0, 0, 0.7);
+    --shadow-glow: 0 0 0 1px rgba(59, 130, 246, 0.28), 0 10px 30px -14px rgba(59, 130, 246, 0.55);
+  }
+
+  [data-theme="midnight"] {
+    color-scheme: dark;
+
+    --c-base-900: 8 12 24;
+    --c-base-800: 13 19 34;
+    --c-base-700: 19 27 47;
+    --c-base-600: 30 41 66;
+    --c-base-500: 44 58 88;
+
+    --c-content: 226 233 245;
+    --c-content-muted: 146 160 184;
+    --c-content-faint: 100 115 143;
+
+    --c-primary: 76 141 255;
+    --c-primary-light: 165 203 255;
+    --c-primary-dark: 30 64 175;
+
+    --c-up: 242 84 96;
+    --c-down: 22 179 106;
+    --c-warn: 246 173 58;
+    --c-accent: 129 140 248;
+
+    --body-glow:
+      radial-gradient(1100px 520px at 50% -12%, rgba(76, 141, 255, 0.12), transparent 70%),
+      radial-gradient(760px 420px at 100% 100%, rgba(129, 140, 248, 0.07), transparent 70%);
+
+    --shadow-card: 0 1px 2px rgba(0, 0, 0, 0.4), 0 10px 26px -18px rgba(0, 0, 0, 0.75);
+    --shadow-pop: 0 18px 44px -14px rgba(0, 0, 0, 0.78);
+    --shadow-glow: 0 0 0 1px rgba(76, 141, 255, 0.32), 0 10px 30px -14px rgba(76, 141, 255, 0.6);
+  }
+
+  [data-theme="light"] {
+    color-scheme: light;
+
+    --c-base-900: 245 246 249;
+    --c-base-800: 255 255 255;
+    --c-base-700: 241 243 246;
+    --c-base-600: 222 226 233;
+    --c-base-500: 200 207 218;
+
+    --c-content: 24 29 38;
+    --c-content-muted: 88 100 118;
+    --c-content-faint: 128 139 156;
+
+    /* 浅色下 primary-light 用作强调文字，必须比主色更深才看得清 */
+    --c-primary: 37 99 235;
+    --c-primary-light: 29 78 216;
+    --c-primary-dark: 30 58 138;
+
+    --c-up: 214 40 47;
+    --c-down: 5 150 105;
+    --c-warn: 176 82 9;
+    --c-accent: 109 40 217;
+
+    --body-glow:
+      radial-gradient(900px 420px at 50% -10%, rgba(37, 99, 235, 0.06), transparent 70%);
+
+    --shadow-card: 0 1px 2px rgba(16, 24, 40, 0.05), 0 10px 24px -18px rgba(16, 24, 40, 0.22);
+    --shadow-pop: 0 18px 40px -16px rgba(16, 24, 40, 0.22);
+    --shadow-glow: 0 0 0 1px rgba(37, 99, 235, 0.25), 0 10px 30px -16px rgba(37, 99, 235, 0.35);
+  }
+
+  [data-theme="sand"] {
+    color-scheme: light;
+
+    --c-base-900: 249 247 243;
+    --c-base-800: 255 253 250;
+    --c-base-700: 244 240 233;
+    --c-base-600: 228 221 210;
+    --c-base-500: 206 196 181;
+
+    --c-content: 35 31 26;
+    --c-content-muted: 97 89 78;
+    --c-content-faint: 138 128 114;
+
+    --c-primary: 37 99 235;
+    --c-primary-light: 29 78 216;
+    --c-primary-dark: 30 58 138;
+
+    --c-up: 190 32 45;
+    --c-down: 5 140 98;
+    --c-warn: 161 75 6;
+    --c-accent: 109 40 217;
+
+    --body-glow:
+      radial-gradient(900px 420px at 50% -10%, rgba(180, 140, 90, 0.10), transparent 70%);
+
+    --shadow-card: 0 1px 2px rgba(40, 33, 24, 0.06), 0 10px 24px -18px rgba(40, 33, 24, 0.22);
+    --shadow-pop: 0 18px 40px -16px rgba(40, 33, 24, 0.22);
+    --shadow-glow: 0 0 0 1px rgba(37, 99, 235, 0.25), 0 10px 30px -16px rgba(37, 99, 235, 0.35);
   }
 
   html,
@@ -31,12 +145,15 @@
     height: 100%;
   }
 
+  html {
+    /* 中文小字在 125%/150% 缩放的屏幕上容易糊，统一按 16px 基准 */
+    font-size: 16px;
+    -webkit-text-size-adjust: 100%;
+  }
+
   body {
     @apply bg-base-900 text-content font-sans text-body antialiased;
-    /* 极弱的环境光：只在大屏顶端留一点冷色，避免大片纯黑发闷 */
-    background-image:
-      radial-gradient(1100px 520px at 50% -12%, rgba(59, 130, 246, 0.07), transparent 70%),
-      radial-gradient(760px 420px at 100% 100%, rgba(139, 92, 246, 0.04), transparent 70%);
+    background-image: var(--body-glow);
     background-attachment: fixed;
     font-feature-settings: "cv05" 1, "ss03" 1;
     text-rendering: optimizeLegibility;
@@ -49,12 +166,12 @@
   }
 
   ::selection {
-    background: rgba(59, 130, 246, 0.32);
-    color: #fff;
+    background: rgb(var(--c-primary) / 0.28);
+    color: rgb(var(--c-content));
   }
 
   :focus-visible {
-    outline: 2px solid rgba(59, 130, 246, 0.55);
+    outline: 2px solid rgb(var(--c-primary) / 0.55);
     outline-offset: 1px;
   }
 
@@ -87,10 +204,17 @@
     appearance: textfield;
   }
 
-  /* 下拉展开面板跟着深色主题走（Windows 下否则是白底） */
+  /* 下拉展开面板跟着主题走（Windows 下否则是白底） */
   select option {
-    background-color: #171b23;
-    color: #e8ebf1;
+    background-color: rgb(var(--c-base-700));
+    color: rgb(var(--c-content));
+  }
+
+  /* 日期选择器的原生图标在深色背景上是黑块，反色处理；浅色主题保持原样 */
+  [data-theme="dark"] input[type="date"]::-webkit-calendar-picker-indicator,
+  [data-theme="midnight"] input[type="date"]::-webkit-calendar-picker-indicator {
+    filter: invert(0.7);
+    cursor: pointer;
   }
 }
 
@@ -119,7 +243,7 @@
   .glass-card-interactive:hover {
     @apply border-primary/40;
     transform: translateY(-2px);
-    box-shadow: 0 12px 30px -18px rgba(59, 130, 246, 0.6);
+    box-shadow: 0 12px 30px -18px rgb(var(--c-primary) / 0.55);
   }
 
   /* 静态面板：表格 / 配置页这类不该有 hover 反馈的容器 */
@@ -130,13 +254,13 @@
     @apply flex flex-wrap items-center gap-2 border-b border-base-600/60 px-3.5 py-2.5;
   }
   .panel-title {
-    @apply text-[13px] font-semibold tracking-wide text-content;
+    @apply text-[14px] font-semibold tracking-wide text-content;
   }
 
   /* ---------- 按钮 ---------- */
   .btn {
     @apply inline-flex select-none items-center justify-center gap-1.5 whitespace-nowrap rounded-lg border
-      px-3 py-1.5 text-[12px] font-medium transition-colors duration-150
+      px-3 py-1.5 text-[13px] font-medium transition-colors duration-150
       disabled:cursor-not-allowed disabled:opacity-45;
   }
   .btn-primary {
@@ -156,15 +280,15 @@
     @apply border-base-600 bg-base-700/60 text-content-muted hover:border-up/60 hover:text-up;
   }
   .btn-sm {
-    @apply rounded-md px-2.5 py-1 text-[11px];
+    @apply rounded-md px-2.5 py-1 text-[12px];
   }
   .btn-xs {
-    @apply rounded-md px-2 py-0.5 text-[11px];
+    @apply rounded-md px-2 py-0.5 text-[12px];
   }
 
   /* ---------- 状态胶囊 ---------- */
   .chip {
-    @apply inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[10.5px] font-medium leading-normal;
+    @apply inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11.5px] font-medium leading-normal;
   }
   .chip-primary {
     @apply border-primary/45 bg-primary/[0.12] text-primary-light;
@@ -187,15 +311,16 @@
     @apply inline-flex flex-wrap items-center gap-1 rounded-lg border border-base-600/70 bg-base-800/60 p-1;
   }
   .seg-item {
-    @apply rounded-md px-3 py-1.5 text-[12px] font-medium text-content-muted transition-colors hover:text-content;
+    @apply rounded-md px-3 py-1.5 text-[13px] font-medium text-content-muted transition-colors hover:text-content;
   }
   .seg-item-active {
-    @apply bg-primary/[0.12] text-primary-light shadow-[inset_0_0_0_1px_rgba(59,130,246,0.28)];
+    @apply bg-primary/[0.12] text-primary-light;
+    box-shadow: inset 0 0 0 1px rgb(var(--c-primary) / 0.28);
   }
 
   /* ---------- 表单 ---------- */
   .field {
-    @apply h-8 rounded-lg border border-base-600 bg-base-900/70 px-2.5 text-[12.5px] text-content
+    @apply h-8 rounded-lg border border-base-600 bg-base-900/70 px-2.5 text-[13.5px] text-content
       outline-none transition-colors placeholder:text-content-faint
       focus:border-primary/70 focus:bg-base-900;
   }
@@ -208,18 +333,18 @@
     @apply overflow-auto rounded-xl border border-base-600/70 bg-base-800/60;
   }
   .table-head {
-    @apply sticky top-0 z-10 bg-base-700/90 px-3 py-2 text-left text-[11px] font-medium tracking-wider text-content-faint backdrop-blur;
+    @apply sticky top-0 z-10 bg-base-700/90 px-3 py-2 text-left text-[12px] font-medium tracking-wider text-content-faint backdrop-blur;
   }
   .table-cell {
-    @apply border-t border-base-600/40 px-3 py-2 text-[12.5px] text-content-muted;
+    @apply border-t border-base-600/40 px-3 py-2 text-[13.5px] text-content-muted;
   }
   .row-hover:hover {
-    background-color: rgba(23, 27, 35, 0.72);
+    background-color: rgb(var(--c-base-700) / 0.72);
   }
 
   /* 小标题（分组名、字段组名） */
   .eyebrow {
-    @apply text-[10px] font-semibold uppercase tracking-[0.12em] text-content-faint;
+    @apply text-[11px] font-semibold uppercase tracking-[0.12em] text-content-faint;
   }
 
   /* ---------- 动效 ---------- */
@@ -232,7 +357,7 @@
   }
   @keyframes flashUp {
     0% {
-      background-color: rgba(240, 68, 82, 0.22);
+      background-color: rgb(var(--c-up) / 0.22);
     }
     100% {
       background-color: transparent;
@@ -240,7 +365,7 @@
   }
   @keyframes flashDown {
     0% {
-      background-color: rgba(18, 183, 106, 0.22);
+      background-color: rgb(var(--c-down) / 0.22);
     }
     100% {
       background-color: transparent;

@@ -15,7 +15,7 @@ import {
   MarkLineComponent,
 } from 'echarts/components'
 
-import { chart, tooltipStyle } from '../lib/chartTheme'
+import { chartTheme, tooltipStyle } from '../lib/chartTheme'
 
 use([
   CanvasRenderer,
@@ -36,10 +36,6 @@ const props = defineProps<{
   height?: string
 }>()
 
-const UP = chart.up
-const DOWN = chart.down
-const NEUTRAL = chart.primaryLight
-
 const base = computed(() =>
   props.prevClose != null && props.prevClose > 0 ? props.prevClose : null,
 )
@@ -53,10 +49,11 @@ const lastPrice = computed(() =>
 )
 
 const tone = computed(() => {
-  if (base.value == null || lastPrice.value == null) return NEUTRAL
-  if (lastPrice.value > base.value) return UP
-  if (lastPrice.value < base.value) return DOWN
-  return chart.textMuted
+  const c = chartTheme()
+  if (base.value == null || lastPrice.value == null) return c.primaryLight
+  if (lastPrice.value > base.value) return c.up
+  if (lastPrice.value < base.value) return c.down
+  return c.textMuted
 })
 
 /** 以昨收为中心对称取值域：涨跌视觉幅度一致（与行情软件一致）。 */
@@ -78,8 +75,9 @@ const yRange = computed(() => {
 })
 
 /** 成交量柱按「较上一分钟涨跌」着色。 */
-const volumeBars = computed(() =>
-  props.volumes.map((v, i) => {
+const volumeBars = computed(() => {
+  const c = chartTheme()
+  return props.volumes.map((v, i) => {
     const cur = props.prices[i]
     let before: number | null = base.value
     for (let j = i - 1; j >= 0; j--) {
@@ -90,26 +88,28 @@ const volumeBars = computed(() =>
       }
     }
     const up = cur != null && before != null ? cur >= before : true
-    return { value: v, itemStyle: { color: up ? UP : DOWN } }
-  }),
-)
+    return { value: v, itemStyle: { color: up ? c.up : c.down } }
+  })
+})
 
 /** 横轴标签密度：240 根时约 5 个刻度。 */
 const labelInterval = computed(() =>
   Math.max(0, Math.ceil(props.times.length / 5) - 1),
 )
 
-const option = computed(() => ({
+const option = computed(() => {
+  const c = chartTheme()
+  return {
   animation: false,
   backgroundColor: 'transparent',
   tooltip: {
     trigger: 'axis',
-    axisPointer: { type: 'cross', lineStyle: { color: chart.textFaint } },
-    ...tooltipStyle,
+    axisPointer: { type: 'cross', lineStyle: { color: c.textFaint } },
+    ...tooltipStyle(c),
   },
   legend: {
     data: ['价格', '均价'],
-    textStyle: { color: chart.textMuted, fontSize: 11 },
+    textStyle: { color: c.textMuted, fontSize: 12 },
     top: 0,
     right: 0,
     icon: 'roundRect',
@@ -125,7 +125,7 @@ const option = computed(() => ({
       type: 'category',
       data: props.times,
       boundaryGap: false,
-      axisLine: { lineStyle: { color: chart.axisLine } },
+      axisLine: { lineStyle: { color: c.axisLine } },
       axisTick: { show: false },
       axisLabel: { show: false },
     },
@@ -134,11 +134,11 @@ const option = computed(() => ({
       gridIndex: 1,
       data: props.times,
       boundaryGap: false,
-      axisLine: { lineStyle: { color: chart.axisLine } },
+      axisLine: { lineStyle: { color: c.axisLine } },
       axisTick: { show: false },
       axisLabel: {
-        color: chart.textFaint,
-        fontSize: 10,
+        color: c.textFaint,
+        fontSize: 11,
         interval: labelInterval.value,
       },
     },
@@ -149,11 +149,11 @@ const option = computed(() => ({
       min: yRange.value?.min,
       max: yRange.value?.max,
       axisLabel: {
-        color: chart.textFaint,
-        fontSize: 10,
+        color: c.textFaint,
+        fontSize: 11,
         formatter: (v: number) => v.toFixed(2),
       },
-      splitLine: { lineStyle: { color: chart.splitLine } },
+      splitLine: { lineStyle: { color: c.splitLine } },
     },
     {
       scale: true,
@@ -176,11 +176,11 @@ const option = computed(() => ({
           ? {
               symbol: 'none',
               silent: true,
-              lineStyle: { color: chart.textMuted, type: 'dashed', width: 1 },
+              lineStyle: { color: c.textMuted, type: 'dashed', width: 1 },
               label: {
                 position: 'end',
-                color: chart.textMuted,
-                fontSize: 10,
+                color: c.textMuted,
+                fontSize: 11,
                 formatter: '昨收',
               },
               data: [{ yAxis: base.value }],
@@ -192,8 +192,8 @@ const option = computed(() => ({
       type: 'line',
       data: props.avgPrices,
       symbol: 'none',
-      lineStyle: { width: 1, color: chart.warn },
-      itemStyle: { color: chart.warn },
+      lineStyle: { width: 1, color: c.warn },
+      itemStyle: { color: c.warn },
     },
     {
       name: '成交量',
@@ -204,7 +204,8 @@ const option = computed(() => ({
       barWidth: '60%',
     },
   ],
-}))
+  }
+})
 </script>
 
 <template>

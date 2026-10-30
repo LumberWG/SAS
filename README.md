@@ -25,6 +25,7 @@
 
 > 评分阈值（`factor_buy_threshold` / `factor_sell_threshold`）与四项费率（`trade_fee_*`）**已从硬编码挪进配置**：前者决定 buy/sell 判级，后者被回测与实盘共用。整手股数（`LOT_SIZE=100`）仍固定——改了会下出非法委托。
 
+- **外观主题（页面顶部）**：石墨黑 / 深海蓝 / 象牙白 / 暖沙四选一，点一下即时生效。这是**纯前端偏好**（存 `localStorage`），不进 `app_state`、不影响后端与其它电脑 —— 显示习惯不该混进业务参数表
 - **两级布局（均衡分组）**：左侧竖排导航 8 个分组——连接与扫描 9 / 选股与自选 11 / 账户与费率 7 / 交易执行 13 / 仓位与轮动 8 / 风控与止损 11 / 做T 与择时 11 / 调度与 LLM 8，每项标该组总数与已覆盖数。之所以不做平铺 tab：按 `paper_` 前缀天然会变成「一组 50 项、另一组 1 项」。布局由 `param_specs._LAYOUT` 按业务语义声明（分组 → 组内小节 → 键），新增字段没收录时按前缀兜底进对应组的「其他」小节
 - **组内小节**：每个分组再切成 2~5 个语义小节（如「风控与止损」= 买点切入 / 固定止损止盈 / ATR 与移动保护），小节标题右侧带一句说明；搜索时跨全部分组按小节分段展示命中结果
 - **可编辑**：开关项点一下、数字项直接输，改完点顶栏的「保存 (N)」（改动后页面底部也会浮出「有 N 项未保存 · 保存并生效 / 放弃」条，往下翻几屏也能保存）；每行显示**短标签 + 完整 key + 当前生效值**，**来源**（`运行时` = app_state 覆盖 > `.env` > `默认`）以胶囊标记，改动行高亮，可单行撤销、整组「本组还原」或全局「还原」为 `.env` 值
@@ -477,13 +478,14 @@ SAS/
 
 ## 界面与视觉规范
 
-配色/字体/组件样式集中定义在两个文件里，改主题只需要改这两处：
+配色/字体/组件样式都走令牌：**改主题只改 `style.css` 里的变量块**。
 
-- **色板**（`frontend/tailwind.config.js`）：中性深色三级表面 `base-900 #0A0C10`（页面底）→ `base-800 #101319`（卡片）→ `base-700 #171B23`（悬浮/输入）→ `base-600 #252B37`（边框），文字三阶 `content / content-muted / content-faint`，强调色只有 `primary #3B82F6` 一支；红涨绿跌 `up #F04452` / `down #12B76A` 只用于数据本身。层次靠明度与 1px 边框，不叠加光晕（旧版 `#0B1220` + 蓝紫径向光的「游戏风」已去掉）。
-- **字体**（`index.html` + `fontFamily`）：Inter（拉丁）+ Noto Sans SC（中文）+ JetBrains Mono（数字，`font-num` 走 `tabular-nums`，行情跳动时列宽不抖）。字号阶梯：`display 26` / `heading 20` / `subheading 15` / `body 13` / `label 12` / `caption 11`。
+- **主题（四套，设置页可切）**：`dark` 石墨黑（默认）/ `midnight` 深海蓝 / `light` 象牙白 / `sand` 暖沙。实现方式是 `src/style.css` 里按 `[data-theme=...]` 定义 `--c-*`（RGB 三元组），`tailwind.config.js` 把颜色接成 `rgb(var(--c-*) / <alpha-value>)` —— 所以 `bg-base-800`、`text-content-muted` 这些语义类**换主题自动跟着变**，模板里不出现色值字面量。切换入口在「系统设置 → 外观主题」，存 `localStorage`（显示偏好，不进后端配置）；`index.html` 里有一小段内联脚本在首帧前恢复主题，避免先闪深色。
+- **色板**：三级表面 `base-900`（页面底）→ `base-800`（卡片）→ `base-700`（悬浮/输入）→ `base-600`（边框），文字三阶 `content / muted / faint`，强调色只有 `primary` 一支；红涨绿跌 `up`/`down` 只用于数据本身。层次靠明度与 1px 边框，不叠加光晕。浅色主题下 `primary-light` 用作强调文字，所以取的是比主色更深的蓝。
+- **字体**（`index.html` + `fontFamily`）：Inter（拉丁）+ Noto Sans SC（中文）+ JetBrains Mono（数字，`font-num` 走 `tabular-nums`，行情跳动时列宽不抖）。字号阶梯：`display 28` / `heading 22` / `subheading 16` / `body 14` / `label 13` / `caption 12`；模板里其余字号（`text-[13.5px]` 这类）2026-10 已整体上调约 12%，避免满屏 11px 小字。
 - **组件类**（`src/style.css`）：`.glass-card`（卡片，hover 只亮边框，不再整页上浮）、`.glass-card-interactive`（确实可点的卡片才位移）、`.panel/.panel-hd`、`.btn` + `.btn-primary/-outline/-ghost/-danger/-primary-soft/-sm/-xs`、`.chip*`、`.field`、`.seg/.seg-item`（页内 tab）、`.table-shell/.table-head/.table-cell`、`.eyebrow`。
-- **图表**（`src/lib/chartTheme.ts`）：ECharts 吃不到 Tailwind 类，色值、tooltip、轴样式统一从这里取；新增图表不要再写 `#111A2E` 这类字面色。
-- **Toast**：深色底 + 语义色描边（旧版是浅色 alert 块，在深色界面里很刺眼）。
+- **图表**（`src/lib/chartTheme.ts`）：ECharts 吃不到 CSS 类，所以 `chartTheme()` 运行时读同一批 `--c-*` 变量并按主题重算；调用方写在 `computed` 里即自动跟随主题。新增图表不要写 `#111A2E` 这类字面色。
+- **Toast**：主题底色 + 语义色描边（旧版是浅色 alert 块，在深色界面里很刺眼）。
 
 视觉取向参考 shadcn/ui 的 dark 中性灰阶与 Tremor / Vercel Dashboard 的表面分层，只借鉴色阶与排版思路，未引入其组件依赖。
 

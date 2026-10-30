@@ -38,13 +38,13 @@ const toneText: Record<string, string> = {
       <div
         v-for="t in notify.toasts"
         :key="t.id"
-        class="pointer-events-auto flex items-start gap-2 rounded-xl border bg-base-800/95 px-3 py-2 text-[12.5px] shadow-pop backdrop-blur"
+        class="pointer-events-auto flex items-start gap-2 rounded-xl border bg-base-800/95 px-3 py-2 text-[14px] shadow-pop backdrop-blur"
         :class="toneBorder[t.type]"
       >
         <component :is="icons[t.type]" class="mt-0.5 h-4 w-4 shrink-0" :class="toneText[t.type]" />
         <span class="flex-1 leading-snug text-content">{{ t.message }}</span>
         <button
-          class="shrink-0 rounded p-0.5 text-[11px] text-content-faint transition-colors hover:text-content"
+          class="shrink-0 rounded p-0.5 text-[12.5px] text-content-faint transition-colors hover:text-content"
           @click="notify.dismiss(t.id)"
         >
           ✕

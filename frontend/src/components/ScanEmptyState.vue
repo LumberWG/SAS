@@ -74,12 +74,12 @@ const steps = ['勾选策略', '选择范围', '开始扫描']
         </div>
       </div>
 
-      <p class="max-w-lg text-[15px] font-medium text-content-muted">{{ heading }}</p>
+      <p class="max-w-lg text-[16.5px] font-medium text-content-muted">{{ heading }}</p>
     </div>
 
     <!-- 本轮无命中：历史命中上下文 + 放宽建议 -->
     <template v-if="status === 'done'">
-      <p v-if="todayHitTotal > 0" class="text-[12px] text-content-muted">
+      <p v-if="todayHitTotal > 0" class="text-[13.5px] text-content-muted">
         今日历史命中共
         <span class="font-num font-semibold text-primary-light">{{ todayHitTotal }}</span>
         个，
@@ -87,7 +87,7 @@ const steps = ['勾选策略', '选择范围', '开始扫描']
           前往「② 二选 · 自选股」查看
         </router-link>
       </p>
-      <div class="flex flex-wrap items-center justify-center gap-2 text-[11px]">
+      <div class="flex flex-wrap items-center justify-center gap-2 text-[12.5px]">
         <span class="chip chip-muted">点击策略 ✏️ 放宽参数</span>
         <span class="chip chip-muted">扩大扫描范围</span>
         <span class="chip chip-muted">更换策略组合</span>
@@ -101,38 +101,38 @@ const steps = ['勾选策略', '选择范围', '开始扫描']
           class="flex flex-col divide-y divide-base-600/60 overflow-hidden rounded-xl border border-base-600/60 bg-base-700/20 sm:flex-row sm:divide-x sm:divide-y-0"
         >
           <div class="flex-1 px-5 py-4">
-            <div class="text-[11px] text-content-faint">今日历史命中</div>
+            <div class="text-[12.5px] text-content-faint">今日历史命中</div>
             <div class="mt-2 flex items-baseline gap-1.5">
-              <span class="font-num text-[22px] font-semibold leading-none text-primary-light">
+              <span class="font-num text-[23.5px] font-semibold leading-none text-primary-light">
                 {{ todayHitTotal }}
               </span>
-              <span class="text-[11px] text-content-faint">个信号</span>
+              <span class="text-[12.5px] text-content-faint">个信号</span>
             </div>
           </div>
 
           <div class="flex-1 px-5 py-4">
-            <div class="flex items-center gap-1.5 text-[11px] text-content-faint">
+            <div class="flex items-center gap-1.5 text-[12.5px] text-content-faint">
               本地K线覆盖
               <span v-if="klineReady" class="rounded bg-up/15 px-1.5 py-0.5 text-up">已就绪</span>
             </div>
             <div class="mt-2 flex items-baseline gap-1.5">
               <span
-                class="font-num text-[22px] font-semibold leading-none"
+                class="font-num text-[23.5px] font-semibold leading-none"
                 :class="klineReady ? 'text-up' : 'text-content'"
               >
                 {{ klineTotal > 0 ? `${klineRatio}%` : '—' }}
               </span>
-              <span class="font-num text-[11px] text-content-faint">{{ klineText }}</span>
+              <span class="font-num text-[12.5px] text-content-faint">{{ klineText }}</span>
             </div>
           </div>
 
           <div class="flex-1 px-5 py-4">
-            <div class="text-[11px] text-content-faint">当前选择</div>
+            <div class="text-[12.5px] text-content-faint">当前选择</div>
             <div class="mt-2 flex items-baseline gap-1.5">
-              <span class="font-num text-[22px] font-semibold leading-none text-content">
+              <span class="font-num text-[23.5px] font-semibold leading-none text-content">
                 {{ strategyCount }}
               </span>
-              <span class="truncate text-[12px] text-content-muted" :title="scopeLabel">
+              <span class="truncate text-[13.5px] text-content-muted" :title="scopeLabel">
                 策略 · {{ scopeLabel }}
               </span>
             </div>
@@ -143,7 +143,7 @@ const steps = ['勾选策略', '选择范围', '开始扫描']
       <!-- 三步流程（仅未开始，扫描中显示无意义） -->
       <div
         v-if="status !== 'running' && status !== 'pending'"
-        class="flex flex-wrap items-center justify-center gap-2 text-[12px]"
+        class="flex flex-wrap items-center justify-center gap-2 text-[13.5px]"
       >
         <template v-for="(step, i) in steps" :key="step">
           <div class="flex items-center gap-1.5 rounded-full border border-base-600/60 px-3 py-1.5">

@@ -1,44 +1,48 @@
 /**
  * 设计令牌。
  *
- * 配色走「中性深色 + 单一强调色」，参考成熟方案（shadcn/ui 的 dark 中性灰阶、
- * Tremor / Vercel Dashboard 的表面分层）：背景→卡片→悬浮三级只差明度，
- * 不靠蓝紫光晕营造层次，数据色（红涨绿跌）才抢眼。字体 Inter（拉丁）+ Noto Sans SC
- * （中文）+ JetBrains Mono（数字等宽，避免表格抖动）。
+ * 配色全部走 CSS 变量（`--c-*`，RGB 三元组），主题在 `src/style.css` 里按
+ * `[data-theme=...]` 定义：石墨黑 / 深海蓝 / 象牙白 / 暖沙。这样 `bg-base-800`、
+ * `text-content-muted` 这些语义类在**换主题时自动跟着变**，模板里不出现任何
+ * 色值字面量；图表另由 `src/lib/chartTheme.ts` 读同一批变量。
  *
- * 改色值即全局生效：模板里只写 `bg-base-800` / `text-content-muted` 这类语义类，
- * 图表色值集中在 `src/lib/theme.ts`，两处一起改才不会出现「页面变了图表没变」。
+ * 字号：2026-10 整体上调一档（正文 14px 起），并按「正文/标签/注」三档收敛，
+ * 避免满屏 11px 小字。
  *
  * @type {import('tailwindcss').Config}
  */
+
+/** 把 `--c-xxx` 三元组接进 Tailwind 颜色（保留 /opacity 支持） */
+const token = (name) => `rgb(var(--c-${name}) / <alpha-value>)`;
+
 export default {
   content: ["./index.html", "./src/**/*.{vue,js,ts,jsx,tsx}"],
   theme: {
     extend: {
       colors: {
-        // 表面分层：900 页面底 / 800 卡片 / 700 悬浮与输入框 / 600 边框 / 500 强调边框
+        // 表面分层：900 页面底 / 800 卡片 / 700 悬浮与输入 / 600 边框 / 500 强调边框
         base: {
-          900: "#0A0C10",
-          800: "#101319",
-          700: "#171B23",
-          600: "#252B37",
-          500: "#333A49",
+          900: token("base-900"),
+          800: token("base-800"),
+          700: token("base-700"),
+          600: token("base-600"),
+          500: token("base-500"),
         },
         primary: {
-          DEFAULT: "#3B82F6",
-          light: "#93C5FD",
-          dark: "#1D4ED8",
+          DEFAULT: token("primary"),
+          light: token("primary-light"),
+          dark: token("primary-dark"),
         },
         content: {
-          DEFAULT: "#E8EBF1", // 主文字
-          muted: "#98A2B3", // 次文字
-          faint: "#697386", // 弱文字 / 说明
+          DEFAULT: token("content"),
+          muted: token("content-muted"),
+          faint: token("content-faint"),
         },
         // A股习惯：红涨绿跌
-        up: "#F04452",
-        down: "#12B76A",
-        warn: "#F5A524",
-        accent: "#8B5CF6",
+        up: token("up"),
+        down: token("down"),
+        warn: token("warn"),
+        accent: token("accent"),
       },
       fontFamily: {
         sans: [
@@ -53,19 +57,19 @@ export default {
         mono: ["JetBrains Mono", "SFMono-Regular", "Consolas", "monospace"],
       },
       fontSize: {
-        // 规范：展示 26/600、标题 20/600、副标题 15/500、正文 13/400、标签 12、注 11
-        display: ["26px", { lineHeight: "32px", fontWeight: "600", letterSpacing: "-0.01em" }],
-        heading: ["20px", { lineHeight: "28px", fontWeight: "600", letterSpacing: "-0.01em" }],
-        subheading: ["15px", { lineHeight: "22px", fontWeight: "500" }],
-        body: ["13px", { lineHeight: "20px", fontWeight: "400" }],
-        label: ["12px", { lineHeight: "18px", fontWeight: "500" }],
-        caption: ["11px", { lineHeight: "16px", fontWeight: "400" }],
+        // 展示 28 / 标题 22 / 副标题 16 / 正文 14 / 标签 13 / 注 12
+        display: ["28px", { lineHeight: "36px", fontWeight: "600", letterSpacing: "-0.01em" }],
+        heading: ["22px", { lineHeight: "30px", fontWeight: "600", letterSpacing: "-0.01em" }],
+        subheading: ["16px", { lineHeight: "24px", fontWeight: "500" }],
+        body: ["14px", { lineHeight: "22px", fontWeight: "400" }],
+        label: ["13px", { lineHeight: "20px", fontWeight: "500" }],
+        caption: ["12px", { lineHeight: "18px", fontWeight: "400" }],
       },
       boxShadow: {
-        // 层次靠阴影与边框，不靠发光
-        glow: "0 0 0 1px rgba(59,130,246,0.28), 0 10px 30px -14px rgba(59,130,246,0.55)",
-        card: "0 1px 2px rgba(0,0,0,0.32), 0 10px 26px -18px rgba(0,0,0,0.65)",
-        pop: "0 18px 44px -14px rgba(0,0,0,0.7)",
+        // 变量化：浅色主题阴影要更淡，交给 style.css 里的主题块覆盖
+        glow: "var(--shadow-glow)",
+        card: "var(--shadow-card)",
+        pop: "var(--shadow-pop)",
       },
       transitionTimingFunction: {
         panel: "cubic-bezier(0.22, 1, 0.36, 1)",

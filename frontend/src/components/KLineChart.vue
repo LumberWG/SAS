@@ -15,7 +15,7 @@ import {
   LegendComponent,
 } from 'echarts/components'
 
-import { axisLabel, chart, splitLine, tooltipStyle } from '../lib/chartTheme'
+import { axisLabel, chartTheme, tooltipStyle } from '../lib/chartTheme'
 
 use([
   CanvasRenderer,
@@ -35,9 +35,6 @@ const props = defineProps<{
   height?: string
 }>()
 
-const UP = chart.up
-const DOWN = chart.down
-
 // MA 计算（与后端一致：简单算术平均）
 function ma(values: number[], n: number): (number | null)[] {
   return values.map((_, i) => {
@@ -53,17 +50,24 @@ const ma5 = computed(() => ma(closes.value, 5))
 const ma10 = computed(() => ma(closes.value, 10))
 const ma20 = computed(() => ma(closes.value, 20))
 
-const option = computed(() => ({
+const option = computed(() => {
+  // 每次重算都读当前主题：切主题 → 图表跟着换色（依赖在 chartTheme 内部登记）
+  const c = chartTheme()
+  const UP = c.up
+  const DOWN = c.down
+  const label = axisLabel(c)
+
+  return {
   animation: false,
   backgroundColor: 'transparent',
   tooltip: {
     trigger: 'axis',
-    axisPointer: { type: 'cross', lineStyle: { color: chart.textFaint } },
-    ...tooltipStyle,
+    axisPointer: { type: 'cross', lineStyle: { color: c.textFaint } },
+    ...tooltipStyle(c),
   },
   legend: {
     data: ['MA5', 'MA10', 'MA20'],
-    textStyle: { color: chart.textMuted, fontSize: 11 },
+    textStyle: { color: c.textMuted, fontSize: 12 },
     top: 0,
     icon: 'roundRect',
     itemWidth: 12,
@@ -77,8 +81,8 @@ const option = computed(() => ({
     {
       type: 'category',
       data: props.dates,
-      axisLine: { lineStyle: { color: chart.axisLine } },
-      axisLabel,
+      axisLine: { lineStyle: { color: c.axisLine } },
+      axisLabel: label,
       boundaryGap: true,
     },
     {
@@ -86,20 +90,20 @@ const option = computed(() => ({
       gridIndex: 1,
       data: props.dates,
       axisLabel: { show: false },
-      axisLine: { lineStyle: { color: chart.axisLine } },
+      axisLine: { lineStyle: { color: c.axisLine } },
       boundaryGap: true,
     },
   ],
   yAxis: [
     {
       scale: true,
-      axisLabel,
-      splitLine,
+      axisLabel: label,
+      splitLine: { lineStyle: { color: c.splitLine, type: 'dashed' } },
     },
     {
       scale: true,
       gridIndex: 1,
-      axisLabel,
+      axisLabel: label,
       splitLine: { show: false },
     },
   ],
@@ -123,7 +127,7 @@ const option = computed(() => ({
       type: 'line',
       data: ma5.value,
       smooth: true,
-      lineStyle: { width: 1, color: chart.primaryLight },
+      lineStyle: { width: 1, color: c.primaryLight },
       symbol: 'none',
     },
     {
@@ -131,7 +135,7 @@ const option = computed(() => ({
       type: 'line',
       data: ma10.value,
       smooth: true,
-      lineStyle: { width: 1, color: chart.warn },
+      lineStyle: { width: 1, color: c.warn },
       symbol: 'none',
     },
     {
@@ -139,7 +143,7 @@ const option = computed(() => ({
       type: 'line',
       data: ma20.value,
       smooth: true,
-      lineStyle: { width: 1, color: chart.accent },
+      lineStyle: { width: 1, color: c.accent },
       symbol: 'none',
     },
     {
@@ -155,7 +159,8 @@ const option = computed(() => ({
       })),
     },
   ],
-}))
+  }
+})
 </script>
 
 <template>

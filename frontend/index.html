@@ -8,6 +8,15 @@
     <meta name="color-scheme" content="dark" />
     <meta name="theme-color" content="#0A0C10" />
     <title>SAS · A股智能分析系统</title>
+    <!-- 首帧前恢复上次选的主题，避免先闪一下深色再切浅色（键名与 src/stores/theme.ts 一致） -->
+    <script>
+      try {
+        var savedTheme = localStorage.getItem('sas-theme')
+        if (savedTheme) document.documentElement.dataset.theme = savedTheme
+      } catch (e) {
+        /* localStorage 不可用（隐私模式）时用默认主题 */
+      }
+    </script>
     <!-- 字体：Inter（拉丁） + Noto Sans SC（中文） + JetBrains Mono（数字等宽） -->
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />

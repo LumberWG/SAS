@@ -24,6 +24,7 @@ import {
   type ParamItem,
   type SettingsOverview,
 } from '../api'
+import { THEMES, useThemeStore, type ThemeKey } from '../stores/theme'
 
 const data = ref<SettingsOverview | null>(null)
 const loading = ref(false)
@@ -33,6 +34,14 @@ const toast = ref('')
 const keyword = ref('')
 const activeGroup = ref('')
 const onlyChanged = ref(false)
+
+/** 外观主题：本地偏好，存 localStorage（不进 app_state，也不影响后端） */
+const theme = useThemeStore()
+function pickTheme(key: ThemeKey) {
+  theme.set(key)
+  toast.value = `已切换为「${theme.meta.name}」主题`
+  window.setTimeout(() => (toast.value = ''), 2000)
+}
 
 /** 编辑草稿：key → 输入值 */
 const draft = ref<Record<string, string | number | boolean>>({})
@@ -243,24 +252,24 @@ onMounted(load)
         <div class="min-w-0 flex-1">
           <div class="flex flex-wrap items-center gap-2">
             <span class="h-1.5 w-1.5 rounded-full bg-primary"></span>
-            <h2 class="text-[14px] font-semibold tracking-wide text-content">系统设置</h2>
-            <span class="rounded border border-base-600/60 bg-base-700/50 px-1.5 py-px text-[10px] text-content-faint">
+            <h2 class="text-[15.5px] font-semibold tracking-wide text-content">系统设置</h2>
+            <span class="rounded border border-base-600/60 bg-base-700/50 px-1.5 py-px text-[11.5px] text-content-faint">
               保存后即时生效
             </span>
           </div>
-          <p class="mt-1 max-w-[780px] text-[11px] leading-relaxed text-content-faint">
+          <p class="mt-1 max-w-[780px] text-[12.5px] leading-relaxed text-content-faint">
             {{ data?.hint ?? '加载中…' }}
           </p>
         </div>
 
         <div class="flex flex-wrap items-center gap-2">
           <div class="flex items-center gap-1.5 rounded-lg border border-base-600/60 bg-base-700/30 px-2.5 py-1">
-            <span class="font-num text-[15px] font-semibold leading-none text-content">{{ data?.total ?? '--' }}</span>
-            <span class="text-[10px] text-content-faint">可调参数</span>
+            <span class="font-num text-[16.5px] font-semibold leading-none text-content">{{ data?.total ?? '--' }}</span>
+            <span class="text-[11.5px] text-content-faint">可调参数</span>
           </div>
           <div class="flex items-center gap-1.5 rounded-lg border border-primary/40 bg-primary/10 px-2.5 py-1">
-            <span class="font-num text-[15px] font-semibold leading-none text-primary-light">{{ coveredTotal }}</span>
-            <span class="text-[10px] text-content-faint">已覆盖</span>
+            <span class="font-num text-[16.5px] font-semibold leading-none text-primary-light">{{ coveredTotal }}</span>
+            <span class="text-[11.5px] text-content-faint">已覆盖</span>
           </div>
           <div
             class="flex items-center gap-1.5 rounded-lg border px-2.5 py-1 transition-colors"
@@ -271,10 +280,10 @@ onMounted(load)
             "
           >
             <span
-              class="font-num text-[15px] font-semibold leading-none"
+              class="font-num text-[16.5px] font-semibold leading-none"
               :class="dirtyKeys.length ? 'text-warn' : 'text-content'"
             >{{ dirtyKeys.length }}</span>
-            <span class="text-[10px] text-content-faint">未保存</span>
+            <span class="text-[11.5px] text-content-faint">未保存</span>
           </div>
 
           <div class="mx-0.5 hidden h-6 w-px bg-base-600/60 sm:block"></div>
@@ -307,13 +316,57 @@ onMounted(load)
         </div>
       </div>
 
-      <div v-if="toast" class="mt-2 rounded border border-down/30 bg-down/10 px-2 py-1 text-[11px] text-down">
+      <div v-if="toast" class="mt-2 rounded border border-down/30 bg-down/10 px-2 py-1 text-[12.5px] text-down">
         {{ toast }}
       </div>
-      <div v-if="error" class="mt-2 rounded border border-up/30 bg-up/10 px-2 py-1 text-[11px] text-up">
+      <div v-if="error" class="mt-2 rounded border border-up/30 bg-up/10 px-2 py-1 text-[12.5px] text-up">
         {{ error }}
       </div>
     </div>
+
+    <!-- 外观主题：纯前端偏好（localStorage），换主题即时生效、不动后端配置 -->
+    <section class="rounded-xl border border-base-600/70 bg-base-800/70 p-3">
+      <header class="mb-2.5 flex flex-wrap items-center gap-x-2 gap-y-1">
+        <span class="h-1.5 w-1.5 rounded-full bg-primary"></span>
+        <h3 class="panel-title">外观主题</h3>
+        <span class="text-[13.5px] text-content-faint">
+          只影响当前浏览器显示，不写入后端配置；换电脑会回到默认主题
+        </span>
+        <span class="flex-1"></span>
+        <span class="chip chip-muted">当前：{{ theme.meta.name }}</span>
+      </header>
+      <div class="grid grid-cols-2 gap-2 md:grid-cols-4">
+        <button
+          v-for="t in THEMES"
+          :key="t.key"
+          type="button"
+          class="rounded-lg border p-2 text-left transition-colors"
+          :class="
+            theme.current === t.key
+              ? 'border-primary/60 bg-primary/[0.08]'
+              : 'border-base-600 hover:border-base-500'
+          "
+          @click="pickTheme(t.key)"
+        >
+          <div class="flex gap-1">
+            <span
+              v-for="(sw, i) in t.swatch"
+              :key="i"
+              class="h-6 flex-1 rounded border border-black/10"
+              :style="{ backgroundColor: sw }"
+            ></span>
+          </div>
+          <div class="mt-1.5 flex items-center gap-1.5">
+            <span
+              class="text-[14.5px] font-medium"
+              :class="theme.current === t.key ? 'text-primary-light' : 'text-content'"
+            >{{ t.name }}</span>
+            <span v-if="theme.current === t.key" class="chip chip-primary">使用中</span>
+          </div>
+          <p class="mt-0.5 text-[13px] leading-snug text-content-faint">{{ t.desc }}</p>
+        </button>
+      </div>
+    </section>
 
     <!-- 左导航 + 右侧小节卡片 -->
     <div class="grid items-start gap-3 lg:grid-cols-[232px_minmax(0,1fr)]">
@@ -327,12 +380,12 @@ onMounted(load)
             <input
               v-model="keyword"
               placeholder="搜标签 / key / 值 / 说明"
-              class="min-w-0 flex-1 bg-transparent text-[12px] text-content outline-none placeholder:text-content-faint"
+              class="min-w-0 flex-1 bg-transparent text-[13.5px] text-content outline-none placeholder:text-content-faint"
             />
             <button
               v-if="keyword"
               type="button"
-              class="shrink-0 text-[13px] leading-none text-content-faint transition-colors hover:text-content"
+              class="shrink-0 text-[14.5px] leading-none text-content-faint transition-colors hover:text-content"
               title="清空搜索"
               @click="keyword = ''"
             >
@@ -340,7 +393,7 @@ onMounted(load)
             </button>
           </label>
           <button
-            class="mt-1.5 flex w-full items-center justify-between rounded-lg border px-2 py-1.5 text-[11px] transition-colors"
+            class="mt-1.5 flex w-full items-center justify-between rounded-lg border px-2 py-1.5 text-[12.5px] transition-colors"
             :class="
               onlyChanged
                 ? 'border-primary/60 bg-primary/15 text-primary-light'
@@ -349,7 +402,7 @@ onMounted(load)
             @click="onlyChanged = !onlyChanged"
           >
             <span>只看已覆盖</span>
-            <span class="font-num text-[10px]">{{ coveredTotal }}</span>
+            <span class="font-num text-[11.5px]">{{ coveredTotal }}</span>
           </button>
         </div>
 
@@ -371,23 +424,23 @@ onMounted(load)
               :class="!searching && activeGroup === g.name ? 'bg-primary' : 'bg-transparent'"
             ></span>
             <span
-              class="min-w-0 flex-1 truncate pl-1 text-[12px]"
+              class="min-w-0 flex-1 truncate pl-1 text-[13.5px]"
               :class="!searching && activeGroup === g.name ? 'font-medium' : ''"
             >{{ g.name }}</span>
             <span v-if="g.dirty" class="h-1.5 w-1.5 shrink-0 rounded-full bg-warn" title="本组有未保存改动"></span>
             <span
               v-if="g.covered"
-              class="shrink-0 rounded bg-primary/20 px-1 font-num text-[9.5px] leading-4 text-primary-light"
+              class="shrink-0 rounded bg-primary/20 px-1 font-num text-[11px] leading-4 text-primary-light"
               title="该组已覆盖（app_state）的项数"
             >{{ g.covered }}</span>
             <span
-              class="w-6 shrink-0 text-right font-num text-[10px]"
+              class="w-6 shrink-0 text-right font-num text-[11.5px]"
               :class="searching && g.matched ? 'text-primary-light' : 'text-content-faint'"
             >{{ searching ? g.matched : g.total }}</span>
           </button>
         </nav>
 
-        <div class="flex items-center justify-between border-t border-base-600/50 px-3 py-1.5 text-[10px] text-content-faint">
+        <div class="flex items-center justify-between border-t border-base-600/50 px-3 py-1.5 text-[11.5px] text-content-faint">
           <span>{{ navGroups.length }} 个分组</span>
           <span v-if="searching" class="font-num text-primary-light">命中 {{ visibleCount }}</span>
           <span v-else>共 {{ data?.total ?? 0 }} 项</span>
@@ -398,7 +451,7 @@ onMounted(load)
       <div class="min-w-0 space-y-3">
         <div
           v-if="searching"
-          class="flex items-center gap-2 rounded-lg border border-primary/25 bg-primary/[0.06] px-3 py-1.5 text-[11px] text-content-muted"
+          class="flex items-center gap-2 rounded-lg border border-primary/25 bg-primary/[0.06] px-3 py-1.5 text-[12.5px] text-content-muted"
         >
           <Search class="h-3 w-3 text-primary-light" />
           在全部 {{ data?.total ?? 0 }} 项中命中
@@ -409,15 +462,15 @@ onMounted(load)
         <section v-for="g in visibleGroups" :key="g.name" class="rounded-xl border border-base-600/60 bg-base-800/70">
           <!-- 分组标题 -->
           <header class="flex flex-wrap items-center gap-x-2 gap-y-1 border-b border-base-600/50 px-3 py-2.5">
-            <h3 class="text-[13px] font-semibold text-content">{{ g.name }}</h3>
-            <span class="rounded bg-base-600/40 px-1.5 py-0.5 font-num text-[10px] text-content-muted">{{ g.total }}</span>
-            <span v-if="g.covered" class="rounded bg-primary/20 px-1.5 py-0.5 text-[10px] text-primary-light">
+            <h3 class="text-[14.5px] font-semibold text-content">{{ g.name }}</h3>
+            <span class="rounded bg-base-600/40 px-1.5 py-0.5 font-num text-[11.5px] text-content-muted">{{ g.total }}</span>
+            <span v-if="g.covered" class="rounded bg-primary/20 px-1.5 py-0.5 text-[11.5px] text-primary-light">
               已覆盖 {{ g.covered }}
             </span>
-            <span v-if="g.dirty" class="rounded bg-warn/15 px-1.5 py-0.5 text-[10px] text-warn">
+            <span v-if="g.dirty" class="rounded bg-warn/15 px-1.5 py-0.5 text-[11.5px] text-warn">
               已改未存 {{ g.dirty }}
             </span>
-            <span class="min-w-0 flex-1 truncate text-[11px] text-content-faint">{{ g.desc }}</span>
+            <span class="min-w-0 flex-1 truncate text-[12.5px] text-content-faint">{{ g.desc }}</span>
             <button
               v-if="g.covered"
               class="btn btn-xs btn-danger shrink-0"
@@ -437,9 +490,9 @@ onMounted(load)
           >
             <div class="flex flex-wrap items-center gap-x-2 border-b border-base-600/30 bg-base-700/20 px-2.5 py-1.5">
               <span class="h-3 w-0.5 rounded-full bg-primary/70"></span>
-              <span class="text-[11.5px] font-medium text-content">{{ sg.name }}</span>
-              <span class="min-w-0 flex-1 truncate text-[10px] text-content-faint">{{ sg.desc }}</span>
-              <span class="shrink-0 font-num text-[10px] text-content-faint">{{ sg.items.length }}</span>
+              <span class="text-[13px] font-medium text-content">{{ sg.name }}</span>
+              <span class="min-w-0 flex-1 truncate text-[11.5px] text-content-faint">{{ sg.desc }}</span>
+              <span class="shrink-0 font-num text-[11.5px] text-content-faint">{{ sg.items.length }}</span>
             </div>
 
             <!-- 参数行：短名 + 控件一行一个；完整说明 / key / 当前值 / 待保存值都在 tooltip -->
@@ -460,13 +513,13 @@ onMounted(load)
                   :class="isDirty(it) ? 'bg-primary' : 'bg-transparent'"
                 ></span>
                 <span
-                  class="min-w-0 flex-1 truncate text-[12px]"
+                  class="min-w-0 flex-1 truncate text-[13.5px]"
                   :class="isDirty(it) ? 'font-medium text-primary-light' : 'text-content-muted'"
                 >{{ it.label }}</span>
                 <Info v-if="it.note" class="h-3 w-3 shrink-0 text-warn/70" />
 
                 <span
-                  class="shrink-0 rounded-full border px-1 py-px text-[9.5px] leading-none"
+                  class="shrink-0 rounded-full border px-1 py-px text-[11px] leading-none"
                   :class="sourceMeta[it.source]?.cls ?? 'text-content-faint'"
                 >{{ sourceMeta[it.source]?.text ?? it.source }}</span>
 
@@ -491,7 +544,7 @@ onMounted(load)
                   v-model.number="draft[it.key]"
                   type="number"
                   step="any"
-                  class="field field-num h-7 w-[80px] shrink-0 px-1.5 text-[12px]"
+                  class="field field-num h-7 w-[80px] shrink-0 px-1.5 text-[13.5px]"
                   :class="isDirty(it) ? 'border-primary/60' : 'border-base-600'"
                 />
 
@@ -500,11 +553,11 @@ onMounted(load)
                   v-else-if="it.kind === 'text'"
                   v-model="draft[it.key]"
                   type="text"
-                  class="field field-num h-7 w-[120px] shrink-0 px-1.5 text-[12px]"
+                  class="field field-num h-7 w-[120px] shrink-0 px-1.5 text-[13.5px]"
                   :class="isDirty(it) ? 'border-primary/60' : 'border-base-600'"
                 />
 
-                <span v-else class="shrink-0 text-[10px] text-content-faint">需重启</span>
+                <span v-else class="shrink-0 text-[11.5px] text-content-faint">需重启</span>
 
                 <button
                   v-if="isDirty(it)"
@@ -523,11 +576,11 @@ onMounted(load)
           v-if="!visibleGroups.length"
           class="rounded-xl border border-dashed border-base-600/60 bg-base-800/40 px-4 py-10 text-center"
         >
-          <p class="text-[12px] text-content-muted">没有匹配的参数</p>
-          <p class="mt-1 text-[11px] text-content-faint">换个关键词，或点左栏分组回到分组视图</p>
+          <p class="text-[13.5px] text-content-muted">没有匹配的参数</p>
+          <p class="mt-1 text-[12.5px] text-content-faint">换个关键词，或点左栏分组回到分组视图</p>
         </div>
 
-        <p class="flex items-center gap-1 px-1 text-[10px] text-content-faint">
+        <p class="flex items-center gap-1 px-1 text-[11.5px] text-content-faint">
           <Info class="h-3 w-3" />悬停任一行可看完整 key、当前值与 config.py 原始说明
         </p>
       </div>
@@ -543,7 +596,7 @@ onMounted(load)
         <div
           class="pointer-events-auto flex flex-wrap items-center gap-3 rounded-full border border-primary/35 bg-base-800/95 px-4 py-2 shadow-pop backdrop-blur"
         >
-          <span class="text-[12px] text-content">
+          <span class="text-[13.5px] text-content">
             有 <span class="font-num font-semibold text-primary-light">{{ dirtyKeys.length }}</span> 项未保存
             <span class="text-content-faint">（保存后立即落库并对下一 tick 生效）</span>
           </span>

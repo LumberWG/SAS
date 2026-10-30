@@ -15,7 +15,7 @@ import {
 } from 'lucide-vue-next'
 import VChart from 'vue-echarts'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
-import { chart, tooltipStyle } from '../lib/chartTheme'
+import { chartTheme, tooltipStyle } from '../lib/chartTheme'
 import { use } from 'echarts/core'
 import { CanvasRenderer } from 'echarts/renderers'
 import { LineChart } from 'echarts/charts'
@@ -274,24 +274,25 @@ async function onConfirm() {
 // 净值曲线 option（初始资金基准线）
 const equityOption = computed(() => {
   const initial = account.value?.initial_capital ?? 100000
+  const c = chartTheme()
   return {
     animation: false,
-    grid: { left: 60, right: 20, top: 20, bottom: 30 },
+    grid: { left: 64, right: 20, top: 20, bottom: 30 },
     tooltip: {
       trigger: 'axis',
-      ...tooltipStyle,
+      ...tooltipStyle(c),
       valueFormatter: (v: number) => `${v.toFixed(0)} 元`,
     },
     xAxis: {
       type: 'category',
       data: equity.value.map((e) => e.date),
-      axisLabel: { color: chart.textFaint, fontSize: 10 },
+      axisLabel: { color: c.textFaint, fontSize: 11 },
     },
     yAxis: {
       type: 'value',
       scale: true,
-      axisLabel: { color: chart.textFaint, fontSize: 10 },
-      splitLine: { lineStyle: { color: chart.splitLine } },
+      axisLabel: { color: c.textFaint, fontSize: 11 },
+      splitLine: { lineStyle: { color: c.splitLine } },
     },
     series: [
       {
@@ -299,22 +300,22 @@ const equityOption = computed(() => {
         data: equity.value.map((e) => e.total_asset),
         smooth: true,
         symbol: 'none',
-        lineStyle: { width: 2, color: chart.primaryLight },
+        lineStyle: { width: 2, color: c.primaryLight },
         areaStyle: {
           color: {
             type: 'linear',
             x: 0, y: 0, x2: 0, y2: 1,
             colorStops: [
-              { offset: 0, color: `${chart.primaryLight}40` },
-              { offset: 1, color: `${chart.primaryLight}00` },
+              { offset: 0, color: `${c.primaryLight}40` },
+              { offset: 1, color: `${c.primaryLight}00` },
             ],
           },
         },
         markLine: {
           silent: true,
           symbol: 'none',
-          lineStyle: { color: chart.textFaint, type: 'dashed' },
-          data: [{ yAxis: initial, label: { show: true, position: 'end', formatter: '初始10万', color: chart.textFaint, fontSize: 10 } }],
+          lineStyle: { color: c.textFaint, type: 'dashed' },
+          data: [{ yAxis: initial, label: { show: true, position: 'end', formatter: '初始10万', color: c.textFaint, fontSize: 11 } }],
         },
       },
     ],
@@ -351,8 +352,8 @@ onUnmounted(() => {
           <Wallet class="h-5 w-5 text-white" />
         </div>
         <div>
-          <h2 class="text-[17px] font-semibold text-content">模拟交易</h2>
-          <p class="mt-0.5 text-[11px] text-content-faint">
+          <h2 class="text-[18.5px] font-semibold text-content">模拟交易</h2>
+          <p class="mt-0.5 text-[12.5px] text-content-faint">
             建议实时撮合 · 等分仓位最多10只 · 整手 · T+1 · 佣金万2.5+印花税千1
           </p>
         </div>
@@ -360,21 +361,21 @@ onUnmounted(() => {
       <div class="flex items-center gap-3">
         <div class="rounded-lg border border-base-600 bg-base-700/40 px-4 py-2 text-center">
           <div
-            class="font-num text-[22px] font-bold leading-none"
+            class="font-num text-[23.5px] font-bold leading-none"
             :class="pctTone(account?.return_pct ?? 0)"
           >
             {{ account ? (account.return_pct > 0 ? '+' : '') + account.return_pct.toFixed(2) + '%' : '--' }}
           </div>
-          <div class="mt-1 text-[11px] text-content-faint">累计收益率</div>
+          <div class="mt-1 text-[12.5px] text-content-faint">累计收益率</div>
         </div>
         <div class="rounded-lg border border-base-600 bg-base-700/40 px-4 py-2 text-center">
-          <div class="font-num text-[22px] font-bold leading-none text-content">
+          <div class="font-num text-[23.5px] font-bold leading-none text-content">
             {{ account ? (account.total_asset / 10000).toFixed(2) + ' 万' : '--' }}
           </div>
-          <div class="mt-1 text-[11px] text-content-faint">总资产</div>
+          <div class="mt-1 text-[12.5px] text-content-faint">总资产</div>
         </div>
         <button
-          class="flex items-center gap-1.5 rounded-lg border border-base-600 px-3 py-2 text-[12px] text-content-muted transition-colors hover:border-down/50 hover:text-down disabled:cursor-not-allowed disabled:opacity-50"
+          class="flex items-center gap-1.5 rounded-lg border border-base-600 px-3 py-2 text-[13.5px] text-content-muted transition-colors hover:border-down/50 hover:text-down disabled:cursor-not-allowed disabled:opacity-50"
           :disabled="resetting"
           @click="reset"
         >
@@ -420,23 +421,23 @@ onUnmounted(() => {
             :class="live?.auto_trade && live?.trading ? 'bg-up' : 'bg-content-faint'"
           />
         </span>
-        <span class="text-[13px] font-medium text-content">{{ liveStatusText }}</span>
+        <span class="text-[14.5px] font-medium text-content">{{ liveStatusText }}</span>
       </div>
-      <span class="text-[11px] text-content-faint">
+      <span class="text-[12.5px] text-content-faint">
         每 {{ live?.tick_interval ?? 5 }}s 撮合 · 上次 {{ live?.last_tick ?? '--' }}
       </span>
-      <span class="text-[11px] text-content-faint">待执行 {{ live?.pending.length ?? 0 }} 条</span>
-      <span class="text-[11px] text-content-faint">
+      <span class="text-[12.5px] text-content-faint">待执行 {{ live?.pending.length ?? 0 }} 条</span>
+      <span class="text-[12.5px] text-content-faint">
         信号有效期 {{ live?.signal_ttl_minutes ?? 30 }} 分钟（开盘前信号顺延至 9:30）
       </span>
-      <span v-if="live?.last_error" class="text-[11px] text-warn">{{ live.last_error }}</span>
-      <span v-if="modeError" class="text-[11px] text-down">{{ modeError }}</span>
+      <span v-if="live?.last_error" class="text-[12.5px] text-warn">{{ live.last_error }}</span>
+      <span v-if="modeError" class="text-[12.5px] text-down">{{ modeError }}</span>
 
       <div class="ml-auto flex items-center gap-2">
         <!-- 自动 / 手动开关 -->
         <div class="flex items-center gap-1 rounded-lg border border-base-600 bg-base-700/40 p-0.5">
           <button
-            class="rounded-md px-3 py-1 text-[12px] font-medium transition-colors disabled:opacity-60"
+            class="rounded-md px-3 py-1 text-[13.5px] font-medium transition-colors disabled:opacity-60"
             :class="live?.auto_trade ? 'bg-up/20 text-up' : 'text-content-muted hover:text-content'"
             :disabled="switching"
             @click="toggleMode(true)"
@@ -444,7 +445,7 @@ onUnmounted(() => {
             自动交易
           </button>
           <button
-            class="rounded-md px-3 py-1 text-[12px] font-medium transition-colors disabled:opacity-60"
+            class="rounded-md px-3 py-1 text-[13.5px] font-medium transition-colors disabled:opacity-60"
             :class="live && !live.auto_trade ? 'bg-base-600 text-content' : 'text-content-muted hover:text-content'"
             :disabled="switching"
             @click="toggleMode(false)"
@@ -454,7 +455,7 @@ onUnmounted(() => {
         </div>
         <button
           v-if="live?.auto_trade"
-          class="flex items-center gap-1.5 rounded-lg border border-base-600 px-3 py-1.5 text-[12px] text-content-muted transition-colors hover:border-primary/50 hover:text-content disabled:opacity-50"
+          class="flex items-center gap-1.5 rounded-lg border border-base-600 px-3 py-1.5 text-[13.5px] text-content-muted transition-colors hover:border-primary/50 hover:text-content disabled:opacity-50"
           :disabled="ticking"
           @click="tickNow"
         >
@@ -468,14 +469,14 @@ onUnmounted(() => {
     <div v-if="tab === 'account' && live && !live.auto_trade" class="glass-card p-5">
       <div class="mb-3 flex flex-wrap items-center justify-between gap-2">
         <h3 class="text-subheading">手动下单</h3>
-        <span class="text-[11px] text-content-faint">
+        <span class="text-[12.5px] text-content-faint">
           按实时价成交 · 整手 · T+1 · 自动撮合与止盈止损已暂停
         </span>
       </div>
       <div class="grid grid-cols-1 gap-3 md:grid-cols-12">
         <select
           v-model="order.code"
-          class="rounded-lg border border-base-600 bg-base-700/40 px-3 py-2 text-[12px] text-content outline-none focus:border-primary/60 md:col-span-4"
+          class="rounded-lg border border-base-600 bg-base-700/40 px-3 py-2 text-[13.5px] text-content outline-none focus:border-primary/60 md:col-span-4"
         >
           <option value="">选择股票（自选 / 持仓）</option>
           <option v-for="o in tradeOptions" :key="o.code" :value="o.code">
@@ -485,14 +486,14 @@ onUnmounted(() => {
 
         <div class="flex items-center gap-1 rounded-lg border border-base-600 bg-base-700/40 p-0.5 md:col-span-2">
           <button
-            class="flex-1 rounded-md px-2 py-1.5 text-[12px] font-medium transition-colors"
+            class="flex-1 rounded-md px-2 py-1.5 text-[13.5px] font-medium transition-colors"
             :class="order.side === 'buy' ? 'bg-up/20 text-up' : 'text-content-muted hover:text-content'"
             @click="order.side = 'buy'"
           >
             买入
           </button>
           <button
-            class="flex-1 rounded-md px-2 py-1.5 text-[12px] font-medium transition-colors"
+            class="flex-1 rounded-md px-2 py-1.5 text-[13.5px] font-medium transition-colors"
             :class="order.side === 'sell' ? 'bg-down/20 text-down' : 'text-content-muted hover:text-content'"
             @click="order.side = 'sell'"
           >
@@ -506,7 +507,7 @@ onUnmounted(() => {
           type="number"
           min="0"
           placeholder="买入金额（元）"
-          class="rounded-lg border border-base-600 bg-base-700/40 px-3 py-2 text-[12px] text-content outline-none focus:border-primary/60 md:col-span-3"
+          class="rounded-lg border border-base-600 bg-base-700/40 px-3 py-2 text-[13.5px] text-content outline-none focus:border-primary/60 md:col-span-3"
         />
         <input
           v-else
@@ -515,11 +516,11 @@ onUnmounted(() => {
           min="0"
           step="100"
           placeholder="卖出股数（留空=全部）"
-          class="rounded-lg border border-base-600 bg-base-700/40 px-3 py-2 text-[12px] text-content outline-none focus:border-primary/60 md:col-span-3"
+          class="rounded-lg border border-base-600 bg-base-700/40 px-3 py-2 text-[13.5px] text-content outline-none focus:border-primary/60 md:col-span-3"
         />
 
         <button
-          class="rounded-lg px-4 py-2 text-[12px] font-medium text-white transition-opacity disabled:opacity-50 md:col-span-3"
+          class="rounded-lg px-4 py-2 text-[13.5px] font-medium text-white transition-opacity disabled:opacity-50 md:col-span-3"
           :class="order.side === 'buy' ? 'bg-up' : 'bg-down'"
           :disabled="ordering"
           @click="submitOrder"
@@ -528,7 +529,7 @@ onUnmounted(() => {
         </button>
       </div>
 
-      <div class="mt-2 flex flex-wrap items-center gap-4 text-[11px]">
+      <div class="mt-2 flex flex-wrap items-center gap-4 text-[12.5px]">
         <span v-if="orderPrice != null" class="font-num text-content-muted">
           现价 {{ orderPrice.toFixed(2) }}
         </span>
@@ -548,7 +549,7 @@ onUnmounted(() => {
     >
       <div class="mb-2 flex items-center justify-between">
         <h3 class="text-subheading">待执行信号</h3>
-        <span class="text-[11px] text-content-faint">
+        <span class="text-[12.5px] text-content-faint">
           下个 tick 按实时价成交 · 评分高者优先 · 满仓时高分票可替换最弱持仓 · 同股以最新信号为准
         </span>
       </div>
@@ -556,7 +557,7 @@ onUnmounted(() => {
         <span
           v-for="p in live.pending"
           :key="p.code"
-          class="inline-flex items-center gap-1.5 rounded-md border border-base-600 bg-base-700/40 px-2 py-1 text-[11px] text-content-muted"
+          class="inline-flex items-center gap-1.5 rounded-md border border-base-600 bg-base-700/40 px-2 py-1 text-[12.5px] text-content-muted"
           :title="p.reason"
         >
           <span :class="p.action === 'buy' ? 'text-up' : 'text-down'">
@@ -574,8 +575,8 @@ onUnmounted(() => {
         class="mt-3 border-t border-base-600/50 pt-2.5"
       >
         <div class="flex items-center justify-between">
-          <span class="text-[11px] text-content-faint">候补（名额/资金释放后按评分优先买入）</span>
-          <span class="font-num text-[11px] text-content-faint">
+          <span class="text-[12.5px] text-content-faint">候补（名额/资金释放后按评分优先买入）</span>
+          <span class="font-num text-[12.5px] text-content-faint">
             共 {{ live.backlog_count ?? live.backlog.length }} 只
           </span>
         </div>
@@ -583,7 +584,7 @@ onUnmounted(() => {
           <span
             v-for="b in live.backlog"
             :key="b.code"
-            class="inline-flex items-center gap-1.5 rounded-md border border-dashed border-base-600 px-2 py-1 text-[11px] text-content-muted"
+            class="inline-flex items-center gap-1.5 rounded-md border border-dashed border-base-600 px-2 py-1 text-[12.5px] text-content-muted"
             :title="b.reason"
           >
             <span class="text-up">候</span>
@@ -599,7 +600,7 @@ onUnmounted(() => {
     <div v-if="tab === 'pool' && (live?.queue_top_m ?? 0) > 0" class="glass-card p-5">
       <div class="mb-3 flex flex-wrap items-center justify-between gap-2">
         <h3 class="text-subheading">交易队列容量</h3>
-        <span class="text-[11px] text-content-faint">
+        <span class="text-[12.5px] text-content-faint">
           买入候选上限 {{ live?.queue_top_m }} 只（按 14 因子总分择优；卖出不受限）
         </span>
       </div>
@@ -607,7 +608,7 @@ onUnmounted(() => {
         <span
           v-for="r in live.queue_rejected"
           :key="r.code"
-          class="inline-flex items-center gap-1.5 rounded-md border border-warn/40 bg-warn/10 px-2 py-1 text-[11px] text-warn"
+          class="inline-flex items-center gap-1.5 rounded-md border border-warn/40 bg-warn/10 px-2 py-1 text-[12.5px] text-warn"
           :title="r.reason"
         >
           未入队 {{ r.name }}
@@ -615,7 +616,7 @@ onUnmounted(() => {
           <span class="font-num">{{ r.score }}分</span>
         </span>
       </div>
-      <p v-else class="text-[11px] text-content-faint">
+      <p v-else class="text-[12.5px] text-content-faint">
         最近一批分析没有因容量被拒的买入信号。
       </p>
     </div>
@@ -624,7 +625,7 @@ onUnmounted(() => {
     <div v-if="tab === 'pool'" class="glass-card p-5">
       <div class="mb-3 flex flex-wrap items-center justify-between gap-2">
         <h3 class="text-subheading">切入点判定</h3>
-        <span class="text-[11px] text-content-faint">
+        <span class="text-[12.5px] text-content-faint">
           不追高 ≤ {{ ((live?.entry_max_chase ?? 0) * 100).toFixed(1) }}% ·
           回踩需低于信号价
           {{ live?.entry_pullback ? (live.entry_pullback * 100).toFixed(1) + '%' : '不限' }} ·
@@ -635,7 +636,7 @@ onUnmounted(() => {
         <span
           v-for="r in live.entry_rejected"
           :key="r.code"
-          class="inline-flex items-center gap-2 rounded-md border border-base-600 px-2 py-1 text-[11px] text-content-muted"
+          class="inline-flex items-center gap-2 rounded-md border border-base-600 px-2 py-1 text-[12.5px] text-content-muted"
           :title="r.reason"
         >
           {{ r.name }}
@@ -643,7 +644,7 @@ onUnmounted(() => {
           <span class="text-warn">{{ r.reason }}</span>
         </span>
       </div>
-      <p v-else class="text-[11px] text-content-faint">
+      <p v-else class="text-[12.5px] text-content-faint">
         本轮没有被判定规则/切入点拒掉的买入信号。
       </p>
     </div>
@@ -654,26 +655,26 @@ onUnmounted(() => {
         <h3 class="text-subheading mb-3">资金分布</h3>
         <div class="space-y-3">
           <div class="flex items-center justify-between">
-            <span class="text-[12px] text-content-muted">可用现金</span>
-            <span class="font-num text-[15px] font-semibold text-content">
+            <span class="text-[13.5px] text-content-muted">可用现金</span>
+            <span class="font-num text-[16.5px] font-semibold text-content">
               {{ account ? (account.cash / 10000).toFixed(2) + ' 万' : '--' }}
             </span>
           </div>
           <div class="flex items-center justify-between">
-            <span class="text-[12px] text-content-muted">持仓市值</span>
-            <span class="font-num text-[15px] font-semibold text-content">
+            <span class="text-[13.5px] text-content-muted">持仓市值</span>
+            <span class="font-num text-[16.5px] font-semibold text-content">
               {{ account ? (account.market_value / 10000).toFixed(2) + ' 万' : '--' }}
             </span>
           </div>
           <div class="flex items-center justify-between">
-            <span class="text-[12px] text-content-muted">浮动盈亏</span>
-            <span class="font-num text-[15px] font-semibold" :class="pctTone(account?.total_pnl ?? 0)">
+            <span class="text-[13.5px] text-content-muted">浮动盈亏</span>
+            <span class="font-num text-[16.5px] font-semibold" :class="pctTone(account?.total_pnl ?? 0)">
               {{ account ? (account.total_pnl > 0 ? '+' : '') + account.total_pnl.toFixed(0) + ' 元' : '--' }}
             </span>
           </div>
           <div class="flex items-center justify-between">
-            <span class="text-[12px] text-content-muted">持仓只数</span>
-            <span class="font-num text-[15px] font-semibold text-content">
+            <span class="text-[13.5px] text-content-muted">持仓只数</span>
+            <span class="font-num text-[16.5px] font-semibold text-content">
               {{ account?.position_count ?? 0 }} / 10
             </span>
           </div>
@@ -683,12 +684,12 @@ onUnmounted(() => {
       <div class="glass-card p-5 xl:col-span-2">
         <div class="mb-3 flex items-center justify-between">
           <h3 class="text-subheading">净值曲线</h3>
-          <span class="text-[11px] text-content-faint">盘后 15:40 自动结算 · {{ equity.length }} 个交易日</span>
+          <span class="text-[12.5px] text-content-faint">盘后 15:40 自动结算 · {{ equity.length }} 个交易日</span>
         </div>
         <v-chart v-if="equity.length > 0" :option="equityOption" style="height: 220px" autoresize />
         <div v-else class="flex h-[220px] flex-col items-center justify-center gap-2 text-content-faint">
-          <p class="text-[13px]">暂无净值数据</p>
-          <p class="text-[11px]">每个交易日收盘后自动记录（需后端保持运行）</p>
+          <p class="text-[14.5px]">暂无净值数据</p>
+          <p class="text-[12.5px]">每个交易日收盘后自动记录（需后端保持运行）</p>
         </div>
       </div>
     </div>
@@ -697,10 +698,10 @@ onUnmounted(() => {
     <div v-if="tab === 'account'" class="glass-card p-5">
       <div class="mb-3 flex items-center justify-between">
         <h3 class="text-subheading">当前持仓</h3>
-        <span class="text-[11px] text-content-faint">{{ account?.position_count ?? 0 }} 只</span>
+        <span class="text-[12.5px] text-content-faint">{{ account?.position_count ?? 0 }} 只</span>
       </div>
       <div v-if="account && account.positions.length > 0" class="overflow-x-auto">
-        <table class="w-full text-left text-[12px]">
+        <table class="w-full text-left text-[13.5px]">
           <thead class="border-b border-base-600/60 text-content-faint">
             <tr>
               <th class="px-3 py-2 font-medium">代码</th>
@@ -740,8 +741,8 @@ onUnmounted(() => {
       </div>
       <div v-else class="flex flex-col items-center gap-2 py-10 text-content-faint">
         <Wallet class="h-8 w-8 opacity-30" />
-        <p class="text-[12px]">暂无持仓</p>
-        <p class="text-[11px]">盘中实时撮合：建议进入队列后 5 秒内按实时价成交（需有自选股）</p>
+        <p class="text-[13.5px]">暂无持仓</p>
+        <p class="text-[12.5px]">盘中实时撮合：建议进入队列后 5 秒内按实时价成交（需有自选股）</p>
       </div>
     </div>
 
@@ -749,10 +750,10 @@ onUnmounted(() => {
     <div v-if="tab === 'account'" class="glass-card p-5">
       <div class="mb-3 flex items-center justify-between">
         <h3 class="text-subheading">交易流水</h3>
-        <span class="text-[11px] text-content-faint">最近 {{ trades.length }} 笔</span>
+        <span class="text-[12.5px] text-content-faint">最近 {{ trades.length }} 笔</span>
       </div>
       <div v-if="trades.length > 0" class="max-h-[400px] overflow-y-auto">
-        <table class="w-full text-left text-[12px]">
+        <table class="w-full text-left text-[13.5px]">
           <thead class="sticky top-0 bg-base-800 text-content-faint">
             <tr class="border-b border-base-600/60">
               <th class="px-3 py-2 font-medium">时间</th>
@@ -774,7 +775,7 @@ onUnmounted(() => {
               <td class="font-num px-3 py-2.5 text-content-muted">{{ t.trade_date }}</td>
               <td class="px-3 py-2.5">
                 <span
-                  class="inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[11px] font-medium"
+                  class="inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[12.5px] font-medium"
                   :class="t.side === 'buy' ? 'border-up/40 bg-up/10 text-up' : 'border-down/40 bg-down/10 text-down'"
                 >
                   <ArrowUpCircle v-if="t.side === 'buy'" class="h-3 w-3" />
@@ -784,7 +785,7 @@ onUnmounted(() => {
               </td>
               <td class="px-3 py-2.5">
                 <span class="text-content">{{ t.name }}</span>
-                <span class="font-num ml-1.5 text-[11px] text-content-faint">{{ t.code }}</span>
+                <span class="font-num ml-1.5 text-[12.5px] text-content-faint">{{ t.code }}</span>
               </td>
               <td class="font-num px-3 py-2.5 text-right text-content">{{ t.price.toFixed(2) }}</td>
               <td class="font-num px-3 py-2.5 text-right text-content">{{ t.shares }}</td>
@@ -799,8 +800,8 @@ onUnmounted(() => {
       </div>
       <div v-else class="flex flex-col items-center gap-2 py-10 text-content-faint">
         <RefreshCw class="h-8 w-8 opacity-30" />
-        <p class="text-[12px]">暂无交易记录</p>
-        <p class="text-[11px]">自动撮合或手动下单成交后在此留下完整流水</p>
+        <p class="text-[13.5px]">暂无交易记录</p>
+        <p class="text-[12.5px]">自动撮合或手动下单成交后在此留下完整流水</p>
       </div>
     </div>
 
