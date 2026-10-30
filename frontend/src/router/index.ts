@@ -4,12 +4,12 @@
  *   ① 一选 · 股票池   /screening   全市场扫描 → 候选池
  *   ② 二选 · 自选股   /signals     池内打分排序 → topN 关注
  *   ③ 三选 · 交易队列 /advisory    详细分析 → topM 候选
- *   ④ 交易池          /paper-pool  判定规则筛选（模式/队列/候补）
- *   ⑤ 持仓与成交      /paper       账户、持仓、流水
+ *   ④ 交易池 · 持仓   /paper       判定规则（模式/队列/候补）+ 账户、持仓、流水
+ *                                  （同一页两个 tab；旧的 /paper-pool 会跳到这里）
  *
  * 概览与回测为辅助页，不属于流水线环节。
  */
-import { createRouter, createWebHistory } from 'vue-router'
+import { createRouter, createWebHistory, type RouteLocation } from 'vue-router'
 
 const routes = [
   {
@@ -54,18 +54,17 @@ const routes = [
         meta: { title: '③ 三选 · 交易队列', stage: 3, icon: 'Lightbulb' },
       },
       {
-        // ④ 交易池：判定规则生效的地方（模式/撮合状态 + 待执行队列 + 候补 + 手动下单）
-        path: 'paper-pool',
-        name: 'paper-pool',
-        component: () => import('../views/PaperTrading.vue'),
-        meta: { title: '④ 交易池', stage: 4, icon: 'Layers' },
-      },
-      {
-        // ⑤ 持仓与成交：账户、净值、持仓、流水
+        // ④ 交易池 · 持仓：同一个组件、同一份数据，页内用 tab 切换「判定与队列 / 账户复盘」。
+        // 拆成两个菜单项（④交易池 + ⑤持仓与成交）只是让人来回点，已合并。
         path: 'paper',
         name: 'paper',
         component: () => import('../views/PaperTrading.vue'),
-        meta: { title: '⑤ 持仓与成交', stage: 5, icon: 'Wallet' },
+        meta: { title: '④ 交易池 · 持仓', stage: 4, icon: 'Wallet' },
+      },
+      {
+        // 兼容旧书签与旧文档链接：/paper-pool 直接落到合并页的交易池 tab
+        path: 'paper-pool',
+        redirect: (to: RouteLocation) => ({ path: '/paper', query: { ...to.query, tab: 'pool' } }),
       },
       {
         // 系统设置：只读总览「当前生效值 + 来源 + 是否要重启」，不做写操作

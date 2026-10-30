@@ -3,7 +3,7 @@
  * 模拟交易：10万模拟盘实时撮合系统买卖建议，验证选股思路准确性。
  * 数据：账户/持仓/流水/净值/实时引擎状态（15s 轮询）。
  */
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import {
   ArrowDownCircle,
@@ -41,10 +41,24 @@ use([CanvasRenderer, LineChart, GridComponent, TooltipComponent])
 const router = useRouter()
 const route = useRoute()
 
-// 五段式布局：④ 交易池（/paper-pool）与 ⑤ 持仓与成交（/paper）共用本组件，
-// 按当前路由切换展示分段，避免同一屏塞进「判定」和「复盘」两类信息。
-const tab = computed<'pool' | 'account'>(() =>
-  route.name === 'paper-pool' ? 'pool' : 'account'
+// 合并页：④ 交易池（判定/队列/候补）与 ⑤ 持仓与成交（账户复盘）是同一份数据的两种视角，
+// 页内用 tab 切换（原来占两个左侧菜单项，来回点很别扭）。
+// tab 写进 URL query（?tab=pool|account）：刷新、收藏、旧链接 /paper-pool 都能复现。
+const tab = ref<'pool' | 'account'>(route.query.tab === 'account' ? 'account' : 'pool')
+
+function switchTab(next: 'pool' | 'account') {
+  if (tab.value === next) return
+  tab.value = next
+  router.replace({ query: { ...route.query, tab: next } })
+}
+
+// 浏览器前进/后退（或外部改 query）时同步，避免页面内容与 URL 脱钩
+watch(
+  () => route.query.tab,
+  (v) => {
+    const next = v === 'account' ? 'account' : 'pool'
+    if (tab.value !== next) tab.value = next
+  }
 )
 
 const account = ref<PaperAccount | null>(null)
@@ -371,30 +385,32 @@ onUnmounted(() => {
       </div>
     </div>
 
-    <!-- 五段式分段切换：④ 交易池（判定与队列）/ ⑤ 持仓与成交（账户复盘） -->
-    <div class="flex items-center gap-2">
-      <router-link
-        to="/paper-pool"
+    <!-- 页内分段切换：④ 交易池（判定与队列）/ ⑤ 持仓与成交（账户复盘），不再占两个菜单项 -->
+    <div class="flex flex-wrap items-center gap-2">
+      <button
+        type="button"
         class="rounded-lg border px-3.5 py-2 text-[12.5px] font-medium transition-colors"
         :class="
           tab === 'pool'
             ? 'border-primary/40 bg-primary/15 text-primary-light'
             : 'border-base-600 text-content-muted hover:text-content'
         "
+        @click="switchTab('pool')"
       >
         ④ 交易池 · 判定与队列
-      </router-link>
-      <router-link
-        to="/paper"
+      </button>
+      <button
+        type="button"
         class="rounded-lg border px-3.5 py-2 text-[12.5px] font-medium transition-colors"
         :class="
           tab === 'account'
             ? 'border-primary/40 bg-primary/15 text-primary-light'
             : 'border-base-600 text-content-muted hover:text-content'
         "
+        @click="switchTab('account')"
       >
         ⑤ 持仓与成交 · 账户复盘
-      </router-link>
+      </button>
     </div>
 
     <!-- 交易模式 / 实时撮合状态 -->

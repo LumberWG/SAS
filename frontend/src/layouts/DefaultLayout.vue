@@ -9,7 +9,6 @@ import {
   Bell,
   Filter,
   History,
-  Layers,
   LayoutDashboard,
   Lightbulb,
   Settings,
@@ -26,7 +25,7 @@ const market = useMarketStore()
 const scopeStats = ref<ScopeStats | null>(null)
 
 // 按「自动交易五段式」组织导航（docs/sas_formulas.md §8）：
-// 一选池 → 二选自选 → 三选队列 → 交易池 → 成交持仓，概览/回测为辅助。
+// 一选池 → 二选自选 → 三选队列 → 交易池/持仓（同页两 tab），概览/回测为辅助。
 const navGroups = [
   {
     title: '概览',
@@ -38,8 +37,8 @@ const navGroups = [
       { path: '/screening', title: '① 一选 · 股票池', icon: Filter },
       { path: '/signals', title: '② 二选 · 自选股', icon: Bell },
       { path: '/advisory', title: '③ 三选 · 交易队列', icon: Lightbulb },
-      { path: '/paper-pool', title: '④ 交易池', icon: Layers },
-      { path: '/paper', title: '⑤ 持仓与成交', icon: Wallet },
+      // ④ 交易池与⑤ 持仓本是同一页的两个 tab，合并为一个菜单项
+      { path: '/paper', title: '④ 交易池 · 持仓', icon: Wallet },
     ],
   },
   {
