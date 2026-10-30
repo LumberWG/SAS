@@ -314,10 +314,15 @@ paper_position_lots(code, shares, cost_price, buy_date, tag)
 
 ## 6. 关键可调参数清单
 
-> 本表是**文档口径**的参考值。要查「当前实际在跑什么」，看 `/settings` 页或 `GET /api/settings`
-> ——它由 `app/param_specs.py` 从 `Settings.model_fields` + 源码注释生成，标注每项的
-> 当前生效值 / 来源（app_state 覆盖 > .env > 默认 > 硬编码）/ 是否需重启，不会再与代码漂移。
-> 新增配置项时**只需在 `config.py` 写好注释**，设置页会自动带出中文标签。
+> 本表是**文档口径**的参考值。要查「当前实际在跑什么」、或直接改，用 `/settings` 页
+> （`GET/POST /api/settings`）——它由 `app/param_specs.py` 从 `Settings.model_fields` + 源码注释生成，
+> 标注每项当前生效值 / 来源（app_state 覆盖 > .env > 默认 > 硬编码）。
+>
+> 写入路径：页面改 → `app_state` 覆盖层（`cfg:<key>`，大盘股那几项沿用既有无前缀键）
+> → **就地 setattr 到 `Settings` 单例**（所以下一个 tick 生效）→ 重启时
+> `apply_persisted_overrides()` 重放。路径/列表类（`READONLY_KEYS`）不可改，标「需重启」。
+>
+> 新增配置项时**只需在 `config.py` 写好注释**，设置页会自动带出中文标签与控件类型。
 
 | 配置项 | 默认 | 含义 | 出处 |
 |---|---|---|---|
