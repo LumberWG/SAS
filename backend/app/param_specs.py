@@ -14,11 +14,15 @@
 """
 from __future__ import annotations
 
+import json
+import logging
 import os
 import re
 from typing import Any
 
 from app.config import BASE_DIR, Settings, get_settings
+
+logger = logging.getLogger("sas.param_specs")
 
 #: 允许运行时改（走 app_state 覆盖层，不用重启）的键。
 #: 目前只有大盘股开关与模拟盘模式真正在跑这条路，其余仍是"改 .env + 重启"。
@@ -37,6 +41,19 @@ _GROUP_RULES: tuple[tuple[tuple[str, ...], str], ...] = (
     (("llm_",), "LLM"),
     (("app_name", "debug", "db_", "kline_dir", "log_", "base_", "data_", "timezone"), "基础与存储"),
 )
+
+#: 页面不可编辑的键：路径 / 列表类。它们在进程启动时就被各处捕获（静态挂载、CORS、
+#: 缓存目录），运行中改只会造成「显示改了、实际没变」的错觉，不如明确拒绝。
+READONLY_KEYS: frozenset[str] = frozenset({
+    "kline_dir",
+    "db_path",
+    "cors_origins",
+    "data_no_proxy_domains",
+    "auto_scan_strategies",
+})
+
+#: 运行时覆盖在 app_state 里的前缀（`RUNTIME_KEYS` 那几项用无前缀的既有键）
+OVERRIDE_PREFIX = "cfg:"
 
 #: 分组展示顺序
 GROUP_ORDER: tuple[str, ...] = (
@@ -151,23 +168,6 @@ def _jsonable(value: Any) -> Any:
     return str(value)
 
 
-def _coerce(raw: str, default: Any) -> Any:
-    """app_state 里存的是字符串，按默认值类型转回来，前端才好统一渲染。"""
-    if isinstance(default, bool):
-        return str(raw).strip().lower() in ("1", "true", "yes", "on")
-    if isinstance(default, int) and not isinstance(default, bool):
-        try:
-            return int(float(raw))
-        except ValueError:
-            return default
-    if isinstance(default, float):
-        try:
-            return float(raw)
-        except ValueError:
-            return default
-    return raw
-
-
 def _builtin_items() -> list[dict]:
     """硬编码口径常量：改它们要动代码，页面上只读展示，避免"以为能调"的误会。"""
 
@@ -205,6 +205,128 @@ def _builtin_items() -> list[dict]:
     return [i for i in items if i]
 
 
+def kind_of(key: str, default: Any) -> str:
+    """页面渲染用的控件类型：``bool`` 开关 / ``number`` 数字框 / ``text`` 文本框 / ``readonly`` 只读。"""
+    if key in READONLY_KEYS:
+        return "readonly"
+    if isinstance(default, bool):
+        return "bool"
+    if isinstance(default, (int, float)):
+        return "number"
+    return "text"
+
+
+def _coerce_value(key: str, raw: Any, default: Any) -> Any:
+    """把前端/字符串输入转成字段该有的类型（类型不合法直接抛 ValueError）。"""
+    if isinstance(default, bool):
+        if isinstance(raw, bool):
+            return raw
+        text = str(raw).strip().lower()
+        if text in ("1", "true", "yes", "on", "开", "是"):
+            return True
+        if text in ("0", "false", "no", "off", "关", "否", ""):
+            return False
+        raise ValueError(f"{key} 需要布尔值，收到 {raw!r}")
+    if isinstance(default, int) and not isinstance(default, bool):
+        try:
+            return int(round(float(raw)))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{key} 需要整数，收到 {raw!r}") from exc
+    if isinstance(default, float):
+        try:
+            value = float(raw)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{key} 需要数字，收到 {raw!r}") from exc
+        if value != value:      # NaN
+            raise ValueError(f"{key} 不合法（NaN）")
+        return value
+    return "" if raw is None else str(raw)
+
+
+def update_settings(changes: dict[str, Any]) -> dict[str, Any]:
+    """批量修改配置：写 app_state 覆盖层 + **就地**改 ``get_settings()`` 单例。
+
+    就地改单例是关键：几乎所有代码都持有 ``self.settings`` 这个对象引用，
+    替换对象无效；改属性才能让「下一个 tick / 下一轮扫描」立刻用上新值。
+    覆盖同时落库，重启后由 :func:`apply_persisted_overrides` 重新套用。
+
+    抛 ``ValueError`` 表示该键不可改或值类型不合法，由 API 层转 400。
+    """
+    from app.data.cache import db
+
+    s = get_settings()
+    applied: dict[str, Any] = {}
+    for key, raw in changes.items():
+        field = Settings.model_fields.get(key)
+        if field is None:
+            raise ValueError(f"未知参数: {key}")
+        if key in READONLY_KEYS:
+            raise ValueError(f"{key} 不支持页面修改（路径/列表类，请改 .env 后重启）")
+        value = _coerce_value(key, raw, field.default)
+        target = key if key in RUNTIME_KEYS else OVERRIDE_PREFIX + key
+        db.set_state(target, "1" if value is True else "0" if value is False else str(value))
+        setattr(s, key, value)
+        applied[key] = value
+    if applied:
+        logger.info("系统设置已更新: %s", ", ".join(sorted(applied)))
+    return applied
+
+
+def reset_settings(keys: list[str] | None = None) -> list[str]:
+    """还原为 `.env` / 环境变量的值：删覆盖 + 用新建的 ``Settings()`` 回填。
+
+    ``keys`` 为空表示还原全部可编辑项。
+    """
+    from app.data.cache import db
+
+    s = get_settings()
+    fresh = Settings()
+    targets = list(keys) if keys else [
+        k for k in Settings.model_fields if k not in READONLY_KEYS
+    ]
+    done: list[str] = []
+    for key in targets:
+        if key not in Settings.model_fields or key in READONLY_KEYS:
+            continue
+        try:
+            db.delete_state(key if key in RUNTIME_KEYS else OVERRIDE_PREFIX + key)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("删除覆盖失败 %s: %s", key, exc)
+        setattr(s, key, getattr(fresh, key))
+        done.append(key)
+    if done:
+        logger.info("系统设置已还原 %d 项", len(done))
+    return done
+
+
+def apply_persisted_overrides() -> int:
+    """启动时把 app_state 里的覆盖重新套到 Settings 单例上（否则重启即丢失）。"""
+    from app.data.cache import db
+
+    s = get_settings()
+    applied = 0
+    for key, field in Settings.model_fields.items():
+        if key in READONLY_KEYS:
+            continue
+        try:
+            raw = db.get_state(key if key in RUNTIME_KEYS else OVERRIDE_PREFIX + key)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("读取覆盖失败 %s: %s", key, exc)
+            continue
+        if raw is None or raw == "":
+            continue
+        try:
+            setattr(s, key, _coerce_value(key, raw, field.default))
+            applied += 1
+        except ValueError:
+            logger.warning("忽略非法配置覆盖 %s=%r", key, raw)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("应用配置覆盖失败 %s: %s", key, exc)
+    if applied:
+        logger.info("已应用 %d 项运行时配置覆盖（来自 app_state）", applied)
+    return applied
+
+
 def settings_overview() -> dict:
     """当前**生效值**总览：按分组返回全部参数 + 来源 + 生效方式。"""
     s = get_settings()
@@ -218,18 +340,23 @@ def settings_overview() -> dict:
         default = field.default
         value = getattr(s, key, default)
         source = "default"
-        if key in RUNTIME_KEYS:
+        # 覆盖层的键名有两套：RUNTIME_KEYS 沿用既有无前缀键（engine 直接读它们），
+        # 其余走 `cfg:` 前缀，避免与业务自定义状态键撞名
+        state_key = key if key in RUNTIME_KEYS else OVERRIDE_PREFIX + key
+        try:
+            raw = db.get_state(state_key)
+        except Exception:  # noqa: BLE001
             raw = None
+        if raw is not None and raw != "":
             try:
-                raw = db.get_state(key)
-            except Exception:  # noqa: BLE001
-                raw = None
-            if raw is not None:
-                value = _coerce(raw, default)
+                value = _coerce_value(key, raw, default)
                 source = "app_state"
+            except ValueError:
+                logger.warning("配置项 %s 的覆盖值非法: %r", key, raw)
         if source == "default" and key.upper() in env_keys:
             source = "env"
         runtime = key in RUNTIME_KEYS
+        kind = kind_of(key, default)
         groups.setdefault(_group_of(key), []).append({
             "key": key,
             "label": labels.get(key) or key,
@@ -239,10 +366,13 @@ def settings_overview() -> dict:
             else "float" if isinstance(default, float)
             else "str",
             "source": source,
-            "restart_required": not runtime,
-            "writable": False,          # 第一步只读；可写化见工作日志
+            # 可编辑项写 app_state 覆盖层并就地生效，重启后由启动流程重放，所以不用重启；
+            # 路径/列表类标「需重启」，页面上不给输入框。
+            "restart_required": kind == "readonly",
+            "writable": kind != "readonly",
+            "kind": kind,
             "runtime": runtime,
-            "note": "",
+            "note": "路径/列表类：仅启动时读取，请改 .env 后重启" if kind == "readonly" else "",
         })
 
     builtin = _builtin_items()
@@ -260,6 +390,6 @@ def settings_overview() -> dict:
         "groups": ordered,
         "total": total,
         "runtime_overrides": runtime_count,
-        "hint": "只读总览：当前值 = app_state 覆盖 > 环境变量/.env > 默认值。"
-                "标「需重启」的项改了要重启后端才生效。",
+        "hint": "当前值 = app_state 覆盖 > 环境变量/.env > 默认值。"
+                "改动即时生效并落库（重启保留）；路径/列表类只读，需改 .env 后重启。",
     }

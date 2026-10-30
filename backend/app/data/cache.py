@@ -424,6 +424,11 @@ class Database:
             ).fetchone()
         return row["value"] if row else default
 
+    def delete_state(self, key: str) -> None:
+        """删除运行时状态（系统设置页「还原为 .env 值」用）。"""
+        with self._lock, self._connect() as conn:
+            conn.execute("DELETE FROM app_state WHERE key=?", (key,))
+
     def set_state(self, key: str, value: str) -> None:
         """写入运行时状态。"""
         with self._lock, self._connect() as conn:

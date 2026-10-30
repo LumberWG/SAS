@@ -49,6 +49,14 @@ async def lifespan(_: FastAPI):
 
     warmup_task = asyncio.create_task(warmup())
 
+    # 重放「系统设置」页保存的运行时覆盖（app_state → Settings 单例）
+    try:
+        from app.param_specs import apply_persisted_overrides
+
+        apply_persisted_overrides()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("运行时配置覆盖重放失败: %s", exc)
+
     # 加载自定义策略（用户此前保存的参数化策略）
     try:
         from app.strategies.custom import load_custom_strategies
