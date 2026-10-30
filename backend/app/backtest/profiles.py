@@ -387,7 +387,159 @@ PROFILES: dict[str, dict] = {
                  "entry_confirm_mode": "hold_open", "slippage": 0.003},
     "cfv30_s30": {"intraday_minutes": True, "entry_confirm_minutes": 30,
                   "entry_confirm_mode": "above_avg", "slippage": 0.003},
+    # ---- E-intraday-entry：全时段买入（把「只在开盘 5 分钟成交」放开到盘中多时点） ----
+    # 假设：实盘「盘中分析每分钟重算 14 因子」能在开盘之后发现新机会，开盘一次性
+    # 成交会漏掉这些机会；代价是成交价从开盘价挪到盘中（平均更贵）。
+    # 口径：候选 = 前一交易日收盘已在自选池且判 buy；各时点用「当日截断日线」
+    # 重算指标与 14 因子，仍判 buy 才以该时点 5 分钟收盘价成交（无未来函数）。
+    "iad": {"intraday_entry": True},
+    # 只留开盘后 15 分钟一个时点（近似「开盘后再确认一次」的最小改动）
+    "iad_0945": {"intraday_entry": True, "intraday_entry_times": ("09:45",)},
+    # 只在下午时段补单（10:30 之后才出现的盘中信号）
+    "iad_pm": {"intraday_entry": True,
+               "intraday_entry_times": ("10:30", "13:30", "14:30")},
+    # 验收协议：同规则 + 0.3% 单边滑点
+    "iad_s30": {"intraday_entry": True, "slippage": 0.003},
+    # ---- E-open-window：只把「开盘那一刻」放宽成「开盘后 N 分钟内可成交」 ----
+    # 与 iad 的区别：信号来源不变（仍是前一日收盘的自选池），只补「开盘一字板后开板」
+    # 这一类机会，等价于线上窗口内多次撮合。用来回答「5 分钟窗口是不是太窄」。
+    "win30": {"open_fill_minutes": 30},
+    "win30_s30": {"open_fill_minutes": 30, "slippage": 0.003},
+    # 完整「全时段」：开盘窗口开板补单 + 盘中各时点重新确认
+    "win30_iad": {"open_fill_minutes": 30, "intraday_entry": True},
+    # ---- E13b：弱市买入闸门三档（对齐线上 paper_regime_weak_pause / paper_regime_ma=60） ----
+    # 对照基准 default = 不择时（regime_ma=None）。regime_ma=60 与线上一致：
+    # 用**前一交易日**上证收盘 vs MA60 判弱市，不留未来函数。
+    # 弱市总仓位上限：0.6 / 0.3 是「降仓」，0.0 = 「全暂停买入」（等价线上 weak_pause=True）。
+    "reg_red60": {"regime_ma": 60, "weak_exposure": 0.60},
+    "reg_red30": {"regime_ma": 60, "weak_exposure": 0.30},
+    "reg_pause": {"regime_ma": 60, "weak_exposure": 0.0},
+    # 均线敏感性：全暂停档换 MA20 / MA120（判断结论是否只是 60 日的巧合）
+    "reg_pause20": {"regime_ma": 20, "weak_exposure": 0.0},
+    "reg_pause120": {"regime_ma": 120, "weak_exposure": 0.0},
+    # ---- 弱市「保留比例仓位」档位寻优（用户风险偏好：宁可小亏换上涨时的收益） ----
+    # 50% / 40% 介于「降仓 60%（几乎无效）」与「降仓 30%（均值最好但涨市踏空）」之间
+    "reg_red50": {"regime_ma": 60, "weak_exposure": 0.50},
+    "reg_red40": {"regime_ma": 60, "weak_exposure": 0.40},
+    # 降仓 30% × 均线敏感性：MA60 在涨市初期滞后，试 MA20（更敏感）与 MA120（更迟钝）
+    "reg_red30_ma20": {"regime_ma": 20, "weak_exposure": 0.30},
+    "reg_red30_ma120": {"regime_ma": 120, "weak_exposure": 0.30},
+    # ---- E44：弱转强爬坡（ramp）——「不猜时点，摊成本」 ----
+    # 背景：#59 H 段 11 笔全挤在弱转强切换日、回撤 −16.48%，说明二值闸门「翻上来就满仓」
+    # 是损失来源之一。ramp 不动「何时算强」，只动「强了以后几天打满」。
+    # 弱市档位固定用线上现状 0.3（#63），基准 reg_red30 = 不爬坡。
+    "reg_ramp1": {"regime_ma": 60, "weak_exposure": 0.30, "regime_ramp_days": 1},
+    "reg_ramp2": {"regime_ma": 60, "weak_exposure": 0.30, "regime_ramp_days": 2},
+    "reg_ramp3": {"regime_ma": 60, "weak_exposure": 0.30, "regime_ramp_days": 3},
+    "reg_ramp5": {"regime_ma": 60, "weak_exposure": 0.30, "regime_ramp_days": 5},
+    # 对照：弱市全暂停（#59 线上旧档）+ ramp，验证 ramp 对「0 → 满仓」跳变是否也有效
+    "reg_pause_ramp3": {"regime_ma": 60, "weak_exposure": 0.0, "regime_ramp_days": 3},
+    # ---- E47：开盘段成交价 = 开盘后 30 分钟 1m VWAP（不改任何策略逻辑，只改执行价） ----
+    # 目的：把「开盘价一次性成交」换成「开盘窗口的真实均价」，让所有回测更贴近线上。
+    # 这不是新策略，是**度量校准**——若结果变差，说明历史收益里有「开盘价精确成交」的红利。
+    # 窗口长度敏感度：线上开盘窗口只有几分钟（每 5 秒撮合），
+    # 1/5 分钟才是「同一时点的更真实成交价」，30 分钟等于把买入延迟半小时（那是策略变化）。
+    "vwap1": {"exec_fill": "vwap1m", "exec_fill_minutes": 1},
+    "vwap5": {"exec_fill": "vwap1m", "exec_fill_minutes": 5},
+    "vwap30": {"exec_fill": "vwap1m", "exec_fill_minutes": 30},
+    "vwap30_red30": {"exec_fill": "vwap1m", "exec_fill_minutes": 30,
+                     "regime_ma": 60, "weak_exposure": 0.30},
+    # ---- E46：做T（首次系统化回归；基准 default = 不做T） ----
+    # 参数取线上默认（config.py 的 paper_t_*），必须显式写全：None 表示「该动作关闭」，
+    # 而不是「沿用线上值」。t_minute_path 才是与线上 t_tick 同口径的版本（5m 路径）。
+    # 线上默认里 down_add/down_full=0.20 ≈ 关闭低吸（A 股跌停 -10%，开盘跌 20% 不可能）。
+    "t_on": {
+        "t_active": True,
+        "t_size": 0.25, "t_up_sell": 0.05, "t_up_buyback": 0.03,
+        "t_down_add": 0.20, "t_down_full": 0.20, "t_rebound_sell": 0.02,
+        "t_limit_sell_half": True, "t_crash_guard": 0.02,
+    },
+    # 同参数 + 5 分钟真实路径（当日回落即可买回，能区分先高后低/先低后高）
+    "t_on_min": {
+        "t_active": True, "t_minute_path": True,
+        "t_size": 0.25, "t_up_sell": 0.05, "t_up_buyback": 0.03,
+        "t_down_add": 0.20, "t_down_full": 0.20, "t_rebound_sell": 0.02,
+        "t_limit_sell_half": True, "t_crash_guard": 0.02,
+    },
+    # 低吸真的打开（跌 5% 加 1/4 现金、跌 7% 加满）+ 分钟路径：config 注释里"E 版"的激进参数
+    "t_low_min": {
+        "t_active": True, "t_minute_path": True,
+        "t_size": 0.25, "t_up_sell": 0.05, "t_up_buyback": 0.03,
+        "t_down_add": 0.05, "t_down_full": 0.07, "t_rebound_sell": 0.02,
+        "t_limit_sell_half": True, "t_crash_guard": 0.02,
+    },
+    # 只做低吸（关掉高抛与涨停卖半），用于分离「哪个动作在赚/亏」
+    "t_dip_min": {
+        "t_active": True, "t_minute_path": True,
+        "t_size": 0.25, "t_up_sell": 0.0, "t_up_buyback": 0.0,
+        "t_down_add": 0.05, "t_down_full": 0.07, "t_rebound_sell": 0.02,
+        "t_limit_sell_half": False, "t_crash_guard": 0.02,
+    },
+    # 采样频率敏感度：同样参数，路径改用 1 分钟线（每天 240 个价格点 vs 5m 的 48 个）。
+    # 若 5m 与 1m 差很多，说明做T结论由采样精度主导，历史回测不足以定论（记录 #66）。
+    "t_low_1m": {
+        "t_active": True, "t_minute_path": True, "t_minute_period": "1",
+        "t_size": 0.25, "t_up_sell": 0.05, "t_up_buyback": 0.03,
+        "t_down_add": 0.05, "t_down_full": 0.07, "t_rebound_sell": 0.02,
+        "t_limit_sell_half": True, "t_crash_guard": 0.02,
+    },
+    # 1m 路径 + 0.3% 单边滑点（与 5m 版同一条验收线）
+    "t_low_1m_s30": {
+        "t_active": True, "t_minute_path": True, "t_minute_period": "1", "slippage": 0.003,
+        "t_size": 0.25, "t_up_sell": 0.05, "t_up_buyback": 0.03,
+        "t_down_add": 0.05, "t_down_full": 0.07, "t_rebound_sell": 0.02,
+        "t_limit_sell_half": True, "t_crash_guard": 0.02,
+    },
+    # 验收协议第 3 条：同规则 + 0.3% 单边滑点。做T 笔数是基准的 2 倍以上，
+    # 摩擦敏感度是这一族实验的决定性检验（记录 #29）。
+    "t_on_min_s30": {
+        "t_active": True, "t_minute_path": True, "slippage": 0.003,
+        "t_size": 0.25, "t_up_sell": 0.05, "t_up_buyback": 0.03,
+        "t_down_add": 0.20, "t_down_full": 0.20, "t_rebound_sell": 0.02,
+        "t_limit_sell_half": True, "t_crash_guard": 0.02,
+    },
+    "t_low_min_s30": {
+        "t_active": True, "t_minute_path": True, "slippage": 0.003,
+        "t_size": 0.25, "t_up_sell": 0.05, "t_up_buyback": 0.03,
+        "t_down_add": 0.05, "t_down_full": 0.07, "t_rebound_sell": 0.02,
+        "t_limit_sell_half": True, "t_crash_guard": 0.02,
+    },
+    # ---- 盈亏比结构（记录 #60 §7 方向：小亏换大赚要靠盈亏比，不靠择时） ----
+    # 历史上只测过「收紧」方向（tp10 / sl10 都更差，见记录 #30 附近），
+    # 本轮补「放宽止盈 / 收紧止损 / 提高单票集中度」这三类未测方向。
+    "tp30": {"take_profit": 0.30},
+    "tp40": {"take_profit": 0.40},
+    "sl6": {"stop_loss": 0.06},
+    "sl5": {"stop_loss": 0.05},
+    "atr15": {"stop_atr_mult": 1.5},          # 止损距离 2.0→1.5 倍 ATR（收紧高波动票）
+    "single25": {"single_position_ratio": 0.25},  # 单票 20%→25%（高分票承担更大权重）
+    # 组合：放宽止盈 + 收紧止损（盈亏比从 20:8=2.5:1 提高到 40:5=8:1 / 30:5=6:1）
+    # 依据：tp40 在涨市段更好、sl5 在弱市段更好，两者作用于不同市况，理论上互补
+    "tp40_sl5": {"take_profit": 0.40, "stop_loss": 0.05},
+    "tp30_sl5": {"take_profit": 0.30, "stop_loss": 0.05},
+    "tp40_sl6": {"take_profit": 0.40, "stop_loss": 0.06},
+    "tp40_sl5_s25": {"take_profit": 0.40, "stop_loss": 0.05,
+                     "single_position_ratio": 0.25},
+    # ---- 候选池宽度（#61 之后唯一没扫过的参数族：universe / watch_cap / add_per_day / 持仓数） ----
+    # 假设：机会多寡受「每日成交额池大小 × 自选池容量」限制，而不是出场规则。
+    # 线上默认：universe=300、watch_cap=60、add_per_day=50、max_positions=10。
+    "uni500": {"universe_size": 500},
+    "uni800": {"universe_size": 800},
+    "watch100": {"watch_cap": 100},
+    "watch150": {"watch_cap": 150},
+    "add30": {"add_per_day": 30},
+    "add80": {"add_per_day": 80},
+    "maxpos12": {"max_positions": 12},
 }
+
+# ---- E48：成交价随机扰动（稳健性检验，BACKTEST_LOG #67 §8）----
+# 固定策略与参数，只对每笔成交价乘 (1 + N(0, σ))，看 18 段「中位超额」的分布宽度。
+# σ = 10bp（0.1%）与 20bp（0.2%）各 10 个种子：若 10bp 下中位超额就跨 0，
+# 则所有 <2.5pp 的「超额」结论都只是执行价抽样噪声。
+for _seed in range(1, 11):
+    PROFILES[f"nz10_{_seed}"] = {"fill_noise_bps": 10.0, "fill_noise_seed": _seed}
+    PROFILES[f"nz20_{_seed}"] = {"fill_noise_bps": 20.0, "fill_noise_seed": _seed}
+del _seed
 
 
 def list_profiles() -> list[str]:

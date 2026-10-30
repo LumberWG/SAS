@@ -86,6 +86,7 @@ class BacktestRequest(BaseModel):
     regime_fast_ma: int | None = Field(None, ge=2, le=250, description="择时快线周期")
     weak_exposure: float | None = Field(None, gt=0, le=1, description="弱市总仓位上限（需 regime_ma）")
     regime_flat_below: bool | None = Field(None, description="最弱档清仓")
+    regime_ramp_days: int | None = Field(None, ge=0, le=20, description="弱转强后爬坡天数（0=关闭）")
     # ---- 仓位 / 评分 / 轮动 ----
     max_total_exposure: float | None = Field(None, gt=0, le=1, description="总仓位上限")
     single_position_ratio: float | None = Field(None, gt=0, le=1, description="单票仓位上限")
@@ -96,6 +97,20 @@ class BacktestRequest(BaseModel):
     rotation_min_score: float | None = Field(None, description="轮动最低分")
     # ---- 做T引擎（参数化主动交易） ----
     t_active: bool | None = Field(None, description="启用次日做T/分级网格")
+    t_minute_path: bool | None = Field(
+        None, description="做T 按当日 5m 序列推进（与线上同序，需分钟数据）"
+    )
+    t_minute_period: str | None = Field(None, description="做T 路径的分钟周期（5 / 1）")
+    # ---- 开盘段成交价口径（E47：度量校准，不改策略） ----
+    exec_fill: str | None = Field(
+        None, description="开盘段成交价：open（开盘价）/ vwap1m（开盘后 N 分钟 1m 均价）"
+    )
+    exec_fill_minutes: int | None = Field(None, ge=1, le=240, description="VWAP 窗口分钟数")
+    # ---- 稳健性检验（E48）----
+    fill_noise_bps: float | None = Field(
+        None, ge=0, le=200, description="成交价随机扰动 σ（bp），0=关闭；仅回测用"
+    )
+    fill_noise_seed: int | None = Field(None, ge=0, description="扰动随机种子")
     t_size: float | None = Field(None, gt=0, le=1, description="单次做T比例（相对总仓）")
     t_up_sell: float | None = Field(None, gt=0, description="开盘涨幅超此先卖1/4锁利")
     t_up_buyback: float | None = Field(None, gt=0, description="从高点回调超此买回")
@@ -182,6 +197,7 @@ def _defaults_payload() -> dict:
         "regime_fast_ma": 20,
         "weak_exposure": 0.0,
         "regime_flat_below": False,
+        "regime_ramp_days": 0,
         # 仓位 / 评分 / 轮动
         "max_total_exposure": float(s.paper_max_total_exposure),
         "single_position_ratio": float(s.paper_single_position_max),
@@ -192,6 +208,10 @@ def _defaults_payload() -> dict:
         "rotation_min_score": float(s.paper_rotation_min_score),
         # 做T（0 / False = 关闭）
         "t_active": False,
+        "t_minute_path": False,
+        "t_minute_period": "5",
+        "exec_fill": "open",
+        "exec_fill_minutes": 30,
         "t_size": 0.0,
         "t_up_sell": 0.0,
         "t_up_buyback": 0.0,

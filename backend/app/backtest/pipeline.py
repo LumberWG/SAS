@@ -25,6 +25,7 @@ import asyncio
 import logging
 import math
 import os
+import random
 from collections import OrderedDict
 from dataclasses import dataclass
 
@@ -52,6 +53,13 @@ STAMP_RATE = 0.001
 TRANSFER_RATE = 0.00001
 STOP_LOSS_RATIO = 0.08     # 与线上 engine 一致：成本价 -8% 止损
 TAKE_PROFIT_RATIO = 0.20   # 成本价 +20% 止盈
+
+#: 原始日线列（不含指标）。全时段买入要「截断当日 bar 后重算指标」，
+#: 历史部分必须只取原始列——klines 里预计算的 ma/atr/rsi 等是用整表
+#: （含当日及之后数据）算的，直接拼进去等于把未来信息带进盘中。
+_RAW_COLS = (
+    "date", "open", "high", "low", "close", "volume", "amount", "turnover_rate",
+)
 
 #: 用户实际可交易范围：沪深主板 + 创业板（与 ``scripts/factor_ic.py`` 同一口径）。
 #: 科创板(688)/北交所(920/43/83/87)/B 股不进池——否则结论可能建立在买不到的票上。
@@ -117,6 +125,12 @@ class PipelineParams:
     #: 四档总仓位上限，按 state 索引：(0=双线之下, 1=破慢线站上快线, 2=破快线站上慢线, 3=双线之上)
     regime_tiers: tuple[float, float, float, float] | None = None
     regime_flat_below: bool = False        # 最弱档(0)是否清仓：次日开盘卖出全部持仓
+    # ---- E44：弱转强爬坡（ramp） ----
+    #: 弱市转强后，总仓位上限在 D 个交易日内从 ``weak_exposure`` 线性爬回 ``max_total_exposure``。
+    #: 0=关闭（转强当天直接满仓，即 #59/#60 的行为）；D=1 与关闭等价（自检用）。
+    #: 动机：MA60 判定天然滞后，转强当天全部候选会挤在一天成交（#59 H 段 11 笔、回撤 −16.48%），
+    #: 用「摊成本」替代「猜时点」。只用前一交易日收盘推状态，不留未来函数。
+    regime_ramp_days: int = 0
     # ---- E30：波动率自适应止损（None=关闭，用固定 stop_loss） ----
     # 机制参数：止损距离 = N × ATR%（买入日前一日），比单点百分比更可迁移。
     stop_atr_mult: float | None = None     # ATR 倍数；None 时用 stop_loss
@@ -156,6 +170,30 @@ class PipelineParams:
     t_rebound_sell: float | None = None               # 反弹至跌幅小于此比例减 t_size 仓
     t_limit_sell_half: bool | None = None             # 涨停且封板弱则卖 1/2（底仓，T+1 可卖）
     t_crash_guard: float | None = None                # 大盘当日跌幅超此比例暂停做T（防极速下跌）
+    # ---- E46：做T 的分钟路径口径 ----
+    #: True 时做T 改用**当日 5 分钟序列逐点推进**（与线上 ``t_tick`` 同序），
+    #: 无本地分钟数据的票当天不做T（不回落日K，保证可复现）。
+    #: False（默认）= 旧的日K四价近似：倒T 成交价取 ``开盘×(1+t_up_sell)``、买回与减仓按**次日开盘**，
+    #: 无法区分「先高后低」与「先低后高」，对做T这种路径敏感策略系统性乐观。
+    t_minute_path: bool = False
+    #: 做T 路径用的分钟周期（"5" 或 "1"）。1 分钟线每天 240 个价格点、5 分钟 48 个，
+    #: 用于「采样频率敏感度」检验：若 5m 与 1m 结论差很多，说明做T 的收益主要来自采样精度，
+    #: 线上 5 秒 tick 会给出第三种答案，历史回测不足以定论（记录 #66）。
+    t_minute_period: str = "5"
+    # ---- E47：开盘段成交价口径 ----
+    #: "open"（默认，历史口径：按开盘价成交，再乘 slippage）
+    #: "vwap1m"：按开盘后 ``exec_fill_minutes`` 分钟的 1m VWAP 成交（更贴近线上开盘窗口的真实成交价）。
+    #: 只影响「以开盘价成交」的动作（开盘段买入、开盘跌破止损/涨破止盈的成交价），
+    #: 盘中触发价（止损/止盈/做T）不变。无本地 1m 数据的票回落开盘价。
+    exec_fill: str = "open"
+    exec_fill_minutes: int = 30
+    # ---- E48：成交价随机扰动（稳健性检验，记录 #67 §8）----
+    #: 每笔成交价乘以 (1 + ε)，ε ~ N(0, σ)，σ = fill_noise_bps / 10000。0 = 关闭（默认）。
+    #: 目的：判断「超额」是否只是执行价的抽样噪声——若 ±10bp 扰动下中位超额跨 0，
+    #: 则任何 <2.5pp 的结论都不构成 alpha 证据。
+    fill_noise_bps: float = 0.0
+    #: 扰动随机种子（同种子结果完全可复现）。
+    fill_noise_seed: int = 0
     # ---- 五段式③④⑤（None = 不启用，与历史回测记录保持可比） ----
     #: ③ 交易队列容量：每日最多生成多少条买入委托（按评分降序截断，模拟线上 topM）。
     queue_top_m: int | None = None
@@ -180,6 +218,25 @@ class PipelineParams:
     #: ``"above_avg"`` = 窗口末收盘 **≥ 当日累计成交均价**（分时均价，真 VWAP）；
     #: ``"both"`` = 两条同时满足。``None`` = 不启用。
     entry_confirm_mode: str | None = None
+    # ---- E-intraday-entry：全时段买入（把「只在开盘成交」放开到盘中多时点） ----
+    #: True = 除开盘一次性成交外，还在 ``intraday_entry_times`` 各时点用**当日截至
+    #: 该时点**的 5 分钟线把日线截断后重算 14 因子：仍判 ``buy`` 就以该时点分钟价成交。
+    #: 这复刻实盘「盘中分析（每分钟）= 用当时实时价重算指标 → 立刻成交」的链路，
+    #: 与「前一日收盘信号延后到盘中成交」是两件不同的事（后者不含盘中新信息）。
+    #: 候选只取**前一交易日收盘已在自选池且判 buy** 的票，故无未来函数。
+    intraday_entry: bool = False
+    #: 全时段买入的尝试时点（``HH:MM``，升序）。午休不产生 bar，内部按交易分钟折算。
+    #: 需要本地 5 分钟线（``data/minute5_fsdb``）；缺数据的时点直接跳过，不猜。
+    intraday_entry_times: tuple[str, ...] = (
+        "09:45", "10:30", "11:15", "13:30", "14:30",
+    )
+    #: 每个时点最多重算多少只候选（按昨收评分降序截断）。重算含
+    #: ``add_all_indicators`` + ``compute_factors``，是纯 CPU 成本，用它能控住回测时长。
+    intraday_entry_top_n: int = 10
+    #: 开盘成交窗口（分钟，0=只用开盘价，即历史口径）：开盘一字涨停时，
+    #: 只要窗口内某根 5 分钟 bar 打开过就以它的收盘价成交。
+    #: 对应线上 ``paper_buy_open_window_minutes`` 的「窗口内多次撮合」语义。
+    open_fill_minutes: int = 0
 
 
 def calc_fee(side: str, amount: float) -> float:
@@ -227,6 +284,82 @@ def _intraday_first_trigger(series, stop_px, tp_px, partial_px):
         return (None, None)
     best = min(cands, key=lambda k: cands[k][0])
     return (best, cands[best][1])
+
+
+def _intraday_bar_count(hhmm: str) -> int:
+    """``HH:MM`` → 截至该时刻（含）已产生的 5 分钟 bar 根数。
+
+    上午 09:30-11:30 共 24 根、下午 13:00-15:00 共 24 根，午休不产生 bar，
+    所以不能简单用「相对 09:30 的分钟数 / 5」（13:30 会算成第 48 根而实际是第 30 根）。
+    返回 0 表示该时刻早于开盘或格式非法，调用方跳过。
+    """
+    text = str(hhmm or "").strip()
+    try:
+        hour, minute = text.split(":")[:2]
+        now_min = int(hour) * 60 + int(minute)
+    except (TypeError, ValueError):
+        return 0
+    am_open, am_close = 9 * 60 + 30, 11 * 60 + 30
+    pm_open, pm_close = 13 * 60, 15 * 60
+    if now_min < am_open:
+        return 0
+    if now_min <= am_close:
+        return math.ceil((now_min - am_open) / 5)
+    if now_min < pm_open:
+        return 24                       # 午休：上午 24 根已全部产生
+    if now_min > pm_close:
+        now_min = pm_close
+    return 24 + math.ceil((now_min - pm_open) / 5)
+
+
+def _open_window_fill(
+    code: str, date: str, prev_close_px: float, minutes: int
+) -> float | None:
+    """开盘窗口内「开板补单」：返回窗口内第一根打开涨停的 5 分钟收盘价。
+
+    线上开盘窗口（``paper_buy_open_window_minutes``）里每 5 秒撮合一次，
+    开盘一字涨停也可能在 09:35~09:35+N 之间开板成交；回测原来只取开盘价一个点，
+    等于把这种机会全部判死。这里用本地 5 分钟线还原：窗口内出现过
+    ``close < 前收 × 1.095`` 就以该价成交，否则仍算买不到。
+
+    无本地分钟数据时返回 ``None``（宁可保守判定买不到，也不降级成开盘价成交）。
+    """
+    bars = get_minute_day_bars(code, date)
+    if not bars:
+        return None
+    closes = bars.get("close") or []
+    if not closes or prev_close_px <= 0:
+        return None
+    k = min(len(closes), max(1, math.ceil(max(1, int(minutes)) / 5)))
+    limit = prev_close_px * 1.095
+    for raw in closes[:k]:
+        value = float(raw)
+        if value > 0 and value < limit:
+            return value
+    return None
+
+
+def _vwap_1m(code: str, date: str, minutes: int = 30) -> float | None:
+    """开盘后前 ``minutes`` 分钟的 1 分钟成交量加权均价（真实可成交价的代理）。
+
+    线上开盘窗口内每 5 秒撮合一次，成交价落在开盘后一段时间的均价附近，
+    而不是「开盘价」这个单点（``#35`` 实测开盘 30 分内已有 −6.7bp 偏离）。
+    这里用 1m 的 ``amount / volume`` 还原，无本地 1m 数据返回 ``None``（调用方回落开盘价）。
+    """
+    bars = get_minute_day_bars(code, date, period="1")
+    if not bars:
+        return None
+    vols = [float(x) for x in (bars.get("volume") or [])]
+    amts = [float(x) for x in (bars.get("amount") or [])]
+    if not vols or not amts:
+        return None
+    k = min(len(vols), len(amts), max(1, int(minutes)))
+    v = sum(vols[:k])
+    a = sum(amts[:k])
+    if v <= 0 or a <= 0:
+        return None
+    px = a / v
+    return px if px > 0 else None
 
 
 def _load_klines(end_date: str, start_date: str, kline_dir: str) -> dict[str, pd.DataFrame]:
@@ -549,11 +682,45 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
         else:
             logger.warning("缺少 idx_sh000001 指数K线，regime_ma 失效并退化为「始终防守」")
 
+    # E44 弱转强爬坡：``ramp_frac[date]`` = 当天应当恢复到满仓的比例（0=弱市档位，1=满仓）。
+    # 口径：连续**非弱**交易日数 k / D（D=regime_ramp_days），k 从 1 开始计，
+    # 所以转强第 D 天回到满仓。只依赖 regime（即前一日收盘），同样无未来函数。
+    ramp_days = max(0, int(params.regime_ramp_days or 0))
+    ramp_frac: dict[str, float] = {}
+    if ramp_days > 0 and params.regime_ma is not None and regime:
+        n_ramp = max(2, int(params.regime_ma))
+        idx_df_ramp = prepared.get("index")
+        if idx_df_ramp is not None and not idx_df_ramp.empty:
+            ma_ramp = idx_df_ramp["close"].rolling(n_ramp).mean().shift(1)
+            streak = ramp_days
+            for d, c, m in zip(
+                idx_df_ramp["date"], idx_df_ramp["close"].shift(1), ma_ramp
+            ):
+                if c != c or m != m:
+                    streak = ramp_days            # 预热期无法判定 → 按满仓，不制造假的「刚转强」
+                elif c < m:
+                    streak = 0
+                else:
+                    streak = min(ramp_days, streak + 1)
+                ramp_frac[str(d)] = streak / ramp_days
+
     # 大盘极速下跌护栏（做T引擎用）：指数收盘序列按交易日对齐（缺失 ffill）
+    # 注意：crash guard 只用 idx_open[date] / idx_close[date-1]，即「开盘时已知」的跌幅，
+    # 不用当日收盘（那是未来函数，会凭空决定全天不做T —— 记录 #56 的口径教训）。
     idx_close: pd.Series = pd.Series(dtype=float)
+    idx_open: pd.Series = pd.Series(dtype=float)
     _idx_df = prepared.get("index")
     if _idx_df is not None and not _idx_df.empty and "close" in _idx_df.columns and "date" in _idx_df.columns:
         idx_close = _idx_df.set_index("date")["close"].reindex(dates).ffill()
+        if "open" in _idx_df.columns:
+            idx_open = _idx_df.set_index("date")["open"].reindex(dates).ffill()
+
+    def _idx_open_on(date: str):
+        """指数当日开盘（缺失时退回收盘，仅用于做T的 crash guard）。"""
+        v = idx_open.get(date)
+        if v is None or pd.isna(v):
+            v = idx_close.get(date)
+        return v
 
     # E32 大盘分档：0=双均线之下（最弱）1=仅破快速线 2=仅破慢速线 3=双均线之上
     # 同样只用前一交易日收盘，与上面的二值 regime 同一口径，不留未来函数。
@@ -623,6 +790,23 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
             return None
         value = klines[code].iloc[idx][field]
         return float(value) if value == value and value > 0 else None
+
+    def exec_open_price(code: str, date: str) -> float | None:
+        """开盘段的成交基准价：``exec_fill="vwap1m"`` 时用开盘后 N 分钟 1m VWAP，否则开盘价。"""
+        if params.exec_fill == "vwap1m":
+            vw = _vwap_1m(code, date, int(params.exec_fill_minutes or 30))
+            if vw is not None:
+                return vw
+        return price_on(code, date, "open")
+
+    # 成交价随机扰动（E48）：σ = fill_noise_bps，均值 0，种子固定 → 完全可复现
+    _noise_bps = float(params.fill_noise_bps or 0.0)
+    _noise_rng = random.Random(int(params.fill_noise_seed or 0) * 7919 + 13)
+
+    def _noisy(price: float) -> float:
+        if _noise_bps <= 0 or price is None or price <= 0:
+            return price
+        return price * (1.0 + _noise_rng.gauss(0.0, _noise_bps / 10000.0))
 
     def prev_close(code: str, date: str) -> float | None:
         idx = pos_index.get(code, {}).get(date)
@@ -697,7 +881,7 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
     def sell(code: str, date: str, price: float, reason: str) -> None:
         nonlocal cash
         p = positions.pop(code)
-        price = price * (1 - slippage)   # E39：卖出按不利方向滑点成交
+        price = _noisy(price) * (1 - slippage)   # E39：卖出按不利方向滑点成交
         amount = p["shares"] * price
         fee = calc_fee("sell", amount)
         cash += amount - fee
@@ -721,7 +905,7 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
         if want < LOT or rest < LOT:
             sell(code, date, price, reason)
             return
-        price = price * (1 - slippage)   # E39：部分卖出同样按不利方向成交
+        price = _noisy(price) * (1 - slippage)   # E39：部分卖出同样按不利方向成交
         amount = want * price
         fee = calc_fee("sell", amount)
         cash += amount - fee
@@ -739,14 +923,14 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
         })
 
     # ---- 做T引擎：次日开盘→收盘做T / 分级网格（遵循 A 股 T+1） ----
-    def _t_buy(code, date, price, shares):
-        """做T加仓 / 买回：买指定股数（受现金限制），加到期初持仓（隔夜，T+1 可卖）。"""
+    def _t_buy(code, date, price, shares) -> int:
+        """做T加仓 / 买回：买指定股数（受现金限制），返回实际买入股数。"""
         nonlocal cash
         shares = int(shares / LOT) * LOT
         if shares < LOT or code not in positions:
-            return
+            return 0
         p = positions[code]
-        px = price * (1 + slippage)
+        px = _noisy(price) * (1 + slippage)
         amount = px * shares
         fee = calc_fee("buy", amount)
         while shares >= LOT and amount + fee > cash:
@@ -754,7 +938,7 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
             amount = px * shares
             fee = calc_fee("buy", amount)
         if shares < LOT:
-            return
+            return 0
         cash -= amount + fee
         cost = (amount + fee) / shares
         old = p["shares"]
@@ -762,7 +946,10 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
         p["cost"] = (p["cost"] * old + cost * shares) / new
         p["shares"] = new
         p["t_added_shares"] = (p.get("t_added_shares") or 0) + shares
+        # 当日新增加仓（今仓，T+1 不可卖）：反弹减仓只能减「昨日及更早」的加仓批次
+        p["t_today_added"] = (p.get("t_today_added") or 0) + shares
         p["peak"] = max(float(p.get("peak") or 0.0), px)
+        return shares
 
     def _t_sell(code, date, price, ratio, reason):
         """做T减仓：按当前持仓比例卖出；记录买回股数，次日开盘恢复底仓。"""
@@ -779,13 +966,14 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
     def _t_engine(code, date, day_idx, open_px, low, high, close_px, pc):
         """做T核心：涨停卖半 / 上涨倒T / 下跌分级加仓 / 反弹减仓（T+1）。"""
         p = positions[code]
-        if p.get("t_half") or not params.t_active:
+        # 涨停卖半每天最多一次（原先用无日期的 t_half → 该票会**永久**停做T，线上是每日重置）
+        if p.get("t_half_date") == date or not params.t_active:
             return
         size = float(params.t_size or 0.25)
         open_chg = (open_px / pc - 1) if pc and pc > 0 else 0.0
         # 大盘极速下跌护栏：指数当日跌幅超阈值则暂停做T
         if params.t_crash_guard is not None:
-            ic = idx_close.get(date)
+            ic = _idx_open_on(date)             # 开盘跌幅（无未来函数）
             ip = idx_close.get(dates[day_idx - 1]) if day_idx > 0 else None
             if (
                 ic is not None and not pd.isna(ic)
@@ -798,7 +986,7 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
             _t_sell(code, date, close_px, 0.5, "涨停卖半")
             p = positions.get(code)
             if p is not None:
-                p["t_half"] = True
+                p["t_half_date"] = date
             return
         # 上涨倒T：开盘涨且盘中触 +t_up_sell → 卖 t_size 锁利，次日开盘买回
         if params.t_up_sell and open_chg > 0 and high is not None and high >= open_px * (1 + params.t_up_sell):
@@ -810,14 +998,268 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
                 _t_buy(code, date, open_px * (1 - params.t_down_add), cash * float(params.t_down_add))
             if params.t_down_full and low is not None and low <= open_px * (1 - params.t_down_full):
                 _t_buy(code, date, open_px * (1 - params.t_down_full), cash * 0.95)
-            # 反弹减仓：之前加仓且反弹至 -t_rebound_sell（之后交易日可卖，T+1 OK）
-            if params.t_rebound_sell and p.get("t_added_shares") and close_px is not None and pc and close_px >= pc * (1 - params.t_rebound_sell):
-                added = p["t_added_shares"]
-                ratio = added / p["shares"] if p["shares"] else 1.0
+            # 反弹减仓：只减「昨日及更早」的加仓批次（今仓 T+1 不可卖）
+            sellable_added = max(
+                0, int(p.get("t_added_shares") or 0) - int(p.get("t_today_added") or 0)
+            )
+            if (
+                params.t_rebound_sell and sellable_added >= LOT
+                and close_px is not None and pc
+                and close_px >= pc * (1 - params.t_rebound_sell)
+            ):
+                ratio = sellable_added / p["shares"] if p["shares"] else 1.0
                 sell_part(code, date, close_px, min(1.0, ratio), "反弹减仓")
                 pp = positions.get(code)
                 if pp is not None:
-                    pp["t_added_shares"] = 0
+                    pp["t_added_shares"] = int(pp.get("t_added_shares") or 0) - sellable_added
+
+    # ---- E46：做T（5 分钟路径版）----
+    def _t_sell_shares(code, date, price, want, reason) -> int:
+        """按**股数**卖出，且只动可卖底仓（当日做T加仓的今仓不可卖）。返回实际卖出股数。"""
+        nonlocal cash
+        p = positions[code]
+        shares = int(p["shares"])
+        base = max(0, shares - int(p.get("t_today_added") or 0))
+        want = min(int(want / LOT) * LOT, (base // LOT) * LOT)
+        if want < LOT:
+            return 0
+        if shares - want < LOT:
+            want = shares                      # 剩余不足一手 → 整笔清掉
+        px = _noisy(price) * (1 - slippage)    # 与 sell/sell_part 同口径：按不利方向成交
+        amount = want * px
+        fee = calc_fee("sell", amount)
+        cash += amount - fee
+        cost = want * p["cost"]
+        pnl = amount - fee - cost
+        rest = shares - want
+        if rest < LOT:
+            positions.pop(code)
+        else:
+            p["shares"] = rest
+            # 加仓批次随之收缩，但不能小于 0
+            p["t_added_shares"] = min(int(p.get("t_added_shares") or 0), rest)
+        trades.append({
+            "code": code, "name": p["name"], "buy_date": p["buy_date"],
+            "sell_date": date, "buy_price": round(p["cost"], 3),
+            "sell_price": round(px, 3), "shares": want,
+            "amount": round(amount, 2), "fee": fee, "pnl": round(pnl, 2),
+            "pnl_pct": round(pnl / cost * 100, 2) if cost else 0.0,
+            "reason": reason, "score": p["score"],
+        })
+        return want
+
+    def _t_engine_min(code, date, day_idx, bars, pc):
+        """做T（5 分钟路径版）：与线上 ``t_tick`` **同序同条件**，只是把 tick 换成 5m 收盘。
+
+        与日K版的关键差异：路径由序列顺序决定（能区分「先冲高后回落」与「先杀跌后反弹」），
+        且「当日卖出 → 当日回落买回」可以成立（日K版只能等次日开盘）。
+        """
+        p = positions[code]
+        if not params.t_active:
+            return
+        closes = bars.get("close") or []
+        opens = bars.get("open") or []
+        if not closes or not pc or pc <= 0:
+            return
+        day_open = float(opens[0]) if opens else float(closes[0])
+        if day_open <= 0:
+            return
+        size = float(params.t_size or 0.25)
+        open_chg = day_open / pc - 1
+        # 每日重置：今仓股数与「当日已加仓」标记（涨停卖半的标记也按日）
+        if p.get("t_today_date") != date:
+            p["t_today_date"] = date
+            p["t_today_added"] = 0
+            p["t_down_armed"] = 0
+        # 大盘极速下跌护栏：暂停开新做T（已卖出待买回的仍按买回线走）
+        crash = False
+        if params.t_crash_guard is not None:
+            ic = _idx_open_on(date)             # 开盘跌幅（无未来函数）
+            ip = idx_close.get(dates[day_idx - 1]) if day_idx > 0 else None
+            if (ic is not None and not pd.isna(ic)
+                    and ip is not None and not pd.isna(ip) and ip > 0):
+                crash = (float(ic) / float(ip) - 1) <= -float(params.t_crash_guard)
+        sold_today = 0
+        buyback_line = max(day_open, pc) * (1 + float(params.t_up_buyback or 0.0))
+        for raw in closes:
+            px = float(raw)
+            if px != px or px <= 0:
+                continue
+            # 1) 当日买回：回落到买回线以内才接；crash 当日不接刀（顺延次日开盘）
+            if sold_today > 0:
+                if not crash and px <= buyback_line:
+                    bought = _t_buy(code, date, px, sold_today)
+                    sold_today -= bought
+                continue
+            if crash:
+                continue
+            # 2) 涨停卖半：盘中触涨停价（+9.5%）且可卖底仓够 → 卖一半，当日只做一次
+            base = max(0, int(p["shares"]) - int(p.get("t_today_added") or 0))
+            if (params.t_limit_sell_half and p.get("t_half_date") != date
+                    and px >= pc * 1.095 and base >= LOT):
+                got = _t_sell_shares(code, date, px, base // 2, "涨停卖半")
+                sold_today += got
+                p = positions.get(code)
+                if p is None:
+                    return
+                if got:
+                    p["t_half_date"] = date
+                continue
+            # 3) 倒T：开盘涨且盘中触 +t_up_sell → 卖 t_size 的可卖底仓
+            if (params.t_up_sell and open_chg > 0
+                    and px >= day_open * (1 + float(params.t_up_sell))):
+                want = int(int(p["shares"]) * size / LOT) * LOT
+                got = _t_sell_shares(code, date, px, want, "做T卖出")
+                sold_today += got
+                p = positions.get(code)
+                if p is None:
+                    return
+                continue
+            # 4) 下跌加仓 / 反弹减仓（两者都只在低开日做，与线上一致）
+            if open_chg < 0:
+                if params.t_rebound_sell and px >= pc * (1 - float(params.t_rebound_sell)):
+                    sellable_added = max(
+                        0, int(p.get("t_added_shares") or 0) - int(p.get("t_today_added") or 0)
+                    )
+                    if sellable_added >= LOT:
+                        got = _t_sell_shares(code, date, px, sellable_added, "反弹减仓")
+                        if got:
+                            p = positions.get(code)
+                            if p is None:
+                                return
+                            p["t_added_shares"] = max(
+                                0, int(p.get("t_added_shares") or 0) - got
+                            )
+                            continue
+                if int(p.get("t_down_armed") or 0) == 0:
+                    budget = 0.0
+                    if params.t_down_full and px <= day_open * (1 - float(params.t_down_full)):
+                        budget = cash * 0.95
+                    elif params.t_down_add and px <= day_open * (1 - float(params.t_down_add)):
+                        budget = cash * float(params.t_down_add)
+                    if budget > 0:
+                        est = int(budget / px / LOT) * LOT
+                        if est >= LOT:
+                            bought = _t_buy(code, date, px, est)
+                            if bought:
+                                p = positions.get(code)
+                                if p is None:
+                                    return
+                                p["t_down_armed"] = 1
+        # 收尾：当日没买回的股数 → 次日开盘无条件恢复底仓（线上 stale 规则）
+        p = positions.get(code)
+        if sold_today > 0 and p is not None:
+            p["t_buyback_shares"] = int(p.get("t_buyback_shares") or 0) + sold_today
+
+    def _intraday_buy(date: str, day_idx: int, day_exposure: float) -> None:
+        """全时段买入：在各时点用「当日截断日线」重算候选评分，达标即以分钟价成交。
+
+        与开盘段共用同一套约束（名额 / 总仓位 / 单票上限 / 评分分档 / 涨停 /
+        切入点 / 整手 / T+1），只有两处不同：
+          - 成交价取该时点的 5 分钟收盘价，而不是开盘价；
+          - 评分用「历史原始日线 + 当日截至该时点的聚合 bar」重算，
+            因此盘中可以出现开盘时还没有的信号（这正是实盘盘中分析的行为）。
+
+        候选 = 前一交易日收盘已在自选池且判 ``buy`` 的票（``signals[prev]``），
+        所以因果链是「昨日收盘入选 → 今日盘中重算确认 → 达标才买」，无未来函数。
+        """
+        nonlocal cash
+        prev = dates[day_idx - 1]
+        base = [s for s in signals.get(prev, []) if s.get("action") == "buy"]
+        if not base:
+            return
+        base.sort(key=lambda s: -s["score"])
+        top_n = max(1, int(params.intraday_entry_top_n or 10))
+        cands = base[:top_n]
+        bought: set[str] = set()
+        for hhmm in (params.intraday_entry_times or ()):
+            k = _intraday_bar_count(hhmm)
+            if k <= 0:
+                continue
+            for cand in cands:
+                code = str(cand.get("code") or "")
+                if not code or code in positions or code in bought:
+                    continue
+                if len(positions) >= max_positions:
+                    break
+                idx = pos_index.get(code, {}).get(date)
+                if idx is None:
+                    continue
+                bars = get_minute_day_bars(code, date)
+                if not bars or len(bars.get("close") or []) < k:
+                    continue
+                px = float(bars["close"][k - 1])
+                if not (px > 0):
+                    continue
+                pc = prev_close(code, date)
+                if pc and px >= pc * 1.095:
+                    continue                      # 涨停买不到（与开盘段同口径）
+                # 截断日线：历史**原始** OHLCV（不含当日）+ 当日截至该时点的聚合 bar。
+                # 必须剔除 klines 里预计算的指标列——它们是用整表（含当日及之后）算的。
+                cols = [c for c in _RAW_COLS if c in klines[code].columns]
+                hist = klines[code].iloc[:idx][cols]
+                if hist.empty:
+                    continue
+                closes = [float(x) for x in (bars.get("close") or [])[:k]]
+                highs = [float(x) for x in (bars.get("high") or [])[:k]] or closes
+                lows = [float(x) for x in (bars.get("low") or [])[:k]] or closes
+                vols = [float(x) for x in (bars.get("volume") or [])[:k]]
+                amts = [float(x) for x in (bars.get("amount") or [])[:k]]
+                row = {
+                    "date": date,
+                    "open": float((bars.get("open") or closes)[0]),
+                    "high": max(highs), "low": min(lows), "close": px,
+                    "volume": sum(vols), "amount": sum(amts),
+                }
+                try:
+                    frame = add_all_indicators(
+                        pd.concat([hist, pd.DataFrame([row])], ignore_index=True)
+                    )
+                    res = compute_factors(frame, params.factor_weights)
+                except Exception:  # noqa: BLE001 - 单票算不出来就跳过，不影响整轮
+                    continue
+                total = float(res.total)
+                if params.invert_score:
+                    total = -total
+                    buy_th, sell_th = thresholds()
+                    action = ("buy" if total >= buy_th
+                              else ("sell" if total <= sell_th else "hold"))
+                else:
+                    action = res.action
+                if action != "buy" or total < half_score:
+                    continue
+                # ⑤ 切入点：与开盘段同口径，基准都是前一日收盘
+                if (params.entry_max_chase is not None and pc
+                        and px / pc - 1 > params.entry_max_chase):
+                    continue
+                if params.entry_pullback and pc and px > pc * (1 - float(params.entry_pullback)):
+                    continue
+                fill_px = _noisy(px) * (1 + slippage)
+                # 盘中估值只能用开盘价（当日收盘/最高要收盘才知道，用它们是未来函数）
+                mv = market_value(date, "open")
+                total_asset = cash + mv
+                pool_budget = max(0.0, total_asset * day_exposure - mv)
+                budget = min(pool_budget, total_asset * single_ratio, cash)
+                shares = int(budget / fill_px / LOT) * LOT
+                while (shares >= LOT
+                       and fill_px * shares + calc_fee("buy", fill_px * shares) > cash):
+                    shares -= LOT
+                if shares < LOT:
+                    continue
+                amount = fill_px * shares
+                fee = calc_fee("buy", amount)
+                cash -= amount + fee
+                cost = (amount + fee) / shares
+                positions[code] = {
+                    "name": cand.get("name") or names.get(code, code),
+                    "shares": shares, "cost": cost, "buy_date": date,
+                    "score": total,
+                    "stop": cost * (1 - stop_distance(code, date)),
+                    "target": cost * (1 + params.take_profit),
+                    # 盘中买入时当日最高价尚未走完，peak 只能从成交价起步（避免未来函数）
+                    "peak": px,
+                }
+                bought.add(code)
 
     day_no = {d: i for i, d in enumerate(dates)}
 
@@ -848,6 +1290,15 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
         elif params.weak_exposure is not None and params.regime_ma is not None:
             if regime.get(date, True):
                 day_exposure = min(exposure, params.weak_exposure)
+            elif ramp_days > 0:
+                # E44：转强后不一次性满仓，按 ramp_frac 从弱市档位线性爬回 exposure
+                frac = ramp_frac.get(date, 1.0)
+                if frac < 1.0:
+                    day_exposure = min(
+                        exposure,
+                        params.weak_exposure
+                        + (exposure - params.weak_exposure) * frac,
+                    )
         # 开盘下单只能用开盘价估值：用当日收盘价算总资产/仓位上限等于提前知道收盘
         mv_open = market_value(date, "open")
         total_asset = cash + mv_open
@@ -872,13 +1323,26 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
                 continue
             px = price_on(code, date, "open")
             pc = prev_close(code, date)
-            if px is None or (pc and px >= pc * 1.095):
-                continue  # 涨停或停牌买不到（判定用原始开盘价，滑点不影响能否成交）
+            if px is None:
+                continue                          # 停牌/当日无数据
+            forced_fill: float | None = None       # 开板补单：已有确定成交价，不再套执行价模型
+            if pc and px >= pc * 1.095:
+                # 涨停或停牌买不到（判定用原始开盘价，滑点不影响能否成交）。
+                # 线上窗口内每 5 秒有一次撮合，「开盘价一次性成交」把窗口压成一个点：
+                # 开盘一字板就当天放弃，忽略了 09:35 之后可能开板的事实。
+                if not params.open_fill_minutes:
+                    continue
+                opened = _open_window_fill(code, date, pc, params.open_fill_minutes)
+                if opened is None:
+                    continue                      # 窗口内一直封板，当天确实买不到
+                px = opened
+                forced_fill = opened
             # E2：高开太多不追（次日开盘涨幅上限），缺席即沿用线上「照价买入」
             if params.max_open_gain is not None and pc and px / pc - 1 > params.max_open_gain:
                 continue
             # ⑤ 切入点：日K 粒度（不追高 + 回踩）/ 分钟级等回踩 / 分钟级强势确认
-            fill_px = px
+            # E47：成交基准价按 exec_fill 取（开盘价 / 开盘后 N 分钟 1m VWAP）
+            fill_px = forced_fill if forced_fill is not None else exec_open_price(code, date)
             minute_window = int(params.entry_window_minutes or 0)
             confirm_window = int(params.entry_confirm_minutes or 0)
             if (params.intraday_minutes and confirm_window > 0
@@ -927,7 +1391,7 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
                     continue
                 if params.entry_pullback and pc and px > pc * (1 - float(params.entry_pullback)):
                     continue
-            px = fill_px * (1 + slippage)   # E39：买入按不利方向滑点成交（股数按滑点后价格算）
+            px = _noisy(fill_px) * (1 + slippage)   # E39：买入按不利方向滑点成交（股数按滑点后价格算）
             budget = min(
                 pool_budget * weight / weight_total if weight_total else 0,
                 total_asset * single_ratio, cash, pool_budget,
@@ -952,6 +1416,13 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
                 # E9：买入日最高价（当日已知，供次日移动止损使用）
                 "peak": price_on(code, date, "high") or 0.0,
             }
+
+        # ---------- 1.5) 全时段买入（可选）：按当日分钟线截断重算自选池评分 ----------
+        # 实盘「盘中分析」每 N 分钟用当时实时价重算 14 因子，达标立刻成交；
+        # 回测不能复用收盘信号（那是「次日开盘」口径），必须把**当日日线截断到该时点**
+        # 再算一遍指标，否则等于拿收盘信息在盘中下单。
+        if params.intraday_entry and day_idx > 0:
+            _intraday_buy(date, day_idx, day_exposure)
 
         # 做T买回：涨停卖半 / 上涨倒T 在「次日开盘」恢复底仓（T+1：当日卖、次日买回）
         for code in list(positions):
@@ -984,8 +1455,17 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
             close_px = price_on(code, date, "close")
             if open_px is None or low is None or high is None:
                 continue
-            # 做T引擎：次日开盘→收盘做T / 分级网格（遵循 A 股 T+1）
-            _t_engine(code, date, day_idx, open_px, low, high, close_px, prev_close(code, date))
+            # E47：开盘段成交基准价（止损/止盈在开盘瞬间成交时用它，而不是开盘价单点）
+            fill_open = exec_open_price(code, date) or open_px
+            # 做T引擎（遵循 A 股 T+1）：
+            #   - t_minute_path=True：按当日 5m 序列逐点推进（路径可信），无本地分钟数据当天不做T；
+            #   - 否则沿用日K四价近似（倒T 成交价取阈值价、买回/减仓按次日开盘）。
+            if params.t_active and params.t_minute_path:
+                _bars = get_minute_day_bars(code, date, period=params.t_minute_period)
+                if _bars and _bars.get("close"):
+                    _t_engine_min(code, date, day_idx, _bars, prev_close(code, date))
+            else:
+                _t_engine(code, date, day_idx, open_px, low, high, close_px, prev_close(code, date))
             if code not in positions:
                 continue
             cost = p["cost"]
@@ -1028,17 +1508,17 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
             tp_hit = _hit(lambda px: px >= tp_px)
             if stop_hit:
                 # 边界模式沿用历史成交价 min(开盘, 止损)；真实分钟线用触发分钟价（sell 内已含滑点）
-                fill = stop_hit if real else min(open_px, stop_px)
+                fill = stop_hit if real else min(fill_open, stop_px)
                 sell(code, date, fill, stop_reason)
                 continue
             if partial_hit:
-                fill = partial_hit if real else max(open_px, partial_px)
+                fill = partial_hit if real else max(fill_open, partial_px)
                 sell_part(code, date, fill, params.partial_tp_ratio, "分段止盈")
                 if code not in positions:
                     continue
                 p = positions[code]
             if tp_hit:
-                fill = tp_hit if real else max(open_px, tp_px)
+                fill = tp_hit if real else max(fill_open, tp_px)
                 sell(code, date, fill, "止盈")
             else:
                 p["peak"] = max(peak, high)
@@ -1217,6 +1697,10 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
             "entry_window_minutes": params.entry_window_minutes,
             "entry_confirm_minutes": params.entry_confirm_minutes,
             "entry_confirm_mode": params.entry_confirm_mode,
+            "intraday_entry": params.intraday_entry,
+            "intraday_entry_times": list(params.intraday_entry_times or ()),
+            "intraday_entry_top_n": params.intraday_entry_top_n,
+            "open_fill_minutes": params.open_fill_minutes,
             "max_gain_5d": params.max_gain_5d,
             "min_volume_ratio": params.min_volume_ratio,
             "min_turnover_rate": params.min_turnover_rate,
@@ -1231,6 +1715,23 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
             "regime_fast_ma": params.regime_fast_ma,
             "regime_tiers": list(params.regime_tiers) if params.regime_tiers else None,
             "regime_flat_below": params.regime_flat_below,
+            "regime_ramp_days": ramp_days,
+            # 做T（None/0/False = 关闭）：结果里必须能看到，否则无法判断某次回测到底开没开做T
+            "t_active": bool(params.t_active),
+            "t_minute_path": bool(params.t_minute_path),
+            "t_minute_period": params.t_minute_period,
+            "exec_fill": params.exec_fill,
+            "fill_noise_bps": float(params.fill_noise_bps or 0.0),
+            "fill_noise_seed": int(params.fill_noise_seed or 0),
+            "exec_fill_minutes": int(params.exec_fill_minutes or 0),
+            "t_size": params.t_size,
+            "t_up_sell": params.t_up_sell,
+            "t_up_buyback": params.t_up_buyback,
+            "t_down_add": params.t_down_add,
+            "t_down_full": params.t_down_full,
+            "t_rebound_sell": params.t_rebound_sell,
+            "t_limit_sell_half": params.t_limit_sell_half,
+            "t_crash_guard": params.t_crash_guard,
             "stop_atr_mult": params.stop_atr_mult,
             "stop_atr_min": params.stop_atr_min,
             "stop_atr_max": params.stop_atr_max,

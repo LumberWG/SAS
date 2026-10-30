@@ -84,6 +84,11 @@ SKIP_REASONS: dict[str, str] = {
     "regime_fast_ma": "实盘择时只用单条均线（paper_regime_ma）",
     "weak_exposure": "实盘弱市只暂停买入（paper_regime_weak_pause），不按档位降仓",
     "regime_flat_below": "实盘没有分档清仓（同 weak_exposure）",
+    "regime_ramp_days": "实盘没有「弱转强爬坡」（BACKTEST_LOG #64 未采纳，回测默认 0）",
+    "t_minute_path": "实盘 t_tick 本身就是逐 tick 推进（等价于 True），无需落盘",
+    "t_minute_period": "实盘用实时报价，无「分钟周期」概念；回测专用的采样口径（记录 #66）",
+    "exec_fill": "实盘开盘窗口本来就按实时价成交，不存在「开盘价 vs VWAP」的度量选择（记录 #67）",
+    "exec_fill_minutes": "同 exec_fill：回测度量口径，实盘无对应配置",
     # ---- 切入点 ----
     "entry_window_minutes": "实盘是「开盘后 N 分钟内成交」（paper_buy_open_window_minutes），不是等回踩窗口",
 }

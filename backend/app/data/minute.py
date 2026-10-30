@@ -48,11 +48,18 @@ _MINUTE_CACHE: dict[str, pd.DataFrame] = {}   # code -> 区间内分钟线(df: d
 #: 回测里每个持仓日都会调一次，重复解析纯属浪费。
 #: 只保存日期→切片下标的映射和 4 个 float 列（约 680KB/只），不复制 DataFrame；
 #: 切分用 numpy（~3ms/只）而非 groupby（~13ms/只），首次读入后取值近乎零成本。
-#: 列：``open``（日内强势判定要当日开盘价）、``close``、``volume``、``amount``
+#: 必需列：``open``（日内强势判定要当日开盘价）、``close``、``volume``、``amount``
 #: （后三列用于累计成交均价 = 分时均价）。
 _COLS = ("open", "close", "volume", "amount")
+#: 可选列：``high`` / ``low`` 用于「把当日日线截断到某时点」重算指标
+#: （全时段买入口径，见 ``pipeline._intraday_bar_count``）。老缓存缺这两列时跳过，
+#: 调用方会用 close 序列的极值近似。
+_EXTRA_COLS = ("high", "low")
 _LOCAL5_CACHE: dict[str, tuple[dict[str, tuple[int, int]], dict[str, "np.ndarray"]]] = {}
 _LOCAL5_CAP = 256          # 单次回测用到的标的远小于此，超限整体清空防内存膨胀
+#: 1 分钟线单只约 5MB（6 列 × 10.6 万行），容量必须远小于 5 分钟线；
+#: 一段回测的持仓约 20~30 只，64 足够且峰值内存约 300MB。
+_LOCAL1_CAP = 64
 _CACHE_LOCK = threading.Lock()
 _LAST_CALL = 0.0
 _MIN_INTERVAL = 0.35   # 秒，节流避免数据源限频
@@ -76,21 +83,25 @@ def clear_minute_cache() -> None:
 
 
 def _local5_slice(
-    code: str, path: Path
+    code: str, path: Path, period: str = "5"
 ) -> Optional[tuple[dict[str, tuple[int, int]], dict[str, "np.ndarray"]]]:
-    """读本地 5 分钟 parquet，返回 ``({日期: (起, 止)}, {列名: 数组})``。
+    """读本地分钟 parquet，返回 ``({日期: (起, 止)}, {列名: 数组})``。
 
     文件按时间升序，所以 ``np.unique(..., return_index=True)`` 给出的首个下标
     正好是每个交易日的起点，相邻日期起点即前一日的终点，无需 groupby。
     首次读某只标的约 5~35ms（热盘 5ms），之后所有持仓日直接命中缓存。
+
+    ``period`` 只用于缓存键与容量：1 分钟线一只约 10.6 万行、六列 ≈ 5MB，
+    容量降到 ``_LOCAL1_CAP``，避免跑多方案时把内存吃满。
     读取失败返回 ``None``，由调用方决定降级还是当作无数据。
     """
+    key = f"{period}:{code}"
     with _CACHE_LOCK:
-        cached = _LOCAL5_CACHE.get(code)
+        cached = _LOCAL5_CACHE.get(key)
     if cached is not None:
         return cached
     try:
-        ldf = pd.read_parquet(path, columns=["date", *_COLS])
+        ldf = pd.read_parquet(path)
     except Exception:  # noqa: BLE001 - 坏文件按无数据处理
         return None
     if ldf is None or ldf.empty or "date" not in ldf.columns:
@@ -99,7 +110,8 @@ def _local5_slice(
     if days.size == 0:
         return None
     cols: dict[str, np.ndarray] = {}
-    for name in _COLS:
+    wanted = list(_COLS) + [c for c in _EXTRA_COLS if c in ldf.columns]
+    for name in wanted:
         if name not in ldf.columns:
             return None
         arr = pd.to_numeric(ldf[name], errors="coerce").to_numpy(dtype=float)
@@ -110,10 +122,11 @@ def _local5_slice(
     ends = np.append(first[1:], days.size)
     spans = {str(u): (int(a), int(b)) for u, a, b in zip(uniq, first, ends)}
     entry = (spans, cols)
+    cap = _LOCAL1_CAP if period != "5" else _LOCAL5_CAP
     with _CACHE_LOCK:
-        if len(_LOCAL5_CACHE) >= _LOCAL5_CAP:
+        if len(_LOCAL5_CACHE) >= cap:
             _LOCAL5_CACHE.clear()
-        _LOCAL5_CACHE[code] = entry
+        _LOCAL5_CACHE[key] = entry
     return entry
 
 
@@ -156,17 +169,22 @@ def get_minute_prices(
     return [float(x) for x in day["close"].tolist()]
 
 
-def get_minute_day_bars(code: str, date: str) -> Optional[dict[str, list[float]]]:
+def get_minute_day_bars(
+    code: str, date: str, period: str = "5"
+) -> Optional[dict[str, list[float]]]:
     """返回 ``code`` 在 ``date`` 当日的 5 分钟 bar（纯本地，缺失返回 ``None``）。
 
-    键：``open`` / ``close`` / ``volume`` / ``amount``，均为按时间升序的列表。
+    键：``open`` / ``close`` / ``volume`` / ``amount``（老缓存可能还缺
+    ``high`` / ``low``，存在时才返回），均为按时间升序的列表。
     供「分钟级强势确认」买入使用：需要当日开盘价（``open[0]``）与累计成交均价
-    （``cumsum(amount)/cumsum(volume)``）。
+    （``cumsum(amount)/cumsum(volume)``）；「全时段买入」用它把当日日线截断到
+    某一时点（``open=open[0]``、``high/low=前缀极值``、``close=前缀末值``）后重算指标。
     """
-    path = MINUTE5_DIR / f"{code}.parquet"
+    base = MINUTE1_DIR if period == "1" else MINUTE5_DIR
+    path = base / f"{code}.parquet"
     if not path.exists():
         return None
-    entry = _local5_slice(code, path)
+    entry = _local5_slice(code, path, period=period)
     if entry is None:
         return None
     span = entry[0].get(date)
@@ -276,6 +294,9 @@ def get_intraday_local(code: str) -> Optional[pd.DataFrame]:
     返回列与联网版完全一致：``date, time, price, avg_price, volume, amount``，
     其中 ``volume`` 单位为**手**（本地库是股，已除以 100 对齐），``avg_price`` 为
     当日累计成交均价。本地无该代码 / 读取异常时返回 ``None``，由调用方降级联网。
+
+    只服务「上一交易日及更早」的分时（开盘前、周末由接口层路由到这里）；
+    当日曲线一律走实时源，因此这里不需要校验日期。
     """
     path = MINUTE1_DIR / f"{code}.parquet"
     if not path.is_file():

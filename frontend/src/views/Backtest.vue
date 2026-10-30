@@ -111,6 +111,7 @@ const groups: { name: string; items: ParamDef[] }[] = [
     { key: 'regime_fast_ma', label: '快线周期', type: 'number', min: 2, max: 250 },
     { key: 'weak_exposure', label: '弱市仓位上限', type: 'number', min: 0, max: 1, step: 0.05 },
     { key: 'regime_flat_below', label: '最弱档清仓', type: 'bool' },
+    { key: 'regime_ramp_days', label: '转强爬坡日', type: 'number', min: 0, max: 10 },
   ]},
   { name: '仓位/评分/轮动', items: [
     { key: 'max_total_exposure', label: '总仓位上限', type: 'number', min: 0, max: 1, step: 0.05 },
@@ -123,6 +124,7 @@ const groups: { name: string; items: ParamDef[] }[] = [
   ]},
   { name: '做T引擎', items: [
     { key: 't_active', label: '启用做T', type: 'bool' },
+    { key: 't_minute_path', label: '分钟路径', type: 'bool' },
     { key: 't_size', label: '做T比例', type: 'number', min: 0, max: 1, step: 0.05 },
     { key: 't_up_sell', label: '涨超卖T', type: 'number', min: 0, max: 0.2, step: 0.01 },
     { key: 't_up_buyback', label: '回调买回', type: 'number', min: 0, max: 0.2, step: 0.01 },
@@ -139,7 +141,7 @@ const ZERO_OFF = new Set([
   'buy_top_pct', 'max_open_gain', 'max_gain_5d', 'min_volume_ratio', 'min_turnover_rate',
   'queue_top_m', 'entry_max_chase', 'entry_pullback', 'entry_window_minutes',
   'stop_atr_mult', 'partial_tp_at', 'breakeven_trigger', 'trail_pct', 'trail_arm',
-  'regime_ma', 'weak_exposure',
+  'regime_ma', 'weak_exposure', 'regime_ramp_days',
   't_size', 't_up_sell', 't_up_buyback', 't_down_add', 't_down_full', 't_rebound_sell',
   't_crash_guard',
 ])

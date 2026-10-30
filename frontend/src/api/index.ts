@@ -130,6 +130,8 @@ export interface KlineData {
 export interface IntradayData {
   code: string
   date: string | null
+  /** realtime=当日实时（腾讯分钟线）/ local=D 盘历史（minute1_fsdb） */
+  source?: 'realtime' | 'local'
   prev_close: number | null
   times: string[]
   prices: (number | null)[]
@@ -351,6 +353,7 @@ export interface BacktestRequest {
   regime_fast_ma?: number
   weak_exposure?: number
   regime_flat_below?: boolean
+  regime_ramp_days?: number
   max_total_exposure?: number
   single_position_ratio?: number
   full_score?: number
@@ -365,6 +368,7 @@ export interface BacktestRequest {
   entry_window_minutes?: number
   // 做T引擎
   t_active?: boolean
+  t_minute_path?: boolean
   t_size?: number
   t_up_sell?: number
   t_up_buyback?: number
@@ -830,6 +834,19 @@ export interface PaperLiveStatus {
   entry_timeout_minutes?: number
   /** 本轮被判定规则/切入点拒掉的买入信号 */
   entry_rejected?: Array<{ code: string; name: string; reason: string }>
+  /**
+   * 大盘择时闸门：弱市（前一日上证收盘 < MA(N)）时暂停全部自动买入。
+   * `weak=null` 表示今天还没跑过判定；`paused_count` 是今日累计拦截次数。
+   */
+  regime?: {
+    enabled: boolean
+    ma: number
+    weak: boolean | null
+    paused_count: number
+    /** 弱市保留仓位比例：0=全暂停买入；>0 时只把总仓位上限压到该比例 */
+    weak_exposure?: number
+    day: string
+  }
   recent_trades: PaperLiveTrade[]
   last_error: string
   prices: Record<string, number>
