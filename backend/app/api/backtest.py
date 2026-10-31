@@ -48,7 +48,9 @@ class BacktestRequest(BaseModel):
     # ---- 基础 ----
     initial_capital: float | None = Field(None, gt=0, description="初始资金，缺省取模拟盘配置")
     max_positions: int | None = Field(None, ge=1, le=50, description="最大持仓数，缺省取模拟盘配置")
-    universe_size: int = Field(500, ge=10, le=6000, description="每日成交额 TopN 股票池")
+    # 默认必须是 None：写死 500 会让 model_dump(exclude_none=True) 永远带上 500，
+    # 把 /defaults 算出的线上池（paper_pool_top_n）覆盖掉——「未提交 = 沿用线上」就不成立了
+    universe_size: int | None = Field(None, ge=10, le=6000, description="每日成交额 TopN 股票池")
     board_prefixes: list[str] | None = Field(None, description="只在这些代码前缀里选股；None=全市场")
     watch_cap: int | None = Field(None, ge=10, le=500, description="自选股上限（FIFO）")
     add_per_day: int | None = Field(None, ge=1, le=200, description="每日扫描后加自选上限")
