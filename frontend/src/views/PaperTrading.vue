@@ -335,6 +335,8 @@ const liveStatusText = computed(() => {
 
 // ---- 机制层（BACKTEST_LOG #84 / #85）：默认全关，任一开关打开才渲染整块 ----
 const REGIME_LABEL: Record<string, string> = {
+  // `normal` 是引擎在指数缺失/检测异常时的退化态（等同「不降仓」），不是第五种市场环境
+  normal: '正常',
   calm: '平稳',
   weak: '弱势',
   shock: '震荡',

@@ -230,7 +230,7 @@ class Settings(BaseSettings):
     # 强度极低且高波动→升级为危机防御（自由落体型）。与动态机制层配合，实现
     # "两种下行分治"。直接信号（ETF放量/期指升贴水/官媒情绪）当前部署缺失时，
     # 自动降级为指数底部特征代理，绝不假装拥有没有的数据。改动见 BACKTEST_LOG #85。
-    paper_policy_floor_enabled: bool = False
+    paper_policy_floor_enabled: bool = False  # 托底强度检测：需与 dynamic_exposure 同开，单开不生效
     paper_policy_floor_min_score: float = 0.50   # ≥此强度且处于 weak/shock → 托底型阴跌（可收割）
     paper_policy_floor_low_escalate: float = 0.20  # ≤此强度且处于 shock → 升级危机防御（自由落体）
     paper_policy_floor_harvest_cap: float = 0.30  # 托底型阴跌的总仓位上限（收割但不裸抄）
@@ -249,8 +249,9 @@ class Settings(BaseSettings):
     # ---------- 线上 ML 打分（default_ml 实时版） ----------
     # True 时 recommender 用 LightGBM 截面分位(0~100) 替换 14 因子分做排序与仓位定价；
     # 买入触发仍保留 14 因子信号作安全网（ML 只能降权/跳过，不能凭空制造买入）。
-    # 与回测 default_ml 同模型/同行业中性/同 OOS-IC 回退纪律。默认 False（14 因子基线）。
-    # 详见 BACKTEST_LOG #78。改 True 后需重启服务生效（且 .env 亦可设置）。
+    # 2026-10-31 起线上保持 False：该用法至今没有一次 effective=true 的回测（#79
+    # pred_pairs=0），且首轮构建 109s、每轮分析 K 线请求翻倍，见 docs/sas_formulas.md §7.6。
+    # 设置页改这一项**立即生效**（就地改 Settings 单例），不需要重启。
     live_ml_scoring: bool = False
     paper_t_up_sell: float = 0.05          # 开盘涨幅超此先卖锁利
     paper_t_up_buyback: float = 0.03       # 从高点回调超此买回

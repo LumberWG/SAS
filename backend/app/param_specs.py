@@ -82,6 +82,9 @@ _LAYOUT: tuple[tuple[str, str, tuple[tuple[str, str, tuple[str, ...]], ...]], ..
         "评分判级、收盘选股、自选与影子策略",
         (
             ("评分阈值", "决定 buy / sell 判级的分数线", ("factor_buy_threshold", "factor_sell_threshold")),
+            # 打分引擎：决定「排序与仓位定价」用 14 因子分还是 ML 截面分位。
+            # 之前没收录，页面会把它甩进「其他」组里孤零零一项。
+            ("打分引擎", "排序用 14 因子绝对分还是 ML 截面分位（线上默认 14 因子）", ("live_ml_scoring",)),
             (
                 "自选与关注",
                 "收盘后自动加自选与明日关注的数量",

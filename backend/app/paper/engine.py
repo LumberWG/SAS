@@ -184,6 +184,8 @@ class PaperEngine:
         self._cb_peak: float | None = None
         self._cb_tripped: bool = False
         self._cb_prev_tripped: bool = False  # 仅用于触发/解除时打一条日志，避免每 tick 刷屏
+        #: 上次落库的 (峰值, 触发态)：只在变化时写库，避免每 tick 一次无意义写入
+        self._cb_persisted: tuple[float, bool] | None = None
 
     # ------------------------------------------------------------------
     # 账户与行情
@@ -557,6 +559,16 @@ class PaperEngine:
             trigger = float(getattr(self.settings, "paper_circuit_breaker_dd", 0.08))
             release = float(getattr(self.settings, "paper_circuit_breaker_release", 0.04))
             target = float(getattr(self.settings, "paper_circuit_breaker_target", 0.0))
+            # 滞回要求 release < trigger。设置页是逐字段校验，跨字段填反了（例如
+            # trigger=0.04 / release=0.08）会让状态机在触发线附近每个 tick 反复翻转——
+            # 买入被反复暂停又放开。这里静默收敛到 trigger*0.9，而不是信任用户输入。
+            if release >= trigger:
+                release = round(max(0.0, trigger * 0.9), 4)
+                logger.debug(
+                    "熔断 release(%.3f) 不小于 trigger(%.3f)，已按 trigger*0.9 收敛为 %.3f",
+                    float(getattr(self.settings, "paper_circuit_breaker_release", 0.04)),
+                    trigger, release,
+                )
             # 峰值：优先内存，首次/重启后从库恢复（json 已在文件顶部导入）
             if self._cb_peak is None or self._cb_peak <= 0:
                 try:
@@ -574,13 +586,16 @@ class PaperEngine:
             # 滞回状态机
             self._cb_tripped = circuit_breaker_state(
                 dd, self._cb_tripped, trigger=trigger, release=release)
-            # 落库（重启后仍能记得"刚才跌过"）
-            try:
-                db.set_state("paper_cb_state", json.dumps(
-                    {"peak": round(self._cb_peak, 2), "tripped": self._cb_tripped},
-                    ensure_ascii=False))
-            except Exception as exc:  # noqa: BLE001
-                logger.debug("熔断状态落库失败: %s", exc)
+            # 落库（重启后仍能记得"刚才跌过"）。**只在签名变化时写**：tick 每 5 秒一次，
+            # 峰值不变时每次写的内容完全一样，白让 sas.db 的 WAL 涨。
+            sig = (round(self._cb_peak, 2), self._cb_tripped)
+            if sig != self._cb_persisted:
+                self._cb_persisted = sig
+                try:
+                    db.set_state("paper_cb_state", json.dumps(
+                        {"peak": sig[0], "tripped": sig[1]}, ensure_ascii=False))
+                except Exception as exc:  # noqa: BLE001
+                    logger.debug("熔断状态落库失败: %s", exc)
             out.update(enabled=True, tripped=self._cb_tripped, drawdown=round(dd, 4),
                        peak=round(self._cb_peak, 2), target_exposure=target,
                        reason=("已触发熔断(锁仓/压仓)" if self._cb_tripped
@@ -598,10 +613,14 @@ class PaperEngine:
         today = datetime.now().strftime("%Y-%m-%d")
         n = int(getattr(self.settings, "paper_regime_ma", 0) or 0)
         cached = self._weak_cache[0] == today
+        dyn_on = bool(getattr(self.settings, "paper_dynamic_exposure", False))
         return {
             "enabled": bool(getattr(self.settings, "paper_regime_weak_pause", False)) and n > 0,
             "ma": n,
-            "weak": (bool(self._weak_cache[1]) if cached else None),
+            # 动态机制层开启时静态 MA 闸门**完全不参与交易决策**（execute_recommendations 里是
+            # if/else），此时 `weak` 没有意义。返回 None 而不是残留值，免得前端同时显示
+            # 「弱市压到 weak_exposure(0.3)」和「机制层压到 regime_cap(0.15)」两个互相矛盾的数字。
+            "weak": (None if dyn_on else (bool(self._weak_cache[1]) if cached else None)),
             "paused_count": (self._regime_paused if self._regime_day == today else 0),
             # 弱市保留仓位比例：0=全暂停买入；>0=只压总仓位上限（页面按此分流文案）
             "weak_exposure": float(getattr(self.settings, "paper_weak_exposure", 0.0) or 0.0),
