@@ -2,6 +2,7 @@
 import asyncio
 from dataclasses import dataclass
 
+import pandas as pd
 import pytest
 
 from app.paper.engine import (
@@ -219,6 +220,14 @@ def engine(tmp_path, monkeypatch):
         return prices.get(code)
 
     monkeypatch.setattr(eng, "_latest_price", fake_price)
+    # 批量核算（total_asset / account_detail）会先把内存快照价合并进报价再取价，
+    # 生产环境等价于 _latest_price 内部那次 get_snapshot。但单测里 snapshot_store
+    # 会加载磁盘上的真实快照（同一个进程共享单例），真实价会盖掉上面的假价格，
+    # 让「取价失败回退成本价」这类用例失真。这里显式清空以保持既有假设；
+    # 合并逻辑本身由 TestAccountValuation::test_with_snapshot_prices_* 覆盖。
+    monkeypatch.setattr(
+        eng, "_with_snapshot_prices", lambda quotes: dict(quotes or {})
+    )
     return eng, db, prices
 
 
@@ -455,6 +464,25 @@ class TestAccountValuation:
         monkeypatch.setattr(eng, "_latest_price", no_price)
         total = asyncio.run(eng.total_asset())
         assert total == pytest.approx(80000 + 2000 * 10.05, abs=0.01)
+
+    def test_with_snapshot_prices_merges_and_prefers_given(self, engine, monkeypatch):
+        """快照价批量并入报价：调用方给定报价优先，缺的由快照补齐。"""
+        from app.data.snapshot_store import snapshot_store
+
+        eng, _, _ = engine
+        snap = pd.DataFrame([
+            {"code": "600004", "price": 8.05},
+            {"code": "600088", "price": 12.5},
+            {"code": "600099", "price": 0.0},   # 停牌/未开盘，应被丢弃
+        ])
+        monkeypatch.setattr(snapshot_store, "_snapshot", snap, raising=False)
+        monkeypatch.setattr(snapshot_store, "_quotes", None, raising=False)
+
+        # fixture 已把实例方法替换成清空版，这里直接测类方法本身
+        merged = PaperEngine._with_snapshot_prices({"600004": 9.9})
+        assert merged["600004"] == 9.9          # 给定报价优先
+        assert merged["600088"] == 12.5         # 快照补齐
+        assert "600099" not in merged           # 无效价不入表
 
 
 class TestStopLossTarget:

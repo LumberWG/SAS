@@ -29,6 +29,23 @@ from app.data.scope import clean_name
 
 logger = logging.getLogger("sas.snapshot")
 
+def _num(value) -> float | None:
+    """数值转 float，NaN/None 返回 None。
+
+    必须定义在 ``SnapshotStore`` 之前：模块末尾的全局单例在 import 时就会
+    执行 ``_load_persisted()``，那里要用到本函数。"定义在文件末尾"曾是
+    一个静默 bug——持久化快照加载抛 NameError 被 except 吞掉，磁盘上的
+    最近一次成功快照永远不会回到内存。
+    """
+    if value is None:
+        return None
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return None
+    return None if result != result else result
+
+
 # 持久化默认目录（与 kline 缓存分离）：重启/数据源故障后保留最近一次成功快照
 _CACHE_DIR = Path(__file__).resolve().parent / "cache"
 
@@ -54,6 +71,10 @@ class SnapshotStore:
         self._cond = threading.Condition()
         self._snapshot: pd.DataFrame | None = None
         self._snapshot_at: float = 0.0
+        #: 由当前快照派生出的 ``code → 行情`` 映射。快照每更新一次就整体重建，
+        #: 供 ``quote_map()`` 直接返回——否则每次调用都要重扫 5000+ 行，
+        #: 而列表类接口（自选、建议、扫描结果）一次请求就可能调用多遍。
+        self._quotes: dict[str, dict] | None = None
         self._indices: pd.DataFrame | None = None
         self._indices_at: float = 0.0
         self._refreshing_keys: set[str] = set()  # 各 key 独立刷新标志，避免 indices/snapshot 互相阻塞
@@ -82,6 +103,8 @@ class SnapshotStore:
                         setattr(self, attr, df)
                         # 视为已过期 → 首次请求触发 SWR 后台刷新（立即返回旧）
                         setattr(self, at_attr, time.monotonic() - self._ttl - 1)
+                        if attr == "_snapshot":
+                            self._quotes = self._build_quotes(df)
                         logger.info("已加载持久化 %s（%d 行）", attr, len(df))
             except Exception:  # noqa: BLE001
                 logger.exception("加载持久化 %s 失败", attr)
@@ -175,8 +198,15 @@ class SnapshotStore:
                 self._refreshing_keys.add(key)
                 refresher = True
                 background = cached is not None
+            elif cached is not None:
+                # 已有线程在刷新，但我们手上有旧数据 → **立刻返回旧数据**。
+                # SWR 的承诺是「TTL 外有旧缓存就永不等待」：原来这里会排进
+                # 等待队列，而全量刷新要 90 秒（失败时数据源还要逐个超时），
+                # 等待者只能干等到 wait_timeout 抛 TimeoutError——
+                # 实测 /api/market/overview 因此第 2 次起稳定 15 秒。
+                return cached  # type: ignore[return-value]
             else:
-                # 已有线程在刷新：锁内等待其完成（被唤醒后重读缓存）
+                # 冷启动（无任何缓存）：锁内等待刷新者产出数据
                 while True:
                     remaining = deadline - time.monotonic()
                     if remaining <= 0:
@@ -185,6 +215,9 @@ class SnapshotStore:
                     cached = get_cached()
                     if cached is not None:
                         return cached  # type: ignore[return-value]
+                    if key not in self._refreshing_keys:
+                        # 刷新者已结束却没产出（失败）→ 立刻降级，别干等到超时
+                        raise DataSourceError(f"数据源不可用（{key} 刷新失败）")
 
         if refresher and background:
             # SWR：立即返回旧数据，后台刷新
@@ -206,6 +239,7 @@ class SnapshotStore:
         finally:
             with self._cond:
                 self._refreshing_keys.discard(key)
+                self._cond.notify_all()  # 唤醒等待者，否则它们只能等到超时
 
     def _spawn_background_refresh(self, key: str, fetcher, store) -> None:
         """后台线程执行刷新（刷新标志由请求线程持有，线程结束后释放）。"""
@@ -224,10 +258,23 @@ class SnapshotStore:
             finally:
                 with self._cond:
                     self._refreshing_keys.discard(key)
+                    # 失败路径原来既不 notify 也不清标志之外的动作，等待者会一直
+                    # 睡到 wait_timeout（15s）才发现刷新已经结束。
+                    self._cond.notify_all()
 
         threading.Thread(target=run, daemon=True, name="snapshot-refresh").start()
 
     # ------------------------------------------------------------------
+    def refresh(self, wait_timeout: float = 60.0) -> pd.DataFrame:
+        """强制刷新全市场快照（调度器每 60s 调用一次）。
+
+        以前调度器调的是**不存在的** ``snapshot_store.refresh``，异常被
+        ``except Exception`` 吞成一条 warning，实际快照只能等「TTL 过期后的第一个
+        用户请求」触发后台刷新——于是刷新时机由用户决定，页面数据跟着变旧。
+        这里补上真正的入口：``force=True`` 立即回源，最多等 ``wait_timeout``。
+        """
+        return self.get_snapshot(force=True, wait_timeout=wait_timeout)
+
     def peek_snapshot(self) -> pd.DataFrame | None:
         """只读内存快照（不触发刷新、不等待）。
 
@@ -242,6 +289,41 @@ class SnapshotStore:
         """只读内存指数快照（不触发刷新、不等待）。"""
         with self._cond:
             return self._indices
+
+    def peek_quotes(self) -> dict[str, dict]:
+        """只读「股票代码 → 当前行情」映射（不触发刷新、不等待）。
+
+        派生自当前快照，快照更新时整体重建（新 dict，不复用旧对象），
+        因此调用方拿到的引用在并发下也是一致的。**调用方不得修改返回值**。
+        """
+        with self._cond:
+            if self._quotes is None:
+                # 兜底：快照未经过 store()/持久化加载（例如测试直接注入），按需构建一次
+                self._quotes = self._build_quotes(self._snapshot)
+            return self._quotes
+
+    @staticmethod
+    def _build_quotes(df: pd.DataFrame | None) -> dict[str, dict]:
+        """把快照整理为 ``code → {price, pct_change, volume_ratio, amount}``。
+
+        只保留有有效成交价（未停牌 / 未开盘）的股票，
+        与旧版 ``quote_map()`` 的过滤口径完全一致。
+        """
+        if df is None or df.empty or "price" not in df.columns:
+            return {}
+        quotes: dict[str, dict] = {}
+        for row in df.itertuples(index=False):
+            code = str(getattr(row, "code", "") or "")
+            price = _num(getattr(row, "price", None))
+            if not code or price is None or price <= 0:
+                continue
+            quotes[code] = {
+                "price": price,
+                "pct_change": _num(getattr(row, "pct_change", None)),
+                "volume_ratio": _num(getattr(row, "volume_ratio", None)),
+                "amount": _num(getattr(row, "amount", None)),
+            }
+        return quotes
 
     # ------------------------------------------------------------------
     def get_snapshot(
@@ -268,6 +350,7 @@ class SnapshotStore:
                 return
             self._snapshot = df
             self._snapshot_at = time.monotonic()
+            self._quotes = self._build_quotes(df)
             self._persist(self._snapshot_file, df)
 
         return self._get_with_refresh(
@@ -302,41 +385,19 @@ class SnapshotStore:
 snapshot_store = SnapshotStore(ttl=get_settings().snapshot_ttl)
 
 
-def _num(value) -> float | None:
-    """数值转 float，NaN/None 返回 None。"""
-    if value is None:
-        return None
-    try:
-        result = float(value)
-    except (TypeError, ValueError):
-        return None
-    return None if result != result else result
-
-
 def quote_map() -> dict[str, dict]:
-    """把内存快照整理为 ``code → 当前行情`` 映射（只读，不触发刷新）。
+    """当前行情映射 ``code → {price, pct_change, volume_ratio, amount}``（只读）。
 
     用途：数据库 / 扫描结果里存的是**记录时刻**的行情，列表展示时要补一条
     当前价，否则用户刷新页面看到的还是几分钟前（甚至昨天）的价格。
 
-    Returns:
-        ``{code: {price, pct_change, volume_ratio, amount}}``，
-        仅含有有效成交价（未停牌/未开盘）的股票；无缓存时返回空 dict。
-    """
-    snapshot = snapshot_store.peek_snapshot()
-    if snapshot is None or snapshot.empty or "price" not in snapshot.columns:
-        return {}
+    映射由 :class:`SnapshotStore` 在快照更新时**预先构建**并缓存，
+    这里只做一次引用返回：旧实现每次调用都要 ``itertuples`` 扫一遍
+    5000+ 行（约 3~5 ms），而自选 / 建议 / 扫描结果等列表接口
+    一次请求会调用多遍，叠加 30 秒轮询后开销可观。
 
-    quotes: dict[str, dict] = {}
-    for row in snapshot.itertuples(index=False):
-        code = str(getattr(row, "code", "") or "")
-        price = _num(getattr(row, "price", None))
-        if not code or price is None or price <= 0:
-            continue
-        quotes[code] = {
-            "price": price,
-            "pct_change": _num(getattr(row, "pct_change", None)),
-            "volume_ratio": _num(getattr(row, "volume_ratio", None)),
-            "amount": _num(getattr(row, "amount", None)),
-        }
-    return quotes
+    Returns:
+        仅含有有效成交价（未停牌/未开盘）的股票；无缓存时返回空 dict。
+        **返回的是共享引用，调用方不得修改。**
+    """
+    return snapshot_store.peek_quotes()

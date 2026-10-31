@@ -34,13 +34,18 @@ async function load(force = false) {
   loading.value = true
   if (force) spinning.value = true
   try {
+    // 三路互不依赖，必须并行：原来「overview → 迷你走势 → 异动」是串行 await，
+    // 后端 overview 冷启动可等十几秒，后面两段（其实与 overview 无关）会一起白等。
+    const alertTask = getAlerts(20)
+      .then((d) => d.alerts)
+      .catch(() => [] as typeof alerts.value)
+
     overview.value = await getOverview()
     market.trading = overview.value.trading
+
     // 迷你走势：仅首次或用户手动刷新时拉取（后端已加 Parquet 缓存，
     // 但指数K线首次要走完整降级链较慢，不应随 30s 轮询重复请求）
     if (force || !sparkReady.value) {
-      // 并发拉取前 4 个指数迷你走势，避免顺序 await 叠加等待（单接口慢时
-      // 串行会放大到数倍耗时）；单个失败不影响其余与页面渲染。
       const syms = (overview.value.indices || []).slice(0, 4).map((i) => i.symbol)
       const results = await Promise.all(
         syms.map((sym) =>
@@ -52,13 +57,8 @@ async function load(force = false) {
       for (const [sym, closes] of results) sparklines[sym] = closes
       sparkReady.value = true
     }
-    // 拉取最近异动（调度器检测结果，轻量）
-    try {
-      const alertData = await getAlerts(20)
-      alerts.value = alertData.alerts
-    } catch {
-      alerts.value = []
-    }
+
+    alerts.value = await alertTask
   } finally {
     loading.value = false
     spinning.value = false

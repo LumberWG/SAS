@@ -15,6 +15,7 @@ import functools
 import json
 import logging
 import os
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
@@ -580,6 +581,11 @@ scanner = Scanner()
 #: 最近一次K线预热结果（供状态接口读取）
 _last_warmup: dict = {}
 
+#: 「已缓存K线只数」的缓存时长（秒）。前端预热进度是 3 秒轮询，
+#: 每轮统计要对全市场 5000+ 个 Parquet 文件各做一次 os.stat。
+_KLINE_STAT_TTL = 5.0
+_kline_stat_cache: tuple[float, int] | None = None
+
 # ----------------------------------------------------------------------
 # 扫描范围定义（选股中心「扫描范围」下拉）
 # ----------------------------------------------------------------------
@@ -708,13 +714,26 @@ def kline_cache_stats() -> dict:
     """统计本地K线缓存覆盖情况（Parquet 文件存在即计为已缓存）。
 
     供前端展示预热进度：已缓存多少只 / 股票池总数 / 最近一次预热结果。
+
+    ``cached`` 走短 TTL 缓存：前端预热进度是 3 秒一次的轮询，而统计一次
+    要对全市场 5000+ 个 Parquet 文件逐个 ``os.stat``——本该只读一次磁盘
+    的数值被轮询反复重算。``last_warmup`` 仍每次实时返回，预热进度条不受影响。
     """
+    global _kline_stat_cache
     pool = get_stock_pool()
     total = len(pool)
-    cached = 0
-    for code in pool["code"]:
-        if kline_cache._path(code).exists():
-            cached += 1
+    now = time.monotonic()
+    if (
+        _kline_stat_cache is not None
+        and now - _kline_stat_cache[0] < _KLINE_STAT_TTL
+    ):
+        cached = _kline_stat_cache[1]
+    else:
+        cached = 0
+        for code in pool["code"]:
+            if kline_cache._path(code).exists():
+                cached += 1
+        _kline_stat_cache = (now, cached)
     return {
         "total": total,
         "cached": cached,

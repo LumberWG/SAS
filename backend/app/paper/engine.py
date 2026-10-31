@@ -200,6 +200,31 @@ class PaperEngine:
         db.ensure_lots_migrated(datetime.now().strftime("%Y-%m-%d"))
         return account
 
+    @staticmethod
+    def _with_snapshot_prices(
+        prices: dict[str, float] | None,
+    ) -> dict[str, float]:
+        """把内存快照的最新价合并进批量报价（给定报价优先，同代码覆盖）。
+
+        批量核算（:meth:`total_asset` / :meth:`account_detail`）会对每只持仓
+        各调一次 :meth:`_latest_price`；旧实现里调用方不传 ``prices`` 时，
+        每只持仓都要 ``asyncio.to_thread(get_snapshot)`` 重取一次全市场快照
+        （20 只持仓 = 20 次线程切换 + 20 次整表过滤）。这里一次性合成映射，
+        之后全部命中 ``_latest_price`` 的第一条分支。
+
+        快照缺失（未开盘/数据源故障）时返回原 ``prices``，
+        逐只取价的老路径与降级口径完全不变。
+        """
+        try:
+            from app.data.snapshot_store import quote_map
+
+            merged = {code: q["price"] for code, q in quote_map().items()}
+        except Exception:  # noqa: BLE001 - 快照不可用则退回逐只取价
+            return dict(prices or {})
+        if prices:
+            merged.update(prices)
+        return merged
+
     async def _latest_price(
         self, code: str, prices: dict[str, float] | None = None
     ) -> float | None:
@@ -1360,6 +1385,7 @@ class PaperEngine:
         account = self.ensure_account()
         cash = float(account["cash"])
         market_value = 0.0
+        prices = self._with_snapshot_prices(prices)
         for pos in db.list_paper_positions():
             shares = int(pos["shares"])
             price = await self._latest_price(pos["code"], prices)
@@ -1381,8 +1407,9 @@ class PaperEngine:
         positions = []
         market_value = 0.0
         cost_total = 0.0
+        quotes = self._with_snapshot_prices(None)
         for pos in db.list_paper_positions():
-            price = await self._latest_price(pos["code"]) or float(pos["cost_price"])
+            price = await self._latest_price(pos["code"], quotes) or float(pos["cost_price"])
             shares = int(pos["shares"])
             mv = price * shares
             cost = float(pos["cost_price"]) * shares

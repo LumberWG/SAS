@@ -68,6 +68,27 @@ class TestTTL:
         store.get_snapshot(force=True)
         assert len(calls) == 2
 
+    def test_refresh_always_refetches(self, store, monkeypatch):
+        """调度器每分钟调 ``refresh()``：必须真的回源，不能吃 TTL。
+
+        回归背景：``monitor/scheduler.py`` 一直在调 ``snapshot_store.refresh``，
+        但这个方法当时并不存在，异常被吞成一条 warning，于是「定时刷新快照」
+        从未生效，数据新鲜度只能靠用户在 TTL 过期后偶然发起的那次请求。
+        """
+        calls = []
+
+        def fetcher():
+            calls.append(1)
+            return pd.DataFrame({"code": ["600519"]})
+
+        monkeypatch.setattr(
+            "app.data.snapshot_store.get_data_source",
+            lambda: type("S", (), {"get_realtime_snapshot": staticmethod(fetcher)})(),
+        )
+        store.get_snapshot()          # 第一次：冷启动拉取
+        store.refresh()               # TTL 内也必须回源
+        assert len(calls) == 2
+
 
 class TestSWR:
     def test_stale_returned_immediately_with_background_refresh(self, monkeypatch):
@@ -123,6 +144,59 @@ class TestSWR:
             store.get_snapshot()
         time.sleep(0.5)                        # 等后台刷新完成
         assert len(calls) == 1                  # 只刷新一次
+
+    def test_stale_returned_while_another_refresh_in_flight(self, monkeypatch):
+        """已有一轮刷新在跑时，其余请求必须立即拿旧数据，不能排队等待。
+
+        回归背景：原实现在「有旧缓存 + 别人正在刷新」时进入等待队列，
+        而全量刷新要 90 秒（数据源故障时还要逐批超时），等待者只能干等到
+        ``wait_timeout`` 抛 TimeoutError——线上表现就是
+        ``/api/market/overview`` 第 2 次起稳定 15 秒（周末收盘后复测）。
+        """
+        def slow_fetcher():
+            time.sleep(0.5)  # 模拟 90 秒全量刷新的压缩版
+            return pd.DataFrame({"v": [2]})
+
+        monkeypatch.setattr(
+            "app.data.snapshot_store.get_data_source",
+            lambda: type("S", (), {"get_realtime_snapshot": staticmethod(slow_fetcher)})(),
+        )
+
+        store = SnapshotStore(ttl=0.1)
+        first = store.get_snapshot()           # 冷启动同步刷新
+        assert first["v"].iloc[0] == 2
+        time.sleep(0.15)                       # 缓存过期
+
+        store.get_snapshot()                   # 第 1 个请求成为刷新者，后台刷新中
+
+        t0 = time.monotonic()
+        stale = store.get_snapshot(wait_timeout=5.0)  # 第 2 个请求（刷新进行中）
+        elapsed = time.monotonic() - t0
+        assert elapsed < 0.2                   # 关键：不排进等待队列
+        assert stale["v"].iloc[0] == 2         # 拿到的仍是旧数据
+
+
+class TestPersistence:
+    def test_persisted_snapshot_rebuilds_quotes(self, tmp_path):
+        """磁盘快照恢复后，行情映射必须同步重建。
+
+        回归背景：``_num`` 原来定义在模块末尾，而全局单例在 import 时就执行
+        ``_load_persisted()`` → ``NameError: _num`` 被 ``except Exception`` 吞掉，
+        磁盘上最近一次成功快照永远回不到内存（重启后首页/列表补价全空）。
+        """
+        df = pd.DataFrame({
+            "code": ["600519", "000001"],
+            "price": [1680.0, 0.0],
+            "pct_change": [1.2, None],
+            "volume_ratio": [1.1, None],
+            "amount": [1e9, None],
+        })
+        df.to_parquet(tmp_path / "snapshot_latest.parquet")
+
+        store = SnapshotStore(ttl=30.0, cache_dir=tmp_path)
+        quotes = store.peek_quotes()
+        assert quotes["600519"]["price"] == 1680.0
+        assert "000001" not in quotes          # 无有效成交价（停牌/未开盘）不入表
 
 
 class TestFailCooldown:

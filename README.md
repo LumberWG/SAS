@@ -45,8 +45,15 @@ npm ci
 npm run dev                                        # → http://localhost:5173
 ```
 
-- **首次启动会构建 K 线缓存**（全市场日线，耗时数分钟；分钟线需 `backend\scripts\preload_minutes*.py` 另行拉取），
-  期间选股 / 回测结果偏少是正常的，别急着判定「策略无效」。
+- **首次启动会构建 K 线缓存**（全市场日线，耗时数分钟），期间选股 / 回测结果偏少是正常的，别急着判定「策略无效」。
+- **分钟线（分时图 / 分钟回测）另有一份本地库**：`data\minute1_fsdb` 与 `minute5_fsdb`，由本地行情库 fsdb 导出，
+  不走 akshare。缺了它只影响分时图与分钟级回测，不影响日线选股：
+  ```powershell
+  cd backend
+  .venv\Scripts\python.exe scripts\run_minutes_all.py                      # 补到最近交易日（只补增量）
+  .venv\Scripts\python.exe scripts\run_minutes_all.py --end 20261030       # 只补某一天
+  ```
+  生产环境由计划任务 `SASMinutesFsdb`（每交易日 **17:30**）自动跑一次。
 - 只想一条命令起前后端：`python scripts\dev\start_dev.py`（含端口清理与健康检查，前端 HMR + 后端 `--reload`）。
 - `API_TOKEN` 留空时接口不校验令牌；**一旦设置**，除 `/api/health` 外所有 `/api/*` 都要带 `X-API-Token`，
   前端会弹框让你输入（浏览器本地保存）。curl 调试记得加 `-H "X-API-Token: ..."`。
@@ -420,6 +427,25 @@ nssm remove SAS confirm                # 卸载服务
 需带 `X-API-Token`）。配置方式、忘记后怎么找、部署脚本怎么带令牌，见上面 **§6「访问令牌」**；
 这里只记一条运维事实：**忘了令牌就打开 `backend\.env` 看那一行**，它不进 git、也不会被任何接口回显。
 
+**分钟线日更（每交易日 17:30，计划任务 `SASMinutesFsdb`）**
+
+```powershell
+cd e:\Study\SAS\backend
+.\run_minutes_daily.bat                                    # 手动跑一次（等同计划任务动作）
+.\.venv\Scripts\python.exe scripts\run_minutes_all.py       # 直接调脚本：补到最近交易日
+.\.venv\Scripts\python.exe scripts\run_minutes_all.py --end 20261030   # 只补某一天
+schtasks /run /tn SASMinutesFsdb                           # 立即触发计划任务
+```
+
+- 数据源是本地行情库 fsdb（`127.0.0.1:7899`），**不走 akshare**；输出 `D:\Backup\SAS\data\minute1_fsdb`
+  与 `minute5_fsdb`，个股详情的分时图读的就是它。
+- 「是否已最新」按**每只文件最后一根的日期**判断（清单 `_done_<freq>.txt` 里存 `code|YYYYMMDD`），
+  落后的只补增量并与旧文件合并去重；已最新整只跳过。
+- 为什么必须自动跑：日 K 由 16:00 的预热任务维护，分钟库若漏一天，页面就会出现
+  「报价是今天收盘、分时图停在昨天」——分时图会诚实标注「本地历史 · 某日」，
+  **并且个股详情页会弹一条黄色提示**（分时日期 < 日K 最后日期时），指着这条命令告诉你补哪里，
+  免得被误判成行情接口坏了。该判断只在分时走「本地历史」时生效，交易时段的实时分时不会误报。
+
 **数据库备份（每日 15:50，计划任务 `SASDbBackup`）**
 
 ```powershell
@@ -555,7 +581,7 @@ cd backend
 .venv\Scripts\python.exe -m pytest tests/ -q
 ```
 
-**320 个单元测试**，覆盖：指标公式正确性、各策略命中/不命中场景、策略参数注入与
+**324 个单元测试**，覆盖：指标公式正确性、各策略命中/不命中场景、策略参数注入与
 自定义策略全链路（注册/持久化/启动加载）、回测止盈/止损/绩效指标、市场情绪
 分级（阈值边界/权重/快照计算/逆环境降级）、交易时段判断、异动检测与去重、
 通知管道、快照存储（TTL/SWR/并发去重/失败冷却）、智能建议（评分分级/情绪降级/批次持久化）、
@@ -584,7 +610,7 @@ SAS/
 │   │   ├── llm/               # OpenAI 兼容客户端 + 决策仪表盘
 │   │   ├── monitor/           # APScheduler 调度器
 │   │   └── notify/            # 通知管道（控制台/Webhook/邮件预留）
-│   ├── tests/                 # 320 个单元测试（全部离线，无网络依赖）
+│   ├── tests/                 # 324 个单元测试（全部离线，无网络依赖）
 │   ├── requirements.txt       # 依赖下限（日常开发）
 │   ├── requirements.lock.txt  # 锁定版本（CI / 复现历史回测结论）
 │   └── pyproject.toml         # requires-python + ruff + pytest 配置（不是打包清单）
@@ -604,7 +630,7 @@ SAS/
 │   ├── flow.md                # 全链路流程图（选股→打分→队列→下单），含参数总表与 skip 原因速查
 │   ├── sas_formulas.md        # 公式与实现口径备查
 │   └── images/                # README 示意图（架构 / 时间轴 / 下单链路）
-├── .github/workflows/ci.yml   # CI：ruff + 320 例单测
+├── .github/workflows/ci.yml   # CI：ruff + 324 例单测
 ├── serve_frontend.py          # 前端静态服务 + /api 反代（nssm 服务 SAS-frontend 的入口）
 ├── deploy.ps1                 # 部署：构建前端 + 重启服务 + 健康检查（计划任务 SASDeploy 的入口）
 ├── restart-backend.ps1        # 只重启后端（计划任务 SASRestart 的入口）

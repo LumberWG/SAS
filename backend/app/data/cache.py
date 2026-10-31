@@ -282,13 +282,26 @@ class Database:
         settings = get_settings()
         self.path = db_path or settings.db_path
         self._lock = threading.Lock()
+        # 每线程复用一个连接。旧实现每次 ``_connect()`` 都新建连接：``with conn``
+        # 只提交、不关闭，连接全靠 GC 回收，一个自选/建议类请求会连建十几次，
+        # 每次还要跑一遍 ``PRAGMA journal_mode``。按线程缓存后稳态不再建连。
+        self._local = threading.local()
         self._init_schema()
 
     def _connect(self) -> sqlite3.Connection:
-        # check_same_thread=False: FastAPI 多线程共享连接，由 self._lock 保护
+        """取当前线程的 SQLite 连接（首次调用时建立，之后复用）。"""
+        conn = getattr(self._local, "conn", None)
+        if conn is not None:
+            return conn
+        # check_same_thread=False：连接只在本线程使用，保留该选项以免
+        # 将来跨线程归还连接时报 ProgrammingError。
         conn = sqlite3.connect(self.path, check_same_thread=False)
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA journal_mode=WAL")
+        # 多写者（服务 + 备份/复盘脚本）并发落库时，默认会立刻抛 SQLITE_BUSY；
+        # 等 5 秒再放弃，配合 WAL 基本不再丢写。
+        conn.execute("PRAGMA busy_timeout=5000")
+        self._local.conn = conn
         return conn
 
     def _init_schema(self) -> None:

@@ -10,6 +10,7 @@ from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -175,6 +176,10 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    # 压缩：前端首屏的 index+业务 chunk+echarts 约 700KB 明文，JSON 列表接口也常有几百 KB。
+    # 经 cpolar 隧道访问时这一层最划算（gzip 后通常只剩 1/3）。放最外层，静态资源也一起压。
+    app.add_middleware(GZipMiddleware, minimum_size=1024)
 
     # 访问令牌守卫（API_TOKEN 为空时直接放行，本机开发零配置）
     app.middleware("http")(_token_guard)

@@ -1,0 +1,5 @@
+# 批处理必须 CRLF 检出：LF 会让 cmd.exe 解析 if 块失败，连日志都不生成
+# （见 WORKLOG 2026-10-31「分钟线导出」条目的踩坑记录）。
+# 仓库内仍按 LF 存储，检出时转回 CRLF——这样无论克隆方的 core.autocrlf 是什么都能跑。
+*.bat text eol=crlf
+*.cmd text eol=crlf

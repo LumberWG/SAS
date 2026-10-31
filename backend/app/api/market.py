@@ -132,18 +132,27 @@ async def market_overview() -> dict:
     """
     indices_df: pd.DataFrame | None = None
     snapshot: pd.DataFrame | None = None
-    try:
-        indices_df = await asyncio.wait_for(
-            asyncio.to_thread(snapshot_store.get_indices, 20.0), timeout=25
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("指数快照不可用: %s", exc)
-    try:
-        snapshot = await asyncio.wait_for(
-            asyncio.to_thread(snapshot_store.get_snapshot, 20.0), timeout=25
-        )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("全市场快照不可用: %s", exc)
+
+    async def _indices() -> pd.DataFrame | None:
+        try:
+            return await asyncio.wait_for(
+                asyncio.to_thread(snapshot_store.get_indices, 20.0), timeout=25
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("指数快照不可用: %s", exc)
+            return None
+
+    async def _snapshot() -> pd.DataFrame | None:
+        try:
+            return await asyncio.wait_for(
+                asyncio.to_thread(snapshot_store.get_snapshot, 20.0), timeout=25
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("全市场快照不可用: %s", exc)
+            return None
+
+    # 两路数据源互不依赖：并行等待，最坏 25s 而不是串行的 50s
+    indices_df, snapshot = await asyncio.gather(_indices(), _snapshot())
 
     if indices_df is None and snapshot is None:
         # 完全无数据：返回降级结构（200），前端展示提示而非空白
@@ -289,11 +298,22 @@ async def index_kline(
 
 @router.get("/stocks/{code}")
 def stock_quote(code: str) -> dict:
-    """个股实时快照（来自全市场快照）。"""
+    """个股实时快照（来自全市场快照）。
+
+    先读内存里的已就绪快照（``peek_snapshot``，不等待），没有再回源。
+    原来无条件调 ``get_snapshot``：冷启动时会在请求线程里同步跑完 59 批抓取
+    （约 90s），而它是**同步**端点，占住线程池会连带拖慢其它所有同步接口。
+    """
+    snapshot = None
     try:
-        snapshot = snapshot_store.get_snapshot()
-    except Exception as exc:  # noqa: BLE001
-        raise HTTPException(status_code=502, detail=f"数据源异常: {exc}") from exc
+        snapshot = snapshot_store.peek_snapshot()
+    except Exception:  # noqa: BLE001
+        snapshot = None
+    if snapshot is None or snapshot.empty:
+        try:
+            snapshot = snapshot_store.get_snapshot()
+        except Exception as exc:  # noqa: BLE001
+            raise HTTPException(status_code=502, detail=f"数据源异常: {exc}") from exc
     row = snapshot[snapshot["code"] == code]
     if row.empty:
         raise HTTPException(status_code=404, detail=f"未找到股票 {code}")

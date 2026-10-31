@@ -22,7 +22,9 @@ http.interceptors.request.use((config) => {
 // 命中且未过期时通过 axios adapter 短路返回，不再发起网络请求；
 // 仅缓存 GET，且 refresh=true 的主动刷新请求跳过缓存（保证拿到最新）。
 const _getCache = new Map<string, { ts: number; data: unknown }>()
-const GET_CACHE_TTL = 10_000
+// TTL 必须 ≥ 页面轮询间隔（交易池 15s / 首页与建议 30s），否则轮询永远打不中缓存、
+// 每次都是真请求；但也不能太长，否则手动操作后看到的还是旧值（写操作会 clear）。
+const GET_CACHE_TTL = 20_000
 
 function _cacheKey(config: { url?: string; params?: unknown }): string {
   return (config.url ?? '') + '|' + JSON.stringify(config.params ?? {})

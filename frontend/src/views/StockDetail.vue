@@ -161,6 +161,25 @@ const pctTone = computed(() => {
   return p > 0 ? 'text-up' : 'text-down'
 })
 
+/**
+ * 分时图的日期是否落后于日 K / 报价。
+ *
+ * 两条数据源不同：报价与日 K 来自日线缓存与实时快照，分时图在非交易时段读本地分钟库
+ * （`minute1_fsdb`，由计划任务 SASMinutesFsdb 每日 17:30 导出）。分钟库漏一天，就会出现
+ * 「页头是 10-30 收盘、分时图停在 10-29」——不提示的话极容易被当成行情接口坏了。
+ *
+ * 只在 `source === 'local'` 时判断：交易时段走实时源，此时日 K 缓存可能还没当天这根，
+ * 拿它比较会误报。
+ */
+const intradayStale = computed(() => {
+  const d = intraday.value
+  const dates = kline.value?.dates
+  const marketDate = dates && dates.length ? String(dates[dates.length - 1]) : ''
+  if (!d || d.source !== 'local' || !d.date || !marketDate) return null
+  if (String(d.date) >= marketDate) return null
+  return { intraday: String(d.date), market: marketDate }
+})
+
 function statusIcon(status: string) {
   if (status === 'pass') return CheckCircle2
   if (status === 'fail') return XCircle
@@ -240,6 +259,20 @@ function statusColor(status: string) {
           </div>
           <span class="text-[12.5px] text-content-faint">
             {{ chartTab === 'intraday' ? intradayHint : 'MA5 天蓝 · MA10 黄 · MA20 紫' }}
+          </span>
+        </div>
+
+        <!-- 分时图落后于日K/报价时明确提示（本地分钟库没导出到最新交易日） -->
+        <div
+          v-if="chartTab === 'intraday' && intradayStale"
+          class="mb-2 flex items-start gap-2 rounded-lg border border-warn/40 bg-warn/10 px-3 py-2 text-[12.5px] text-warn"
+        >
+          <AlertTriangle class="mt-0.5 h-4 w-4 shrink-0" />
+          <span>
+            分时图停在 <b>{{ intradayStale.intraday }}</b>，而日 K / 报价已是
+            <b>{{ intradayStale.market }}</b>——本地分钟库没更新到这一天（不是行情接口故障）。
+            跑 <code class="rounded bg-black/20 px-1">scripts\run_minutes_all.py</code> 补数据，
+            或等每交易日 17:30 的计划任务 <code class="rounded bg-black/20 px-1">SASMinutesFsdb</code>。
           </span>
         </div>
 

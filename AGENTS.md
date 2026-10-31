@@ -61,7 +61,7 @@ git -c user.name=LumberWG -c user.email=663589316@qq.com commit -m "..."
 
 ```powershell
 cd e:\Study\SAS\backend
-.\.venv\Scripts\python.exe -m pytest tests -q          # 全量单测（当前 320 passed，全离线，约 35s）
+.\.venv\Scripts\python.exe -m pytest tests -q          # 全量单测（当前 324 passed，全离线，约 35s）
 .\.venv\Scripts\python.exe -m ruff check .             # 代码检查（配置在 backend\pyproject.toml）
 .\.venv\Scripts\python.exe scripts\weekly_review.py --md   # 周度复盘（零成交归因）
 .\.venv\Scripts\python.exe scripts\live_review.py --md     # 实盘 vs 等权基准超额对账
@@ -69,6 +69,11 @@ schtasks /run /tn SASRestart                            # 重启后端（无需 
 Get-Content e:\Study\SAS\backend\logs\backend.log -Tail 50  # 应用日志（业务判定在这）
 .\.venv\Scripts\python.exe scripts\backup_db.py         # 手动备份库（SQLite 在线 backup API）
 schtasks /run /tn SASDbBackup                           # 每日 15:50 的备份计划任务，立即触发
+.\.venv\Scripts\python.exe scripts
+un_minutes_all.py   # 分钟线补到最近交易日（只补增量）
+.\.venv\Scripts\python.exe scripts
+un_minutes_all.py --end 20261030  # 只补某一天
+schtasks /run /tn SASMinutesFsdb                        # 每交易日 17:30 的分钟线导出，立即触发
 ```
 
 服务：`SAS`（后端 :8000，nssm）、`SAS-frontend`（:8080）、`cpolar`（公网隧道）。
@@ -91,12 +96,16 @@ Invoke-RestMethod -Headers @{'X-API-Token'='<令牌>'} http://127.0.0.1:8000/api
 | 影子策略 | 11-02 起每交易日 16:45 | `default` vs `default_ml` 落 `data/logs/shadow_live.json`，是「ML 能不能开」的证据来源 |
 | `API_TOKEN` | 已启用（2026-10-31） | 值只在 `backend\.env`；前端 401 时弹框输入，`/api/health` 豁免 |
 | `SASDbBackup` | 每日 15:50 | SQLite 在线 backup API → `D:\Backup\SAS\backups\`，保留 30 份 |
+| `SASMinutesFsdb` | 每交易日 17:30 | 本地 fsdb → `minute1_fsdb` / `minute5_fsdb`，只补增量；个股详情分时图的数据来源 |
 | 涨跌家数广度 | 每日 16:00 刷新，**仅观测** | `app/data/breadth.py` → `data\breadth_daily.parquet`。曾想用它区分 shock/自由落体，实测 4 年非重叠只有 5 个样本、方向还不稳（`#86`），**不进任何判定** |
 
 ## 7. 数据与产物
 
 - 生产库：`D:\Backup\SAS\data\sas.db`（只读核对时用 `mode=ro`）。
 - K 线与指数：`D:\Backup\SAS\data\klines`，指数文件 `idx_sh000001.parquet`。
+- 分钟线：`D:\Backup\SAS\data\minute1_fsdb` / `minute5_fsdb`（本地 fsdb 导出，**不走 akshare**），
+  进度清单 `_done_1m.txt` / `_done_5m.txt` 里存 `code|YYYYMMDD`。分时图读 1m 库，
+  它落后日 K 一天时页面会显示「本地历史 · 某日」——那不是缓存 bug，是导出没跑。
 - 应用日志：`backend\logs\backend.log`（10MB×5 轮转）；nssm 的 stderr 基本是空的，别只看那个。
 - 库备份：`D:\Backup\SAS\backups\sas-YYYYMMDD-HHMMSS.db`（保留 30 份）。**别用 `Copy-Item` 备份 WAL 库**，
   要用 `scripts/backup_db.py`（在线 backup API）。

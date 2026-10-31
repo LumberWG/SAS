@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import time
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -12,6 +13,32 @@ from app.data.cache import kline_cache
 from app.data.scope import clean_name
 
 logger = logging.getLogger("sas.data.service")
+
+
+def _latest_trading_day(now: datetime | None = None) -> str:
+    """最近一个交易日（``YYYY-MM-DD``）。与 ``app.market.clock.is_trading_day`` 同口径。"""
+    d = now or datetime.now()
+    while d.weekday() >= 5:
+        d -= timedelta(days=1)
+    return d.strftime("%Y-%m-%d")
+
+
+def _in_trading_hours(now: datetime | None = None) -> bool:
+    """是否处于 A 股交易时段（避免为这个判断引入 scheduler 侧的循环依赖）。"""
+    d = now or datetime.now()
+    if d.weekday() >= 5:
+        return False
+    m = d.hour * 60 + d.minute
+    return (9 * 60 + 30 <= m <= 11 * 60 + 30) or (13 * 60 <= m <= 15 * 60)
+
+
+#: 每只票最近一次「真正回源」的时刻。缓存已是最新交易日时用于限流：
+#: 非交易时段完全不回源，交易时段最多每 _NET_MIN_INTERVAL 秒一次（当日 bar 还会变）。
+_NET_MIN_INTERVAL = 60.0
+#: 缓存落后于最近交易日时的重试间隔：盘前/停牌这类「源里就是没有新 bar」的情况，
+#: 每个请求都回源一次会白等 20s，这里兜住
+_STALE_RETRY_INTERVAL = 30.0
+_last_net_fetch: dict[str, float] = {}
 
 #: 大盘择时用的指数（上证综指，新浪代码格式）。回测/影子读的缓存文件名是
 #: ``idx_sh000001.parquet``，与个股共用同一个 Parquet 目录。
@@ -178,19 +205,45 @@ def get_kline_cached(
     source = get_data_source()
     cached = None if refresh else kline_cache.get(code)
 
-    if cached is None:
-        df = source.get_daily_kline(code, adjust=adjust, timeout=timeout, retries=retries)
-    else:
-        last = kline_cache.last_date(code)
-        new_df = source.get_daily_kline(code, adjust=adjust, start_date=last,
-                                        timeout=timeout, retries=retries)
-        if new_df.empty:
-            df = cached
-        else:
-            df = pd.concat([cached, new_df], ignore_index=True)
-            df = df.drop_duplicates(subset=["date"], keep="last")
-            df = df.sort_values("date").reset_index(drop=True)
+    # 缓存已经到最近交易日时**不回源**。
+    # 原实现只要命中缓存也一定走一次增量请求，而数据源在非交易时段/被限流时
+    # 一次回源要 20 秒以上（雪球失败 → 腾讯降级 → akshare 重试），
+    # 于是「打开个股详情」变成 20s+ 的等待，即使数据本就齐全。
+    if cached is not None and not cached.empty:
+        last = str(cached["date"].iloc[-1])
+        since = time.time() - _last_net_fetch.get(code, 0.0)
+        if last >= _latest_trading_day():
+            # 已到最近交易日：非交易时段一律不回源；交易时段最多每 60s 一次（当日 bar 会变）
+            if not _in_trading_hours() or since > _NET_MIN_INTERVAL:
+                return cached if days is None else cached.tail(days)
+        elif since < _STALE_RETRY_INTERVAL:
+            # 落后于最近交易日、且刚试过：说明数据源此刻还没有新 bar（如盘前/停牌），
+            # 不要每个请求都去撞一次 20s 的回源
+            return cached if days is None else cached.tail(days)
 
+    try:
+        if cached is None:
+            df = source.get_daily_kline(code, adjust=adjust, timeout=timeout, retries=retries)
+        else:
+            last = kline_cache.last_date(code)
+            new_df = source.get_daily_kline(code, adjust=adjust, start_date=last,
+                                            timeout=timeout, retries=retries)
+            if new_df.empty:
+                df = cached
+            else:
+                df = pd.concat([cached, new_df], ignore_index=True)
+                df = df.drop_duplicates(subset=["date"], keep="last")
+                df = df.sort_values("date").reset_index(drop=True)
+    except Exception:
+        # 有缓存时不要让数据源抖动直接变成 500：先返回旧缓存（调用方本来也会降级展示）
+        _last_net_fetch[code] = time.time()
+        if cached is None or cached.empty:
+            raise
+        logger.warning("K线回源失败，改用本地缓存 code=%s（缓存末日 %s）",
+                       code, str(cached["date"].iloc[-1])[:10])
+        return cached if days is None else cached.tail(days)
+
+    _last_net_fetch[code] = time.time()
     if adjust == "qfq" and not df.empty:
         kline_cache.save(code, df)
 
