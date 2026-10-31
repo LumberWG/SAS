@@ -837,6 +837,34 @@ function metricTone(v: number): string {
         </div>
       </div>
 
+      <!-- 打分层生效状态：ML 静默回退时收益与 14 因子基线完全相同，必须显式标出来 -->
+      <div
+        v-if="result.ml_diagnostics"
+        class="glass-card flex flex-wrap items-center gap-x-3 gap-y-1 px-5 py-3 text-[13px] text-content-muted"
+      >
+        <span
+          class="rounded px-2 py-0.5 text-[12px] font-medium"
+          :class="result.ml_diagnostics.effective ? 'bg-primary/15 text-primary' : 'bg-base-700/60 text-content-muted'"
+        >
+          {{ result.ml_diagnostics.effective ? 'ML 生效' : '14 因子' }}
+        </span>
+        <span>打分层 {{ result.ml_diagnostics.mode }}</span>
+        <template v-if="result.ml_diagnostics.mode !== 'factors'">
+          <span>模型 {{ result.ml_diagnostics.model }} · 前瞻 {{ result.ml_diagnostics.label_horizon }} 日</span>
+          <span>
+            OOS rank-IC
+            <span class="font-num">{{ result.ml_diagnostics.oos_rank_ic.toFixed(4) }}</span>
+          </span>
+          <span>预测对 {{ result.ml_diagnostics.pred_pairs }}</span>
+        </template>
+        <span
+          v-if="result.ml_diagnostics.mode !== 'factors' && !result.ml_diagnostics.effective"
+          class="font-medium"
+        >
+          本段 OOS IC ≤ 0，已整段回退 14 因子 —— 这次结果不是 ML 的
+        </span>
+      </div>
+
       <!-- 亏损归因与调参建议 -->
       <div v-if="result.review" class="glass-card p-5">
         <div class="flex flex-wrap items-baseline justify-between gap-2">

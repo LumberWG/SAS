@@ -392,12 +392,24 @@ export interface BacktestTrade {
   reason: string
 }
 
+/** 打分层实际生效状态：`effective=false` 说明 OOS IC≤0、整段回退 14 因子（BACKTEST_LOG #79） */
+export interface BacktestMlDiagnostics {
+  mode: string
+  model: string
+  label_horizon: number
+  industry_neutral: boolean
+  oos_rank_ic: number
+  pred_pairs: number
+  effective: boolean
+}
+
 export interface BacktestResult {
   run_id?: number
   strategy: string
   start_date: string
   end_date: string
   params: Record<string, unknown>
+  ml_diagnostics?: BacktestMlDiagnostics
   metrics: {
     total_return: number
     benchmark_return?: number
