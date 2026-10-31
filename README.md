@@ -499,8 +499,10 @@ nssm remove SAS confirm                # 卸载服务
     组合回撤 ≥8% 触发，总仓位压到 target 且全暂停买入；回落到 ≤4% 才解除（滞回，避免临界抖动）。
     峰值与触发态落 `app_state.paper_cb_state`，**跨重启保留**。
   - **优先级**：熔断 > 动态机制 > 静态弱市闸门；三者都只压上限，不会加杠杆。
-  - 观测：`GET /api/paper/live` 的 `regime` 字段新增 `dynamic / regime_state / regime_cap /
-    regime_metrics / circuit_breaker / floor`，模拟交易页可直接看到当日处于哪一态。
+  - 观测：`GET /api/paper/live` 的 `regime` 字段已透出 `dynamic / regime_state / regime_cap /
+    regime_metrics / circuit_breaker / floor`。**前端暂未消费这些字段**（页面只显示原有的
+    弱市判断与拦截计数），当前只能从接口或 `backend\logs\backend.log` 里看当日处于哪一态；
+    要做可视化需另改前端。
   - 建议：默认全关期间先让 14 因子基线跑满 21 个交易日（`#70 §6` 的判读纪律），
     再逐项单开对照——三项同时开会互相掩盖，也说不清是谁的贡献。
 - **交易队列容量**：待执行**买单**最多同时挂 5 只（`paper_trade_queue_top_m`，按 14 因子总分择优），超出不入队并在「④ 交易池 · 持仓」页的交易池 tab 标注「未入队」原因；卖出不受限
