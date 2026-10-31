@@ -5,6 +5,7 @@ import asyncio
 import hmac
 import logging
 from contextlib import asynccontextmanager
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 from fastapi import FastAPI, Request
@@ -23,6 +24,52 @@ logging.basicConfig(
     format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
 )
 logger = logging.getLogger("sas")
+
+#: 主服务日志文件（`<repo>/backend/logs/backend.log`，10MB×5 轮转）
+LOG_FILE = BASE_DIR / "backend" / "logs" / "backend.log"
+
+
+def _setup_file_logging() -> Path | None:
+    """把日志同时落一份文件，返回日志路径（失败返回 None，不影响启动）。
+
+    为什么必须：服务由 `restart_backend.bat` / vbs 以**隐藏窗口**启动，stderr 无人接收，
+    于是「评分 xx<25，仅记录不下单」「live ML 无信号，回退 14 因子」这类**决定性判定
+    全部只活在内存里**。2026-10-31 复盘「为什么零成交」时，只能靠重跑脚本反推，
+    就是因为这里缺一环。
+
+    只在 root 上挂一次（幂等）：uvicorn `--reload` 会重复执行本模块，挂多了会重复写行。
+    """
+    try:
+        LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        for h in logging.getLogger().handlers:
+            if isinstance(h, RotatingFileHandler) and Path(h.baseFilename) == LOG_FILE:
+                return LOG_FILE
+        handler = RotatingFileHandler(
+            LOG_FILE, maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8",
+        )
+        handler.setFormatter(logging.Formatter(
+            "%(asctime)s %(levelname)s [%(name)s] %(message)s"))
+        handler.setLevel(logging.INFO)
+        logging.getLogger().addHandler(handler)
+        # uvicorn 的三个 logger 自带 handler 且 `propagate=False`，不单独挂就收不到
+        # 启动信息与访问日志——而那正是「服务到底起没起、谁在打接口」的唯一证据。
+        for name in ("uvicorn", "uvicorn.error", "uvicorn.access"):
+            lg = logging.getLogger(name)
+            if any(isinstance(h, RotatingFileHandler) for h in lg.handlers):
+                continue
+            lg.addHandler(handler)
+            lg.setLevel(logging.INFO)
+            # 必须断开向 root 的传播：`uvicorn.error` 在 uvicorn 自己 dictConfig 之前
+            # `propagate=True`，同一份 handler 又挂在 root 上，一条记录会被写 3 次
+            # （实测：uvicorn.error → uvicorn → root 各写一遍）。
+            lg.propagate = False
+        return LOG_FILE
+    except Exception as exc:  # noqa: BLE001 - 日志失败绝不能拖垮启动
+        logging.getLogger("sas").warning("文件日志初始化失败（仅控制台输出）: %s", exc)
+        return None
+
+
+_setup_file_logging()
 
 #: 前端生产构建产物目录（cpolar 单端口部署时由后端托管）
 FRONTEND_DIST = BASE_DIR / "frontend" / "dist"

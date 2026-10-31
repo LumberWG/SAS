@@ -425,9 +425,16 @@ powershell -ExecutionPolicy Bypass -File e:\Study\SAS\install_service.ps1
 
 ```powershell
 Restart-Service SAS                    # 重启
-Get-Content e:\Study\SAS\data\logs\sas-service.log -Tail 50   # 看日志
+Get-Content e:\Study\SAS\backend\logs\backend.log -Tail 50    # 看应用日志（推荐）
 nssm remove SAS confirm                # 卸载服务
 ```
+
+**日志有两层，看业务问题只认后者**：
+- nssm 的 stdout/stderr（`data\logs\`）——只兜异常栈，进程被隐藏窗口启动时经常是空的；
+- **应用日志 `backend\logs\backend.log`**（`app/main.py` 的 `RotatingFileHandler`，10MB×5 轮转，
+  `uvicorn/uvicorn.error/uvicorn.access` 一并收进来）。「评分 xx<25，仅记录不下单」「大盘弱势，
+  总仓位压到 30%」「live ML 无信号，回退 14 因子」这类**决定性判定只写在这里**——
+  2026-10-31 复盘「为什么零成交」时就是缺这一层，只能靠重跑脚本反推。
 
 **模式区分**：
 - **生产模式**（推荐，公网访问用）：只跑 `SAS` 服务一个进程，访问 http://127.0.0.1:8000
@@ -470,7 +477,8 @@ nssm remove SAS confirm                # 卸载服务
   队列等下一个开盘，有效期顺延。2026-10-30 用 `intraday_entry` 回测验证过「放开到全时段」：
   配对中位 −1.18pp、正占比 33%，**不采纳**（`BACKTEST_LOG` 记录 #58）
 - **止盈止损**：默认止损 -8%（`paper_stop_loss`）/ 止盈 +20%（`paper_take_profit`），每 tick（默认 5 秒）用最新价检查；收盘 15:40 结算并记净值。三项风控参数可在设置页改，也可由回测中心「落盘」写入
-- **自动执行链路**：开盘 9:20、盘中每 `intraday_analysis_interval`（默认 1 分钟）分析产生的买卖建议自动送入模拟盘队列，由 `paper_tick`（默认 5 秒）撮合——**卖出与止盈止损全天生效，买入受上面的开盘窗口约束**；盘中信号若在窗口外产生，顺延到下一个交易日的开盘窗口；盘后 15:40 结算并记录净值。注：2026-10-30 起「大盘择时弱市闸门」（`paper_regime_weak_pause`，指数在 MA60 下方）会让**全部自动买入**返回 skip，这是当天零成交的直接原因（同日弱市日志 1999 条）。该开关已在
+- **自动执行链路**：开盘 9:20、盘中每 `intraday_analysis_interval`（默认 1 分钟）分析产生的买卖建议自动送入模拟盘队列，由 `paper_tick`（默认 5 秒）撮合——**卖出与止盈止损全天生效，买入受上面的开盘窗口约束**；盘中信号若在窗口外产生，顺延到下一个交易日的开盘窗口；盘后 15:40 结算并记录净值。注：2026-10-30 起「大盘择时弱市闸门」（`paper_regime_weak_pause`，指数在 MA60 下方）会让**全部自动买入**返回 skip，这是当天零成交的直接原因（同日弱市日志 1999 条）——注意那时的
+  `paper_weak_exposure` 还是 0（0 = 全暂停）；**10-30 22:17 已改为 0.3，此后弱市只降仓、不再全停**。该开关已在
   「系统设置 → 做T 与择时」支持**运行时切换（改完立即生效，不用重启）**，并会在模拟交易页顶部显示
   「大盘弱势 · 今日已拦截 N 次」；`GET /api/paper/live` 的 `regime` 字段可直接读到判定与计数。
   旁边的「弱市保留仓位」（`paper_weak_exposure`，默认 0）可把它从「全暂停」改成「弱市只保留 X% 总仓位」，
