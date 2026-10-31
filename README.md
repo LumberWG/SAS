@@ -484,6 +484,25 @@ nssm remove SAS confirm                # 卸载服务
   旁边的「弱市保留仓位」（`paper_weak_exposure`，默认 0）可把它从「全暂停」改成「弱市只保留 X% 总仓位」，
   填 0.3 即弱市留三成仓继续参与。**本机当前已设为 0.3**（`BACKTEST_LOG` 记录 #63）：这是风险偏好取舍，
   不是收益优化——随机段实测月期望约 −0.55pp，换来**日胜率 42.9% → 60%、急跌月少亏约 6.4pp**（尾月差异不大）
+- **机制层三开关（默认全关，`BACKTEST_LOG` #84 / #85）**：设置页新增 13 项，全部在 `RUNTIME_KEYS` 里
+  ——**改完立即生效、不用重启**；关掉任一项，行为与改造前完全一致。
+  - `paper_dynamic_exposure` + `paper_regime_cap_{calm,weak,shock,crisis}`（「做T 与择时 → 大盘择时」）：
+    用「20/60 日波动率比 + 120 日最大回撤 + MA60 趋势」把市场分成 **calm / weak / shock / crisis**，
+    动态压低总仓位上限（只降不升）。crisis 档同时全暂停买入。
+  - `paper_policy_floor_enabled` + `min_score / low_escalate / harvest_cap`（「风控与止损」）：
+    把「国家不会让股市崩、有个看不见的底」量化成 0~1 的托底强度，让两种下行**分治**——
+    托底证据强的阴跌 → `managed_downtrend`（缩仓 30% 且允许买入，收割反转）；
+    托底证据极弱 + 高波动 → 升级 `crisis`（自由落体型，撤退）。
+    **诚实降级**：ETF 放量 / 期指升贴水 / 官媒情绪这三类直接信号当前部署都没有，
+    只用「指数底部特征代理」，所以强度分是**弱确认**而不是硬信号（`available=False`）。
+  - `paper_circuit_breaker_enabled` + `dd / release / target`（「风控与止损」）：
+    组合回撤 ≥8% 触发，总仓位压到 target 且全暂停买入；回落到 ≤4% 才解除（滞回，避免临界抖动）。
+    峰值与触发态落 `app_state.paper_cb_state`，**跨重启保留**。
+  - **优先级**：熔断 > 动态机制 > 静态弱市闸门；三者都只压上限，不会加杠杆。
+  - 观测：`GET /api/paper/live` 的 `regime` 字段新增 `dynamic / regime_state / regime_cap /
+    regime_metrics / circuit_breaker / floor`，模拟交易页可直接看到当日处于哪一态。
+  - 建议：默认全关期间先让 14 因子基线跑满 21 个交易日（`#70 §6` 的判读纪律），
+    再逐项单开对照——三项同时开会互相掩盖，也说不清是谁的贡献。
 - **交易队列容量**：待执行**买单**最多同时挂 5 只（`paper_trade_queue_top_m`，按 14 因子总分择优），超出不入队并在「④ 交易池 · 持仓」页的交易池 tab 标注「未入队」原因；卖出不受限
 - **大盘股过滤**（「③ 三选 · 交易队列」页顶部开关）：**默认开启**，**总市值 > 100 亿**（可改阈值）的票不进队列，银行/石油这类巨无霸也不会出现在候选池里；关掉开关才放开（此时旧的 `GIANT_CODES` 黑名单同时失效）。设置写进 `app_state`，重启保留。回测侧无法建模（`klines` 没有市值字段），对照时需注意实盘可选集合比回测窄
 - **切入点**（进队≠成交）：现价高于信号价 1.5% 不追（`paper_entry_max_chase`）、可要求回踩（`paper_entry_pullback`，默认 0=不限）、信号超时放弃（`paper_entry_timeout_minutes`，0=沿用 30 分钟 TTL）；被拒原因同样在「④ 交易池 · 持仓」页的交易池 tab 展示。**注意**：这组规则经回测无稳定增益（BACKTEST_LOG #52），属于防追高的工程保护，不是收益来源

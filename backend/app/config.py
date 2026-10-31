@@ -216,6 +216,32 @@ class Settings(BaseSettings):
     #: 而是把「总仓位上限」压到该比例继续参与）。回测记录 #59/#60：0.3~0.5 在
     #: 急跌月小亏换反弹时的收益，代价是涨市初期踏空。默认 0 保持既有行为不变。
     paper_weak_exposure: float = 0.0
+    # ---- 动态机制降暴露（机制检测层；默认关闭，零风险） ----
+    # 开启后由「波动率/回撤/趋势」把市场分成 calm/weak/shock/crisis 四态，
+    # 动态压低总仓位上限（只降不升），替代/增强上面的静态弱市档位。与回测
+    # pipeline 的 regime_tiers 同思路，但作用在实时引擎。改动见 BACKTEST_LOG #84。
+    paper_dynamic_exposure: bool = False
+    paper_regime_cap_calm: float = 0.0    # 平稳仓上限：0 = 不降仓（用总仓位上限）
+    paper_regime_cap_weak: float = 0.30   # 弱势仓上限
+    paper_regime_cap_shock: float = 0.40  # 震荡仓上限
+    paper_regime_cap_crisis: float = 0.15  # 危机仓上限（同时触发全暂停买入）
+    # ---- 政策托底强度检测（把"看不见的底"变可见；默认关闭，零风险） ----
+    # 开启后，在 weak/shock 态叠加托底强度：强度高→升级为"托底型阴跌"（缩仓收割反转），
+    # 强度极低且高波动→升级为危机防御（自由落体型）。与动态机制层配合，实现
+    # "两种下行分治"。直接信号（ETF放量/期指升贴水/官媒情绪）当前部署缺失时，
+    # 自动降级为指数底部特征代理，绝不假装拥有没有的数据。改动见 BACKTEST_LOG #85。
+    paper_policy_floor_enabled: bool = False
+    paper_policy_floor_min_score: float = 0.50   # ≥此强度且处于 weak/shock → 托底型阴跌（可收割）
+    paper_policy_floor_low_escalate: float = 0.20  # ≤此强度且处于 shock → 升级危机防御（自由落体）
+    paper_policy_floor_harvest_cap: float = 0.30  # 托底型阴跌的总仓位上限（收割但不裸抄）
+    # ---- 硬性回撤熔断（最后一道防线，凌驾于任何信号/机制层） ----
+    # 组合回撤触及 trigger 即锁仓/压仓到 target，回落到 ≤ release 才解除（滞回）。
+    # 峰值与触发状态落库，跨重启保留——重启不会因"忘了刚才跌"就立刻满仓接飞刀。
+    # 改动见 BACKTEST_LOG #85。
+    paper_circuit_breaker_enabled: bool = False
+    paper_circuit_breaker_dd: float = 0.08        # 触发阈值：回撤 ≥8% 锁仓
+    paper_circuit_breaker_release: float = 0.04   # 解除阈值：回撤回落到 ≤4% 才恢复
+    paper_circuit_breaker_target: float = 0.0     # 触发后目标总仓位（0=清到空仓/只留现金）
     # ---- 做T引擎（真实 tick：严格 T+1 多批次；默认全部关闭） ----
     paper_t_active: bool = False
     paper_t_size: float = 0.25             # 单次做T比例（相对总仓）

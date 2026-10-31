@@ -5750,3 +5750,82 @@ random_dist.py --draws 18 --span 21 --universe 300
 2. 11-02 起与影子 `default` 并行观察，2026-12-01 第一次判读，判据用 `#70 §6`
    的超额区间，并补记「弱市日持仓只数」（`#80 §6`）。
 3. 回测中心（单段）今后只用于归因，不用于方案优劣判定——本记录已是第三次验证这一点。
+
+---
+
+## 记录 #84 — 2026-10-31 · 动态机制降暴露层（regime-based dynamic exposure）
+
+### 背景
+用户提出量化拥挤 / 高波动黑天鹅环境下如何不选错边：核心不是换更神的信号，而是
+改系统的风险结构。落地为「机制检测层 + 弱市动态降暴露」的最小改造，对应框架的
+信号层→机制层→风控层三段式。
+
+### 实现
+- 新增 `app/analysis/regime.py`：`detect_regime(close)` 纯函数。用「近期波动/基线波动比
+  (vol_ratio) + 自近期高点最大回撤 (max_dd) + 趋势(前收<MA)」把市场分四态：
+  - `crisis` : dd≥12% 或 vol_ratio≥2.0 → 危机，仓上限 0.15 且全暂停买入
+  - `shock`  : vol_ratio≥1.4 或 dd≥6%   → 震荡，仓上限 0.40
+  - `weak`   : 趋势走弱                  → 弱势，仓上限 0.30（=paper_weak_exposure 同口径）
+  - `calm`   : 其余                      → 不降仓
+- `paper/engine.py`：买入闸门与 `effective_exposure` 计算处加 `paper_dynamic_exposure`
+  分支；**关闭时路径与原代码 100% 一致**（默认 false，零风险）。开启后由 `_dynamic_regime`
+  读 `idx_sh000001.parquet` → detect_regime → 按日缓存，失败退化为不降仓。
+- `config.py` 新增 `paper_dynamic_exposure` + 4 个档位 `paper_regime_cap_{calm,weak,shock,crisis}`；
+  `param_specs.py` 按 `paper_weak_exposure` 同款注册为运行时可调（RUNTIME_KEYS/分组/标签/校验）。
+- `regime_state()` API 透出 `regime_state / regime_cap / regime_metrics` 供前端展示。
+
+### 验收
+- `tests/test_regime.py`：calm/shock/crisis/weak/数据不足/异常 六类用例，覆盖四态与退化路径。
+- 静态路径未改动，既有 `test_paper.py` 弱市闸门用例不受影响（开关默认 false）。
+- 仅缩放总仓位上限、只降不升；与回测 `pipeline.regime_tiers` 同思路，但作用在实时引擎。
+
+### 状态
+代码已落地，默认关闭。开启需：`.env` 设 `PAPER_DYNAMIC_EXPOSURE=true` 并重启服务
+（get_settings 为 lru 单例）。下一步可做：① 接广度(涨跌家数)做更稳的 shock 判定；
+② 加 vol-targeting 连续缩放替代四档离散；③ 与政策情绪模块合成顶层 overlay。
+
+---
+
+## 记录 #85 — 2026-10-31 · 政策托底分治 + 硬性回撤熔断（机制层扩展）
+
+**背景**：用户提出两个直觉——① 单边下行偶有反弹时做T有机会；② "相信国家不会让股市崩，
+有个看不见的底"。拆解为：同一段"单边下行"其实是**两种完全不同的态**——
+- A 托底型阴跌（政策托底、有序下跌、反弹可交易）→ 应缩仓**收割反转**，而非纯撤退；
+- B 自由落体型（流动性蒸发、底被击穿、反弹是死猫跳）→ 必须**撤退+熔断**。
+原 #84 的机制层把 weak/shock/crisis 一律当"撤退"，缺了 A 态的"可收割"分支，也缺了
+"底被击穿时不死"的最后防线。本记录补这两条。
+
+**改动**：
+- 新增 `app/analysis/policy_floor.py`：
+  - `detect_policy_floor(index_close, etf_volume=, futures_basis=, news_sentiment=)`：
+    输出 0~1 托底强度 + 分级（none/weak/strong）+ 各分量。指数代理信号（波动压缩 /
+    低点企稳 / 反转日占比）缺失直接信号时诚实降级为"指数底部特征代理"，`available` 标记；
+    ETF 放量 / 期指升贴水 / 官媒情绪为**可选**直接信号，有则加权（代理 0.7 + 直接 0.3）。
+    任何异常/数据不足 → score=0 / none（零风险）。
+  - `circuit_breaker_state(drawdown, tripped, trigger, release)`：纯滞回判定，可单测。
+- `app/paper/engine.py`：
+  - `_dynamic_regime` 在 `paper_policy_floor_enabled` 时叠加托底强度：weak/shock 且
+    强度≥`min_score` → 升级 `managed_downtrend`（仓上限 `harvest_cap`、允许买入、收割反转）；
+    强度≤`low_escalate` 且高波动 → 升级 `crisis`（自由落体防御）。直接信号缺失自动降级为指数代理。
+  - 新增 `_circuit_breaker(today, total_asset)`：组合回撤≥`dd` 即锁仓/压仓到 `target`，
+    回落到≤`release` 才解除（滞回）；峰值与触发状态**落库跨重启保留**（防重启后满仓接飞刀）。
+  - 买入闸门：熔断触发时 `market_weak=weak_pause_all=True`、总仓位压到 `target`，
+    **凌驾于机制层与任何信号**；`effective_exposure` 处熔断优先于 dyn/弱市分支。
+  - `regime_state()` 与 `_save_regime_snapshot()` 透出 `circuit_breaker` + `floor` 供实时/事后可见。
+- `config.py` 新增 8 项：`paper_policy_floor_{enabled,min_score,low_escalate,harvest_cap}` +
+  `paper_circuit_breaker_{enabled,dd,release,target}`；`param_specs.py` 按
+  `paper_weak_exposure` 同款注册为 RUNTIME_KEYS（设置页热切）+ 标签 + ≤1 校验。
+- `.env` / `.env.example` 补默认值（全部 false / 保守档位）。
+
+**验收**：
+- `tests/test_policy_floor.py`：无下行段→none、边界与分量、托底>下行分、ETF直接信号
+  `available=True` 且提分、短序列安全、熔断滞回表——6 例全过。
+- 既有 `test_paper.py` + `test_regime.py` 弱市/降仓/机制用例 **55 例全过**（开关默认 false，静态路径不变）。
+- 编译通过、引擎导入正常（`_circuit_breaker` 就位）。
+
+**状态**：代码已落地，默认关闭、零侵入。开启：`PAPER_POLICY_FLOOR_ENABLED=true` 和/或
+`PAPER_CIRCUIT_BREAKER_ENABLED=true`（`.env` 改后重启；或设置页热切）。注意直接信号
+（ETF/期指/新闻）当前部署缺失，`detect_policy_floor` 仅用指数代理——这是**诚实降级**，
+强度分应被视为"弱确认"而非硬信号。下一步：① 接入 ETF/期指/官媒数据让托底强度变硬；
+② managed_downtrend 态接"反弹减、回落接"的战术再平衡（真·做T收割）；
+③ 接涨跌家数广度强化 shock/freefall 区分。

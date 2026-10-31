@@ -36,6 +36,22 @@ RUNTIME_KEYS: frozenset[str] = frozenset({
     "paper_regime_weak_pause",
     # 弱市保留仓位：属于风险偏好档位，盘中想从「全暂停」切到「留三成」要能立刻生效
     "paper_weak_exposure",
+    # 动态机制降暴露：风险偏好档位，盘中切换要立刻生效（同弱市保留仓位）
+    "paper_dynamic_exposure",
+    "paper_regime_cap_calm",
+    "paper_regime_cap_weak",
+    "paper_regime_cap_shock",
+    "paper_regime_cap_crisis",
+    # 政策托底强度：是否把"看不见的底"纳入分治，盘中切要立刻生效
+    "paper_policy_floor_enabled",
+    "paper_policy_floor_min_score",
+    "paper_policy_floor_low_escalate",
+    "paper_policy_floor_harvest_cap",
+    # 硬性回撤熔断：最后一道防线，风险偏好档位，盘中切换要立刻生效
+    "paper_circuit_breaker_enabled",
+    "paper_circuit_breaker_dd",
+    "paper_circuit_breaker_release",
+    "paper_circuit_breaker_target",
 })
 
 #: 设置页布局：**分组（左侧导航）→ 子分组（组内小节）→ 参数键**。
@@ -199,7 +215,9 @@ _LAYOUT: tuple[tuple[str, str, tuple[tuple[str, str, tuple[str, ...]], ...]], ..
             (
                 "大盘择时",
                 "指数在均线下方时收缩买入",
-                ("paper_regime_ma", "paper_regime_weak_pause", "paper_weak_exposure"),
+                ("paper_regime_ma", "paper_regime_weak_pause", "paper_weak_exposure",
+                 "paper_dynamic_exposure", "paper_regime_cap_calm", "paper_regime_cap_weak",
+                 "paper_regime_cap_shock", "paper_regime_cap_crisis"),
             ),
         ),
     ),
@@ -367,10 +385,33 @@ _NON_NEGATIVE: frozenset[str] = frozenset({
     "trade_fee_transfer_rate",
     # 弱市保留仓位：0 是合法档位（=全暂停买入），所以不能进 _MIN_EXCLUSIVE
     "paper_weak_exposure",
+    # 动态机制档位：比例项，0 合法（calm=不降仓），不能进 _MIN_EXCLUSIVE
+    "paper_regime_cap_calm",
+    "paper_regime_cap_weak",
+    "paper_regime_cap_shock",
+    "paper_regime_cap_crisis",
+    "paper_policy_floor_min_score",
+    "paper_policy_floor_low_escalate",
+    "paper_policy_floor_harvest_cap",
+    "paper_circuit_breaker_dd",
+    "paper_circuit_breaker_release",
+    "paper_circuit_breaker_target",
 })
 
 #: 必须 ≤1 的比例项（>1 等于加杠杆，属于误操作）
-_MAX_ONE: frozenset[str] = frozenset({"paper_weak_exposure"})
+_MAX_ONE: frozenset[str] = frozenset({
+    "paper_weak_exposure",
+    "paper_regime_cap_calm",
+    "paper_regime_cap_weak",
+    "paper_regime_cap_shock",
+    "paper_regime_cap_crisis",
+    "paper_policy_floor_min_score",
+    "paper_policy_floor_low_escalate",
+    "paper_policy_floor_harvest_cap",
+    "paper_circuit_breaker_dd",
+    "paper_circuit_breaker_release",
+    "paper_circuit_breaker_target",
+})
 
 #: 跨字段约束：单键下限表达不了「A 必须大于 B」，同批提交时合并校验
 _CROSS_RULES: tuple[tuple[tuple[str, str], str], ...] = (
@@ -433,6 +474,15 @@ _SHORT_LABELS: dict[str, str] = {
     "paper_scan_autotrade_top_n": "自动交易上限",
     "paper_scan_autotrade_overnight": "盘后信号入队",
     "paper_buy_open_window_minutes": "开盘成交窗口",
+    # ---- 机制层：政策托底 / 熔断 ----
+    "paper_policy_floor_enabled": "托底强度检测",
+    "paper_policy_floor_min_score": "托底收割阈值",
+    "paper_policy_floor_low_escalate": "自由落体阈值",
+    "paper_policy_floor_harvest_cap": "托底收割仓位",
+    "paper_circuit_breaker_enabled": "硬性回撤熔断",
+    "paper_circuit_breaker_dd": "熔断触发回撤",
+    "paper_circuit_breaker_release": "熔断解除回撤",
+    "paper_circuit_breaker_target": "熔断后仓位",
     # ---- 轮动 / 候补 ----
     "paper_rotation_enabled": "轮动替换",
     "paper_rotation_min_score": "轮动评分下限",
@@ -463,6 +513,11 @@ _SHORT_LABELS: dict[str, str] = {
     "paper_regime_ma": "择时均线",
     "paper_regime_weak_pause": "弱市暂停买入",
     "paper_weak_exposure": "弱市保留仓位",
+    "paper_dynamic_exposure": "动态机制降暴露",
+    "paper_regime_cap_calm": "平稳仓上限",
+    "paper_regime_cap_weak": "弱势仓上限",
+    "paper_regime_cap_shock": "震荡仓上限",
+    "paper_regime_cap_crisis": "危机仓上限",
     # ---- 做T ----
     "paper_t_active": "做T开关",
     "paper_t_size": "做T仓位比例",

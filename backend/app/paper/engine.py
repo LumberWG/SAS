@@ -34,6 +34,8 @@ from datetime import datetime
 
 import pandas as pd
 
+from app.analysis.regime import detect_regime
+from app.analysis.policy_floor import detect_policy_floor, circuit_breaker_state
 from app.config import get_settings
 from app.data.cache import db
 from app.data.service import get_kline_cached
@@ -176,6 +178,12 @@ class PaperEngine:
         #: (日期, 是否弱市)：判定只依赖**前一交易日**收盘，同一天内结果不变，
         #: 缓存后 tick 不必每 5 秒读一次指数 parquet。
         self._weak_cache: tuple[str, bool] = ("", False)
+        #: (日期, 动态机制层结果)：与 _weak_cache 同口径，按自然日缓存，避免重复读 parquet。
+        self._regime_dyn_cache: tuple[str, dict] = ("", {})
+        #: 硬性回撤熔断状态：峰值净值与是否触发，跨 tick 保留；落库后也跨重启保留。
+        self._cb_peak: float | None = None
+        self._cb_tripped: bool = False
+        self._cb_prev_tripped: bool = False  # 仅用于触发/解除时打一条日志，避免每 tick 刷屏
 
     # ------------------------------------------------------------------
     # 账户与行情
@@ -456,6 +464,132 @@ class PaperEngine:
             logger.debug("大盘择时判断失败: %s", exc)
             return out
 
+    async def _dynamic_regime(self, today: str) -> dict:
+        """动态机制层：读指数 parquet → detect_regime → 按日缓存。
+
+        失败时退化为 normal / 不降仓（与关闭开关等价，零风险）。
+        数据口径与 :meth:`_index_regime_detail` 一致：只用截至前一交易日的数据，无未来函数。
+        """
+        if self._regime_dyn_cache[0] == today:
+            return self._regime_dyn_cache[1]
+        default_cap = float(getattr(self.settings, "paper_max_total_exposure", 0.8))
+        out: dict = {"state": "normal", "exposure_cap": default_cap,
+                     "pause_all": False, "reason": "未启用", "metrics": {}}
+        try:
+            idx_path = self.settings.kline_dir / "idx_sh000001.parquet"
+            if not idx_path.exists():
+                out["reason"] = "指数文件缺失"
+                self._regime_dyn_cache = (today, out)
+                return out
+            df = await asyncio.to_thread(pd.read_parquet, idx_path)
+            if df is None or df.empty or "close" not in df.columns:
+                out["reason"] = "指数数据不足"
+                self._regime_dyn_cache = (today, out)
+                return out
+            close = df["close"].astype(float)
+            if "date" in df.columns:
+                last = df[df["date"] <= today]
+                i = (len(last) - 1) if not last.empty else (len(df) - 1)
+            else:
+                i = len(df) - 1
+            if i <= 1:
+                out["reason"] = "缺少前一交易日"
+                self._regime_dyn_cache = (today, out)
+                return out
+            # 截至前一交易日（与弱市闸门同口径，排除最新一根可能的当日不完整量价）
+            series = close.iloc[:i]
+            s = getattr(self.settings, "paper_regime_ma", 60) or 60
+            calm_cap = float(getattr(self.settings, "paper_regime_cap_calm", 0.0) or default_cap)
+            cfg = dict(
+                ma_n=int(s),
+                vol_win=20, vol_base=60, dd_win=120,
+                crisis_vol=2.0, crisis_dd=0.12, shock_vol=1.4, shock_dd=0.06,
+                cap_calm=calm_cap,
+                cap_weak=float(getattr(self.settings, "paper_regime_cap_weak", 0.30)),
+                cap_shock=float(getattr(self.settings, "paper_regime_cap_shock", 0.40)),
+                cap_crisis=float(getattr(self.settings, "paper_regime_cap_crisis", 0.15)),
+            )
+            res = detect_regime(series, **cfg)
+            # 政策托底强度叠加（paper_policy_floor_enabled 时）：把"看不见的底"变可见，
+            # 让 weak/shock 态分治——托底型阴跌可缩仓收割，自由落体型升级危机防御。
+            # 缺失直接信号（ETF/期指/新闻）时，detect_policy_floor 自动降级为指数底部代理。
+            if bool(getattr(self.settings, "paper_policy_floor_enabled", False)):
+                floor = detect_policy_floor(series)
+                res["floor"] = floor
+                base = res["state"]
+                if base in ("weak", "shock"):
+                    score = float(floor.get("score", 0.0))
+                    if score >= float(getattr(self.settings, "paper_policy_floor_min_score", 0.5)):
+                        harvest_cap = float(getattr(self.settings, "paper_policy_floor_harvest_cap", 0.30))
+                        res.update(state="managed_downtrend", exposure_cap=harvest_cap,
+                                   pause_all=False, harvest_mode=True,
+                                   reason=f"托底型阴跌(强度{score:.2f})，缩仓收割反转")
+                    elif score <= float(getattr(self.settings, "paper_policy_floor_low_escalate", 0.2)):
+                        # 自由落体型：托底证据弱 + 高波动 → 升级为危机级防御（必须撤退+熔断）
+                        if base == "shock" or float(floor.get("metrics", {}).get("max_drawdown", 0.0)) >= 0.12:
+                            res.update(state="crisis",
+                                       exposure_cap=float(getattr(self.settings, "paper_regime_cap_crisis", 0.15)),
+                                       pause_all=True, reason="自由落体(无托底证据)，升级危机防御")
+            self._regime_dyn_cache = (today, res)
+            return res
+        except Exception as exc:  # noqa: BLE001
+            out["reason"] = f"机制检测失败: {exc}"
+            logger.debug("动态机制检测失败: %s", exc)
+            self._regime_dyn_cache = (today, out)
+            return out
+
+    async def _circuit_breaker(self, today: str, total_asset: float) -> dict:
+        """硬性回撤熔断：组合回撤触及阈值即锁仓/压仓，凌驾于任何信号与机制层之上。
+
+        设计（BACKTEST_LOG #85）：
+        - 最后一道防线，优先级高于动态机制层与所有买入信号；
+        - 滞回状态机（:func:`circuit_breaker_state`）：回撤 ≥ trigger 触发，回落到 ≤ release
+          才解除，避免临界值附近反复抖；
+        - 峰值与触发状态落库（``paper_cb_state``），**跨重启保留**——重启不会因"忘了刚才跌"
+          就立刻满仓接飞刀；
+        - 关闭开关或任何异常 → 返回未触发（零风险）。
+        """
+        out = {"enabled": False, "tripped": False, "drawdown": 0.0,
+               "peak": total_asset, "target_exposure": 0.0, "reason": "未启用"}
+        if not bool(getattr(self.settings, "paper_circuit_breaker_enabled", False)):
+            return out
+        try:
+            trigger = float(getattr(self.settings, "paper_circuit_breaker_dd", 0.08))
+            release = float(getattr(self.settings, "paper_circuit_breaker_release", 0.04))
+            target = float(getattr(self.settings, "paper_circuit_breaker_target", 0.0))
+            # 峰值：优先内存，首次/重启后从库恢复（json 已在文件顶部导入）
+            if self._cb_peak is None or self._cb_peak <= 0:
+                try:
+                    raw = db.get_state("paper_cb_state")
+                    if raw:
+                        st = json.loads(raw)
+                        self._cb_peak = float(st.get("peak", total_asset) or total_asset)
+                        self._cb_tripped = bool(st.get("tripped", False))
+                except Exception:  # noqa: BLE001
+                    self._cb_peak = total_asset
+            if self._cb_peak is None or self._cb_peak <= 0:
+                self._cb_peak = total_asset
+            self._cb_peak = max(self._cb_peak, total_asset)
+            dd = (1.0 - total_asset / self._cb_peak) if self._cb_peak > 0 else 0.0
+            # 滞回状态机
+            self._cb_tripped = circuit_breaker_state(
+                dd, self._cb_tripped, trigger=trigger, release=release)
+            # 落库（重启后仍能记得"刚才跌过"）
+            try:
+                db.set_state("paper_cb_state", json.dumps(
+                    {"peak": round(self._cb_peak, 2), "tripped": self._cb_tripped},
+                    ensure_ascii=False))
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("熔断状态落库失败: %s", exc)
+            out.update(enabled=True, tripped=self._cb_tripped, drawdown=round(dd, 4),
+                       peak=round(self._cb_peak, 2), target_exposure=target,
+                       reason=("已触发熔断(锁仓/压仓)" if self._cb_tripped
+                               else f"回撤{dd:.1%}未触发"))
+            return out
+        except Exception as exc:  # noqa: BLE001
+            out["reason"] = f"熔断判定失败: {exc}"
+            return out
+
     def regime_state(self) -> dict:
         """大盘择时闸门的当日状态（供 ``GET /api/paper/live`` 展示）。
 
@@ -472,6 +606,24 @@ class PaperEngine:
             # 弱市保留仓位比例：0=全暂停买入；>0=只压总仓位上限（页面按此分流文案）
             "weak_exposure": float(getattr(self.settings, "paper_weak_exposure", 0.0) or 0.0),
             "day": today,
+            # 动态机制层（paper_dynamic_exposure）：暴露当日状态/上限/指标，便于前端展示
+            "dynamic": bool(getattr(self.settings, "paper_dynamic_exposure", False)),
+            "regime_state": (self._regime_dyn_cache[1].get("state")
+                             if self._regime_dyn_cache[0] == today else None),
+            "regime_cap": (self._regime_dyn_cache[1].get("exposure_cap")
+                           if self._regime_dyn_cache[0] == today else None),
+            "regime_metrics": (self._regime_dyn_cache[1].get("metrics")
+                               if self._regime_dyn_cache[0] == today else None),
+            # 硬性回撤熔断 + 政策托底强度：供 /api/paper/live 实时可见
+            "circuit_breaker": {
+                "enabled": bool(getattr(self.settings, "paper_circuit_breaker_enabled", False)),
+                "tripped": bool(self._cb_tripped),
+                "peak": (round(self._cb_peak, 2) if self._cb_peak else None),
+            },
+            "floor": (self._regime_dyn_cache[1].get("floor")
+                      if (self._regime_dyn_cache[0] == today
+                          and bool(getattr(self.settings, "paper_policy_floor_enabled", False)))
+                      else None),
         }
 
     # ------------------------------------------------------------------
@@ -554,15 +706,49 @@ class PaperEngine:
                 getattr(rec, "reason", "卖出信号")))
 
         # ---- 大盘择时买入闸门：弱市暂停自动买入与轮动（仅保留卖出） ----
-        market_weak = (
-            bool(self.settings.paper_regime_weak_pause)
-            and int(self.settings.paper_regime_ma) > 0
-            and await self._index_is_weak(today)
-        )
-        #: 弱市保留仓位比例（0=全暂停；>0=不暂停买入，只把总仓位上限压到该比例）。
-        #: 回测 #59/#60：0.3~0.5 在急跌月小亏、换震荡/反弹时的收益，代价是涨市初期踏空。
-        weak_exposure = float(getattr(self.settings, "paper_weak_exposure", 0.0) or 0.0)
-        weak_pause_all = market_weak and weak_exposure <= 0
+        # 动态机制层（paper_dynamic_exposure）开启时，由 vol/回撤/趋势统一驱动降仓与暂停，
+        # 替代下面的静态 MA 闸门；关闭时完全沿用既有逻辑（零风险）。见 BACKTEST_LOG #84。
+        dyn_enabled = bool(getattr(self.settings, "paper_dynamic_exposure", False))
+        dyn: dict | None = None
+        if dyn_enabled:
+            dyn = await self._dynamic_regime(today)
+            market_weak = dyn["state"] in ("weak", "shock", "crisis")
+            weak_exposure = float(dyn["exposure_cap"])
+            weak_pause_all = bool(dyn["pause_all"])
+        else:
+            market_weak = (
+                bool(self.settings.paper_regime_weak_pause)
+                and int(self.settings.paper_regime_ma) > 0
+                and await self._index_is_weak(today)
+            )
+            #: 弱市保留仓位比例（0=全暂停；>0=不暂停买入，只把总仓位上限压到该比例）。
+            #: 回测 #59/#60：0.3~0.5 在急跌月小亏、换震荡/反弹时的收益，代价是涨市初期踏空。
+            weak_exposure = float(getattr(self.settings, "paper_weak_exposure", 0.0) or 0.0)
+            weak_pause_all = market_weak and weak_exposure <= 0
+        # ---- 硬性回撤熔断：最高优先级，凌驾于机制层与任何买入信号 ----
+        # 开启时计算当前组合回撤；一旦触发，强制全暂停买入 + 总仓位压到 target。
+        cb_tripped = False
+        cb_target = 0.0
+        cb_dd = 0.0
+        if bool(getattr(self.settings, "paper_circuit_breaker_enabled", False)):
+            cb = await self._circuit_breaker(today, total_asset)
+            cb_tripped = bool(cb["tripped"])
+            cb_target = float(cb["target_exposure"])
+            cb_dd = float(cb.get("drawdown", 0.0))
+            if cb_tripped:
+                market_weak = True
+                weak_pause_all = True
+                weak_exposure = cb_target
+            # 触发/解除切换时打一条日志（避免每 tick 刷屏，与弱市计数同思路）
+            if cb_tripped != self._cb_prev_tripped:
+                self._cb_prev_tripped = cb_tripped
+                if cb_tripped:
+                    logger.warning(
+                        "硬性回撤熔断已触发：组合回撤 %.1f%%，总仓位压到 %.0f%%，暂停自动买入",
+                        cb_dd * 100, cb_target * 100,
+                    )
+                else:
+                    logger.info("硬性回撤熔断解除：组合回撤回落至 %.1f%%，恢复常规风控", cb_dd * 100)
         if market_weak:
             if self._regime_day != today:
                 self._regime_day = today
@@ -656,7 +842,13 @@ class PaperEngine:
         half_score = self.settings.paper_half_score
         # 现有持仓市值 = 总资产 - 现金；总仓位上限扣掉已有仓位后才是本轮可投预算
         effective_exposure = float(self.settings.paper_max_total_exposure)
-        if market_weak and weak_exposure > 0:
+        if cb_tripped:
+            # 熔断最高优先级：总仓位压到 target（只降不升），凌驾于机制层与弱市档
+            effective_exposure = min(effective_exposure, cb_target)
+        elif dyn_enabled and dyn is not None:
+            # 动态机制降暴露：把总仓位上限压到机制层给出的上限（只降不升）
+            effective_exposure = min(effective_exposure, float(dyn["exposure_cap"]))
+        elif market_weak and weak_exposure > 0:
             # 弱市降仓：总仓位上限压到 paper_weak_exposure，与回测 day_exposure 同口径
             effective_exposure = min(effective_exposure, weak_exposure)
         exposure_cap = total_asset * effective_exposure
@@ -1217,6 +1409,13 @@ class PaperEngine:
             "note": info["reason"],
             "weak_exposure": float(getattr(self.settings, "paper_weak_exposure", 0.0) or 0.0),
             "paused_count": int(self._regime_paused if self._regime_day == today else 0),
+            # 硬性回撤熔断 + 政策托底强度（BACKTEST_LOG #85）：事后可区分"弱市没信号"与
+            # "已被熔断锁仓"，以及当时托底强度是否支撑"托底型阴跌"判定。
+            "circuit_breaker_tripped": bool(self._cb_tripped),
+            "floor_score": (
+                self._regime_dyn_cache[1].get("floor", {}).get("score")
+                if bool(getattr(self.settings, "paper_policy_floor_enabled", False)) else None
+            ),
             "total_asset": round(total, 2),
             "market_value": round(market_value, 2),
             "exposure": round(market_value / total, 4) if total > 0 else 0.0,

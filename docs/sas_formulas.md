@@ -375,6 +375,64 @@ day_open = 首根 5m 的开盘（缺失用首根收盘）
   结论**随采样变细单调下降**，且边际交易为负贡献（笔数 +6%、收益 −0.54pp）——
   做T 这一族据此关闭，线上 `paper_t_active` 保持 False。
 
+### 4.10 机制层：动态降暴露 / 政策托底 / 硬性熔断（默认全关，记录 #84、#85）
+
+三个开关**全部默认 false**；关闭时走 §4.6 的静态 MA 闸门，代码路径与改造前一致。
+优先级（高 → 低）：**熔断 > 动态机制 > 静态弱市**。三者都只**压低**总仓位上限，不会放大。
+
+**（1）动态机制 `detect_regime()`（`analysis/regime.py`）**
+
+```
+输入 series = 指数收盘，截至前一交易日（与 §4.6 同口径，无未来函数）
+vol_ratio  = std(ret, 近20日) / std(ret, 近60日)
+max_dd     = −min((close − rolling_max(120)) / rolling_max(120))，取近 120 日
+trend_weak = close[-1] < MA(paper_regime_ma，默认 60)
+
+crisis : max_dd ≥ 0.12 或 vol_ratio ≥ 2.0 → cap=crisis(0.15)，pause_all=True
+shock  : vol_ratio ≥ 1.4 或 max_dd ≥ 0.06 → cap=shock(0.40)
+weak   : trend_weak                       → cap=weak(0.30)
+calm   : 其余                             → cap=calm(0.0 = 不降仓，回落 paper_max_total_exposure)
+
+effective_exposure = min(paper_max_total_exposure, cap)      # 只降不升
+```
+
+- 指数不足 122 根、parquet 读取失败、任何异常 → 退化为 `normal / 不降仓`（等同关闭），
+  绝不因数据抖动停交易；crisis 额外置 `weak_pause_all=True`（全暂停买入，卖出照常）。
+
+**（2）政策托底 `detect_policy_floor()`（`analysis/policy_floor.py`）**
+
+```
+必要条件：近 120 日最大回撤 < 5% → score=0 / level=none（没有下行段就无「底」可谈）
+分量（各 0~1）：
+  vol_compression = clip((1 − std(ret,10)/std(ret,40)) / 0.5)      # 卖压衰竭
+  stabilization   = 近20日最低点相对抬升 ≥0 → clip(抬升%/0.03 + 0.5)，否则 0
+  reversal_days   = clip((近10日收阳占比 − 0.4) / 0.3)
+  idx_score = 0.40·vol_compression + 0.35·stabilization + 0.25·reversal_days
+
+可选直接信号（ETF 放量 / 期指升贴水 / 官媒情绪，当前部署均无）：
+  score = 0.7·idx_score + 0.3·mean(直接信号)；无直接信号时 score = idx_score，available=False
+level = strong(≥0.50) / weak(≥0.20) / none
+```
+
+叠加规则（`paper_dynamic_exposure` 与 `paper_policy_floor_enabled` 同开，且基础态 ∈ {weak, shock}）：
+
+- `score ≥ min_score(0.50)` → 升级 `managed_downtrend`，cap=`harvest_cap(0.30)` 且**允许买入**
+  （托底型阴跌：缩仓收割反转，而非纯撤退）；
+- `score ≤ low_escalate(0.20)` 且（基础态为 shock 或回撤 ≥12%）→ 升级 `crisis`（自由落体型防御）。
+
+**（3）硬性回撤熔断 `circuit_breaker_state()`（滞回）**
+
+```
+peak = max(历史峰值总资产, 当前总资产)；dd = 1 − 总资产 / peak
+未触发：dd ≥ trigger(0.08) → 触发
+已触发：dd ≤ release(0.04) → 解除          # 滞回，避免临界值反复抖
+触发后：market_weak=True、weak_pause_all=True、effective_exposure = min(…, target(0.0))
+```
+
+- 峰值与触发态落 `app_state.paper_cb_state`（JSON），**跨重启保留**——否则重启后「忘了刚才跌过」
+  就会立刻满仓接飞刀；
+- 关闭开关或任何异常 → 未触发（零风险）。
+
 ---
 
 ## 5. 撮合机制（`paper/live.py`，事件驱动）
