@@ -181,7 +181,10 @@ def _defaults_payload() -> dict:
         # 基础
         "initial_capital": float(s.paper_initial_capital),
         "max_positions": int(s.paper_max_positions),
-        "universe_size": 500,
+        # 跟随线上池（paper_pool_top_n=300），不再写死 500：
+        # 回测用 Top500、实盘只买 Top300，两边池子不同，超额基准与被选中的票都不是一回事，
+        # 结论无法互相解释（#71 已记录这处不一致，#76 的 +4.55pp 也是 Top300 口径）。
+        "universe_size": int(getattr(s, "paper_pool_top_n", 300) or 500),
         "board_prefixes": [],
         "watch_cap": 60,
         "add_per_day": 50,

@@ -643,7 +643,9 @@ scoring_mode = factors   14 因子启发式（基线，即 #72 的 default）
 - **区间长度**：短区间（如 12 个交易日）只有 12 个截面，rank-IC 估不出来，几乎必然回退。
   要看 ML 至少半年；随机段评估用 `scripts/random_dist.py`（`#76` 的 18 段 × 21 天）。
 - **默认跟随实盘**：`/backtest/defaults` 的 `scoring_mode` 由 `live_ml_scoring` 决定
-  （开 = `ml`），避免「回测中心跑 ML、实盘还在 14 因子」这种口径漂移。
+  （开 = `ml`），避免「回测中心跑 ML、实盘还在 14 因子」这种口径漂移；`universe_size`
+  同理跟随 `paper_pool_top_n`（300），不再写死 500——池子不同则候选集、选中票、
+  超额基准全都不同，结论无法互相解释（`#79` §7）。
 - **落盘折算**：`scoring_mode=ml|ml_blend` → `live_ml_scoring=True`；`ml_model` /
   `ml_label_horizon` / `ml_blend` / `ml_require_ic` / `industry_neutral` / `disable_limit_mask`
   都是**回测专属**，实盘固定 lightgbm + 行业中性 + IC 回退 + 涨跌停约束，不落盘。
