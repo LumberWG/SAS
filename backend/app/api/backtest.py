@@ -216,10 +216,14 @@ def _defaults_payload() -> dict:
         "breakeven_trigger": 0.0,
         "trail_pct": 0.0,
         "trail_arm": 0.0,
-        # 大盘择时
-        "regime_ma": 0,
+        # 大盘择时：跟随线上闸门。线上是 paper_regime_weak_pause=True + ma=60 + weak_exposure=0.3，
+        # 这里写死 0 会让「默认回测」变成一套完全不做择时、始终顶到 80% 仓位的策略——
+        # 与实盘跑的根本不是同一套规则，用户拿它判断实盘会得出反向结论（#79 §7）。
+        "regime_ma": int(s.paper_regime_ma) if bool(s.paper_regime_weak_pause) else 0,
         "regime_fast_ma": 20,
-        "weak_exposure": 0.0,
+        "weak_exposure": (
+            float(s.paper_weak_exposure) if bool(s.paper_regime_weak_pause) else 0.0
+        ),
         "regime_flat_below": False,
         "regime_ramp_days": 0,
         # 仓位 / 评分 / 轮动
