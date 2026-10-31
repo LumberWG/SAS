@@ -622,6 +622,32 @@ bench_cum    = Π (1 + bench_ret(t))，从首个净值快照日起算
   **< −1pp** 先查执行价与成交可行性（#67 量化 1.4~2.5pp），不要调策略参数；
   **> +5pp** 视为短期运气（#68 噪声极差 3.44pp）；**< 21 个交易日不下结论**。
 
+### 7.6 打分层（ML 截面排序）与回测中心口径（2026-10-31）
+
+打分是**唯一被替换的环节**，信号阈值、风控、择时、下单窗口全部沿用，便于单变量对比。
+
+```
+scoring_mode = factors   14 因子启发式（基线，即 #72 的 default）
+             = ml        段前训练 → 当日截面分位(0~100)，用分位替代总分
+             = ml_blend  ML 分位与 14 因子归一分按 ml_blend 加权融合
+```
+
+- **训练/预测切分**：训练集 = klines 320 根尾部中 `start_date` **之前**的截面，
+  预测集 = 段内日期。段前走前，无未来函数。模型默认 LightGBM（65 特征 Alpha158 风格 +
+  Purged Group 时序 CV 选参），`ml_model=ridge` 为线性降级路径。
+- **回退纪律**：`oos_rank_ic <= ml_require_ic`（默认 0）时**整段回退 14 因子**，
+  `pred_pairs=0`，不注入噪声。这是设计而非故障。
+- **`ml_diagnostics`**（结果里必看）：`mode / model / label_horizon / industry_neutral /
+  oos_rank_ic / pred_pairs / effective`。**`effective=false` 说明这次跑的是 14 因子**，
+  无论 `scoring_mode` 填的是什么——没有这个字段时二者在结果里完全无法区分。
+- **区间长度**：短区间（如 12 个交易日）只有 12 个截面，rank-IC 估不出来，几乎必然回退。
+  要看 ML 至少半年；随机段评估用 `scripts/random_dist.py`（`#76` 的 18 段 × 21 天）。
+- **默认跟随实盘**：`/backtest/defaults` 的 `scoring_mode` 由 `live_ml_scoring` 决定
+  （开 = `ml`），避免「回测中心跑 ML、实盘还在 14 因子」这种口径漂移。
+- **落盘折算**：`scoring_mode=ml|ml_blend` → `live_ml_scoring=True`；`ml_model` /
+  `ml_label_horizon` / `ml_blend` / `ml_require_ic` / `industry_neutral` / `disable_limit_mask`
+  都是**回测专属**，实盘固定 lightgbm + 行业中性 + IC 回退 + 涨跌停约束，不落盘。
+
 ## 8. 自动交易五段式（目标架构）与现状差距
 
 > 2026-10-29 由用户明确的架构定义。**目前未实现**，本章先固化目标与差距，后续改造按此对齐，

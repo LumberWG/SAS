@@ -1792,6 +1792,20 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
 
     result = {
         "strategy": "全策略流水线",
+        # 打分层诊断：光看收益看不出「这次到底跑没跑 ML」——缺 lightgbm 或 OOS IC
+        # 不过线时会自动回退 14 因子，此时收益与基线一模一样。这里把真实生效状态标出来。
+        "ml_diagnostics": {
+            "mode": params.scoring_mode or "factors",
+            "model": params.ml_model or "lightgbm",
+            "label_horizon": int(params.ml_label_horizon or 0),
+            "industry_neutral": bool(params.industry_neutral),
+            "oos_rank_ic": round(float(prepared.get("ml_oos_ic") or 0.0), 4),
+            "pred_pairs": len(prepared.get("ml_pred") or {}),
+            "effective": (
+                params.scoring_mode in ("ml", "ml_blend")
+                and bool(prepared.get("ml_pred"))
+            ),
+        },
         "start_date": dates[0],
         "end_date": last,
         "params": {
@@ -1838,6 +1852,15 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
             "regime_tiers": list(params.regime_tiers) if params.regime_tiers else None,
             "regime_flat_below": params.regime_flat_below,
             "regime_ramp_days": ramp_days,
+            # 打分层（记录 #74~#78）：结果里必须能看到这次用的哪种口径，
+            # 否则 ML 静默回退（缺依赖 / OOS IC 不过线）时无法与 14 因子基线区分。
+            "scoring_mode": params.scoring_mode or "factors",
+            "ml_model": params.ml_model or "lightgbm",
+            "ml_label_horizon": int(params.ml_label_horizon or 0),
+            "ml_blend": params.ml_blend,
+            "ml_require_ic": params.ml_require_ic,
+            "industry_neutral": bool(params.industry_neutral),
+            "disable_limit_mask": bool(params.disable_limit_mask),
             # 做T（None/0/False = 关闭）：结果里必须能看到，否则无法判断某次回测到底开没开做T
             "t_active": bool(params.t_active),
             "t_minute_path": bool(params.t_minute_path),

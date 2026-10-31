@@ -58,7 +58,7 @@ const persisting = ref(false)
 interface ParamDef {
   key: string
   label: string
-  type: 'number' | 'bool' | 'multiselect'
+  type: 'number' | 'bool' | 'multiselect' | 'select'
   min?: number
   max?: number
   step?: number
@@ -75,6 +75,13 @@ const groups: { name: string; items: ParamDef[] }[] = [
     { key: 'add_per_day', label: '每日加自选', type: 'number', min: 1, max: 200 },
   ]},
   { name: '选股/买入', items: [
+    // 打分层：三者只差「分数怎么来」，信号阈值 / 风控 / 择时全部沿用，便于单变量对比。
+    // 默认值取自后端 `/backtest/defaults`，跟随实盘 live_ml_scoring（记录 #74~#78）。
+    { key: 'scoring_mode', label: '打分层', type: 'select', options: [['factors', '14因子'], ['ml', 'ML分位'], ['ml_blend', 'ML+因子融合']] },
+    { key: 'ml_model', label: 'ML模型', type: 'select', options: [['lightgbm', 'LightGBM'], ['ridge', 'Ridge']], unit: '缺依赖自动回退' },
+    { key: 'ml_label_horizon', label: 'ML标签前瞻(天)', type: 'number', min: 1, max: 60 },
+    { key: 'ml_blend', label: '融合权重(ML)', type: 'number', min: 0, max: 1, step: 0.1, unit: '仅融合档' },
+    { key: 'industry_neutral', label: 'ML行业中性化', type: 'bool' },
     { key: 'rebalance_days', label: '调仓周期(天)', type: 'number', min: 1, max: 20 },
     { key: 'buy_threshold', label: '14因子买入阈值', type: 'number' },
     { key: 'buy_top_pct', label: '买入分位门槛', type: 'number', min: 0, max: 1, step: 0.05, unit: '0~1' },
@@ -167,6 +174,13 @@ function labelOfSetting(setting: string): string {
   return hit ? hit.label : setting
 }
 
+/** 下拉落盘时被「折算」成布尔开关的项：回测键 → 把值折成开关的函数。
+ *  目前只有打分层（后端 `apply.py` 把 ml / ml_blend 折成 `live_ml_scoring=True`），
+ *  所以比较差异时要先折算，否则字符串与布尔永远不相等、确认框会误报变更。 */
+const SELECT_TO_SWITCH: Record<string, (v: unknown) => boolean> = {
+  scoring_mode: (v) => v === 'ml' || v === 'ml_blend',
+}
+
 /** 落盘会真正改动的项（与实盘当前值比较），确认框里逐条列出 */
 const pendingChanges = computed(() => {
   const map = persistMap.value
@@ -178,8 +192,12 @@ const pendingChanges = computed(() => {
     const next = form[it.key]
     if (next === null || next === undefined || next === '') continue
     const old = map.current[target]
-    const differs =
-      it.type === 'bool' ? Boolean(old) !== Boolean(next) : Number(old) !== Number(next)
+    const toSwitch = SELECT_TO_SWITCH[it.key]
+    const differs = toSwitch
+      ? toSwitch(next) !== Boolean(old)
+      : it.type === 'bool'
+        ? Boolean(old) !== Boolean(next)
+        : Number(old) !== Number(next)
     if (differs) out.push({ label: it.label, target, old, next })
   }
   return out
@@ -259,7 +277,8 @@ async function loadDefaults() {
     for (const g of groups) {
       for (const it of g.items) {
         if (form[it.key] !== undefined && it.key !== 'board_prefixes') continue
-        form[it.key] = d[it.key] ?? (it.type === 'bool' ? false : it.type === 'multiselect' ? [] : 0)
+        form[it.key] = d[it.key]
+          ?? (it.type === 'bool' ? false : it.type === 'multiselect' ? [] : it.type === 'select' ? '' : 0)
       }
     }
     if (!Array.isArray(form.board_prefixes)) form.board_prefixes = []
@@ -277,16 +296,24 @@ function isChanged(it: ParamDef): boolean {
   const d = defOf(it.key)
   const v = form[it.key]
   if (it.type === 'multiselect') return (v as string[]).length > 0
+  if (it.type === 'select') return String(v ?? '') !== String(d ?? '')
   if (it.type === 'bool') return Boolean(v) !== Boolean(d)
   if (v === null || v === undefined || v === '') return false
   return Number(v) !== Number(d)
 }
 
-/** 改动方向着色：调大=红、调小=绿、未改=常态 */
+/** 改动方向着色：调大=红、调小=绿、未改=常态（下拉没有大小之分，只做「已改」提示） */
 function diffTone(it: ParamDef): string {
   if (!isChanged(it)) return 'text-content'
+  if (it.type === 'select') return 'text-content'
   if (it.type === 'bool') return form[it.key] ? 'text-up' : 'text-down'
   return Number(form[it.key]) > Number(defOf(it.key)) ? 'text-up' : 'text-down'
+}
+
+/** 下拉项的显示名（默认值提示里把 `ml` 说成人话） */
+function optionLabel(it: ParamDef, value: unknown): string {
+  const hit = (it.options || []).find(([val]) => val === value)
+  return hit ? hit[1] : String(value ?? '—')
 }
 
 /** 输入框边框也跟着着色，扫一眼能看出哪几个被动过 */
@@ -307,9 +334,11 @@ function defaultHint(it: ParamDef): string {
   const base =
     it.type === 'multiselect'
       ? '线上：全市场'
-      : it.type === 'bool'
-        ? `线上：${d ? '开' : '关'}`
-        : `线上：${d}${it.unit ? ' ' + it.unit : ''}`
+      : it.type === 'select'
+        ? `线上：${optionLabel(it, d)}`
+        : it.type === 'bool'
+          ? `线上：${d ? '开' : '关'}`
+          : `线上：${d}${it.unit ? ' ' + it.unit : ''}`
   const target = liveTarget(it.key)
   if (target) return `${base} · 落盘后同步到 ${target}`
   const why = persistMap.value?.skipped[it.key]
@@ -328,7 +357,8 @@ function resetDefaults() {
   for (const g of groups) {
     for (const it of g.items) {
       const d = defaults.value[it.key]
-      form[it.key] = d ?? (it.type === 'bool' ? false : it.type === 'multiselect' ? [] : 0)
+      form[it.key] = d
+        ?? (it.type === 'bool' ? false : it.type === 'multiselect' ? [] : it.type === 'select' ? '' : 0)
     }
   }
   form.board_prefixes = []
@@ -718,6 +748,23 @@ function metricTone(v: number): string {
                   :class="isChanged(it) ? diffTone(it) : 'text-content-muted'"
                 >{{ it.label }}</span>
                 <input v-model="form[it.key]" type="checkbox" class="h-4 w-4 shrink-0 accent-primary" />
+              </label>
+              <label
+                v-else-if="it.type === 'select'"
+                class="flex flex-col gap-1 rounded-lg border border-base-600/50 bg-base-700/25 px-2.5 py-2 transition-colors hover:border-base-600"
+                :title="defaultHint(it)"
+              >
+                <span class="flex items-baseline gap-1.5">
+                  <span class="min-w-0 flex-1 truncate text-[12.5px] leading-tight text-content-muted">{{ it.label }}</span>
+                  <span v-if="it.unit" class="shrink-0 text-[11.5px] text-content-faint">{{ it.unit }}</span>
+                </span>
+                <select
+                  v-model="form[it.key]"
+                  class="h-7 w-full rounded border bg-base-800/60 px-1.5 text-[13px] text-content outline-none focus:border-primary"
+                  :class="inputTone(it)"
+                >
+                  <option v-for="[val, lab] in it.options" :key="val" :value="val">{{ lab }}</option>
+                </select>
               </label>
               <div
                 v-else-if="it.type === 'multiselect'"

@@ -5475,3 +5475,68 @@ Alpha158 风格特征集显著优于 #74 的 Alpha158-lite。
 - 实时 ML 训练仅在「自选股 + 已持仓」集合上（通常 <50 只），比回测 Top300 训练集小，
   截面分位是在该集合内归一化（对分配排序足够）；模型质量与 #76 回测同构但不完全相同。
 - 置信度中等（#76 bootstrap CI 下界贴 0），建议启用后对照影子账户 `default` vs `default_ml` 观察 1 个月。
+
+---
+
+## 记录 #79 — 2026-10-31 · 回测中心暴露打分层；实盘切 ML；补「这次到底跑没跑 ML」诊断
+
+### 1. 触发
+
+用户要求「实盘改成 ML，系统回测中心也改成 ML，我自己跑跑回测看」。
+
+查出 `#78` 只把 ML 接进了 `recommender`，**回测中心根本选不到 ML**：`default_ml` 只活在
+`profiles.py` 里，而 `BacktestRequest` 一个 ML 字段都没有。等于「功能在代码里、用户在页面上用不了」。
+
+### 2. 变更
+
+| 类型 | 内容 | 文件 |
+| --- | --- | --- |
+| 参数 | `BacktestRequest` 增 `scoring_mode` / `ml_model` / `ml_label_horizon` / `ml_blend` / `ml_require_ic` / `industry_neutral` / `disable_limit_mask` | `api/backtest.py` |
+| 默认值 | `/backtest/defaults` 的 `scoring_mode` **跟随 `live_ml_scoring`**（开=ml），避免「回测中心」与实盘两处各说一套 | 同上 |
+| 落盘 | `scoring_mode` 折算成 `live_ml_scoring`（`ml`/`ml_blend` → True）；其余 ML 项写入 `SKIP_REASONS` 说明为何不能落盘 | `backtest/apply.py` |
+| 诊断 | `result.ml_diagnostics{mode, model, label_horizon, industry_neutral, oos_rank_ic, pred_pairs, effective}`；`params` 白名单补 7 个 ML 字段 | `backtest/pipeline.py` |
+| UI | 「选股/买入」组新增 5 项，打分层为下拉（14因子 / ML分位 / ML+因子融合） | `views/Backtest.vue` |
+| 实盘 | `live_ml_scoring=true`（`app_state` 运行时覆盖 + `.env` 双写），重启后生效 | — |
+
+诊断字段是这次的关键补充：`params` 白名单原先不含 ML 字段，`effective` 也不存在，
+于是「ML 静默回退 14 因子」与「真的用了 ML」在结果里长得一模一样，无法区分。
+
+### 3. 一个必须先说清的实测结果
+
+用回测中心跑 `2026-10-15 ~ 2026-10-30`（12 个交易日，Top300）：
+
+```
+ml_diagnostics: mode=ml model=lightgbm horizon=15 oos_rank_ic=-0.0139 pred_pairs=0 effective=false
+metrics: total=-3.25% bench=-12.30% 超额=+9.05pp 成交 9 笔
+```
+
+**`effective=false`**：OOS rank-IC 为负（−0.0139），按 `#76` 的纪律整段回退 14 因子，
+`pred_pairs=0`。即**这次回测跑的是 14 因子基线，与 ML 无关**；那 +9.05pp 是 12 天样本，不可用。
+
+这不是 bug，是设计（`#76` 的 18 段里也有 2 段因同样原因回退）。但**回测中心跑短区间几乎必然回退**：
+
+- ML 训练集来自 klines 的 320 根尾部中 `start_date` **之前**的部分——区间越靠前或越短，训练截面越少；
+- 12 个交易日只有 12 个截面，rank-IC 估不出来是正常的。
+
+**要看 ML，区间至少半年（建议 `2026-05-01 ~ 2026-10-30`），或直接跑 `scripts/random_dist.py`
+那套 18 段 × 21 天。**
+
+### 4. 为什么不把 `ml_require_ic` 调成负数强行生效
+
+门槛存在的意义就是「IC 为负时宁可不用 14 因子」。调负等于把负 IC 的预测当信号，
+回测数字会变，但变的不是 ML 的能力。要看 ML 的正确做法是**给足训练样本**，不是降门槛。
+（`ml_require_ic` 仍留在 API 里供量化贡献度，前端不下发。）
+
+### 5. 本轮变更与验证
+
+- 后端 `298 passed`；前端 `npm run build` 通过（新增 `select` 类型参数）。
+- 回测中心 `/backtest/defaults` 返回 `scoring_mode=ml`、`ml_model=lightgbm`、`horizon=15`。
+- `/backtest/persist-map` 的 `scoring_mode → live_ml_scoring` 映射正确，`current.live_ml_scoring=true`。
+- 端到端跑通 2 次回测（各约 4 分钟，主要耗在 5735 个 parquet 的装载）。
+
+### 6. 下轮计划
+
+1. 用户跑 `2026-05-01 ~ 2026-10-30`（约 120 交易日）确认 `effective=true`，否则先看 `oos_rank_ic`；
+2. 若 `effective=true`，再与 `scoring_mode=factors` 同区间对比（其余参数一字不改，单变量）；
+3. 实盘与影子 `default` 并行观察到 **2026-12-01** 第一次判读；
+4. `scripts/fetch_industry_map.py` 尚未执行，行业中性目前仍是**板块中性**（`#76` §2 已注明）。

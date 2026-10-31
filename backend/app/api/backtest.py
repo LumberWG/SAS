@@ -123,6 +123,23 @@ class BacktestRequest(BaseModel):
     t_rebound_sell: float | None = Field(None, gt=0, description="反弹至跌幅小于此减1/4仓")
     t_limit_sell_half: bool | None = Field(None, description="涨停弱封板卖1/2")
     t_crash_guard: float | None = Field(None, gt=0, description="大盘当日跌幅超此暂停做T")
+    # ---- 打分层（路线 A：ML 截面排序，记录 #74~#78） ----
+    scoring_mode: str | None = Field(
+        None, description="打分口径：factors=14因子 / ml=ML截面分位 / ml_blend=与14因子融合"
+    )
+    ml_model: str | None = Field(
+        None, description="ML 模型：lightgbm（缺依赖自动回退 ridge）/ ridge"
+    )
+    ml_label_horizon: int | None = Field(None, ge=1, le=60, description="标签前瞻交易日数")
+    ml_blend: float | None = Field(None, ge=0, le=1, description="ml_blend 下 ML 分位权重")
+    ml_require_ic: float | None = Field(
+        None, description="OOS rank-IC 门槛，低于则整段回退 14 因子（默认 0）"
+    )
+    industry_neutral: bool | None = Field(None, description="ML 分位做行业内中性化")
+    # ---- 可交易性约束（记录 #73） ----
+    disable_limit_mask: bool | None = Field(
+        None, description="关闭涨跌停不可成交约束（仅用于量化 mask 贡献，线上永不开）"
+    )
 
 
 def _prune() -> None:
@@ -224,6 +241,16 @@ def _defaults_payload() -> dict:
         "t_rebound_sell": 0.0,
         "t_limit_sell_half": False,
         "t_crash_guard": 0.0,
+        # ---- 打分层：默认跟随实盘开关，避免「回测中心」与实盘两处各说一套 ----
+        # live_ml_scoring 打开时线上用 ML 分位排序，回测默认就该同口径；
+        # 想跑 14 因子基线对照，把这个下拉改回 factors 即可（其余参数不动）。
+        "scoring_mode": "ml" if bool(getattr(s, "live_ml_scoring", False)) else "factors",
+        "ml_model": "lightgbm",
+        "ml_label_horizon": 15,
+        "ml_blend": 0.5,
+        "ml_require_ic": 0.0,
+        "industry_neutral": False,
+        "disable_limit_mask": False,
     }
 
 

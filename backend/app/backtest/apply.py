@@ -91,7 +91,18 @@ SKIP_REASONS: dict[str, str] = {
     "exec_fill_minutes": "同 exec_fill：回测度量口径，实盘无对应配置",
     # ---- 切入点 ----
     "entry_window_minutes": "实盘是「开盘后 N 分钟内成交」（paper_buy_open_window_minutes），不是等回踩窗口",
+    # ---- 打分层（BACKTEST_LOG 记录 #74~#78）----
+    "ml_model": "实盘 live_ml 固定走 lightgbm + 行业中性（与 default_ml 同口径）；换模型只在回测里比较",
+    "ml_label_horizon": "实盘标签前瞻固定 15 个交易日（与策略中位持仓对齐）",
+    "ml_blend": "实盘只用纯 ML 分位排序，没有「与 14 因子加权融合」这一档",
+    "ml_require_ic": "实盘 OOS IC≤0 时自动回退 14 因子，门槛不可调",
+    "industry_neutral": "实盘固定做行业中性（live_ml 内写死），回测中心无法关闭",
+    "disable_limit_mask": "仅用于量化涨跌停 mask 的贡献（记录 #73），线上永远开启约束",
 }
+
+#: ``scoring_mode`` 的取值 → 实盘开关 ``live_ml_scoring``。
+#: 回测的三种口径里只有「是否用 ML 排序」能落盘，融合比例与模型选择都是回测专属。
+ML_SCORING_MODES: frozenset[str] = frozenset({"ml", "ml_blend"})
 
 
 def split_changes(changes: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, str]]]:
@@ -99,6 +110,10 @@ def split_changes(changes: dict[str, Any]) -> tuple[dict[str, Any], list[dict[st
     applied: dict[str, Any] = {}
     skipped: list[dict[str, str]] = []
     for key in sorted(changes):
+        # 打分层：回测是三选一的字符串，实盘只有一个布尔开关——按「是否用 ML 排序」折算
+        if key == "scoring_mode":
+            applied["live_ml_scoring"] = str(changes[key]) in ML_SCORING_MODES
+            continue
         target = BACKTEST_TO_SETTING.get(key)
         if target is None:
             skipped.append({"key": key, "reason": SKIP_REASONS.get(key, "实盘没有对应配置项")})
@@ -108,14 +123,19 @@ def split_changes(changes: dict[str, Any]) -> tuple[dict[str, Any], list[dict[st
 
 
 def persist_map() -> dict[str, Any]:
-    """落盘映射 + 当前实盘生效值（前端用它算「会改哪几项」的差异）。"""
+    """落盘映射 + 当前实盘生效值（前端用它算「会改哪几项」的差异）。
+
+    ``scoring_mode`` 也列进来：它是字符串三选一、落盘时折算成 ``live_ml_scoring``，
+    前端要靠这条映射才知道「改打分层会同步到实盘哪一项」（见 ``SELECT_TO_SWITCH``）。
+    """
     s = get_settings()
+    mapping = {**BACKTEST_TO_SETTING, "scoring_mode": "live_ml_scoring"}
     current = {}
-    for target in BACKTEST_TO_SETTING.values():
+    for target in set(mapping.values()):
         value = getattr(s, target, None)
         current[target] = value if isinstance(value, (bool, int, float, str)) else str(value)
     return {
-        "mapping": dict(BACKTEST_TO_SETTING),
+        "mapping": mapping,
         "skipped": dict(SKIP_REASONS),
         "current": current,
     }
