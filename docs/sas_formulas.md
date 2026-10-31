@@ -307,6 +307,11 @@ paper_position_lots(code, shares, cost_price, buy_date, tag)
 
 ### 4.9 做T引擎 `t_tick()`（真实 tick，默认全关）
 总开关 `paper_t_active`（默认 False），仓位比例 `paper_t_size`（默认 0.25）。
+
+**上线期口径（2026-10-31 复核）**：`config.py` 默认、`BACKTEST_LOG` #66、本节均要求关闭；某次「系统设置」操作
+把 `app_state.cfg:paper_t_active` 置成了 `1`（覆盖层优先级高于 `.env`/默认值，页面显示「运行时」），已改回 `false`。
+所以**判定某个开关是否生效要看 `/settings` 的 `source` 字段，不能只看 `.env` 或 `config.py` 默认值**——
+`cfg:` 覆盖层会静默压过它们。重开条件见 README §「做T引擎」：先有实测滑点，再用 `t_minute_path=True` 重跑配对实验。
 每个 tick 按持仓逐只判断，**每只票每个 tick 只做一个动作**（命中分支后 `continue`）：
 
 ```
