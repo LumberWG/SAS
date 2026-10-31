@@ -31,3 +31,7 @@ Thumbs.db
 # 本地临时文件
 cpolar_*.log
 *.log
+
+# 论文流水线中间产物：只留成品（论文_*.docx + LITERATURE_CONSENSUS.md），
+# stage1/stage2 的 html/md/yaml 是每轮重跑的中间态，入库只会让 diff 变吵
+/.docx_pipeline/
