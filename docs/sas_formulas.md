@@ -1,9 +1,10 @@
 # SAS 选股与下单逻辑 · 公式备查
 
-> 生成日期：2026-10-29（同步至 commit `c3d0c0c` 之后的实现）。
+> 生成日期：2026-10-29；最近修订：2026-10-31（同步至 commit `bdb84a1` 之后的实现）。
 > 代码出处：`backend/app/screener/scanner.py`、`analysis/recommender.py`、`analysis/factors.py`、
-> `strategies/builtin.py`、`data/scope.py`、`data/cache.py`、`data/minute.py`、
-> `paper/engine.py`、`paper/live.py`、`backtest/pipeline.py`、`config.py`。
+> `analysis/regime.py`、`analysis/policy_floor.py`、`data/breadth.py`、`strategies/builtin.py`、
+> `data/scope.py`、`data/cache.py`、`data/minute.py`、`paper/engine.py`、`paper/live.py`、
+> `backtest/pipeline.py`、`monitor/scheduler.py`、`main.py`、`config.py`。
 > 本文档用于归档当前实现的逻辑与公式，便于后续维护与回测对齐。
 
 ---
@@ -31,6 +32,9 @@
 - 建议层：`factors.py` 多因子加权打分，决定 buy/sell/hold。
 - 下单层：`paper/` 模拟盘，确定性公式计算费用、仓位、止盈止损、做T。
 - 持仓模型：**批次（lot）制**——每笔买入是一个带 `buy_date` 的批次，可卖股数由批次日期推导（严格 T+1）。
+- 风控层：静态 MA 弱市闸门（默认路径）→ 动态机制层（calm / weak / shock / crisis，可选）→
+  硬性回撤熔断（优先级最高，可选）。三者都只压低总仓位上限，不会放大；详见 §4.10。
+  涨跌家数广度（`data/breadth.py`）只做观测，**不参与任何判定**（见 `BACKTEST_LOG` #86）。
 
 ---
 
@@ -432,6 +436,23 @@ peak = max(历史峰值总资产, 当前总资产)；dd = 1 − 总资产 / peak
 - 峰值与触发态落 `app_state.paper_cb_state`（JSON），**跨重启保留**——否则重启后「忘了刚才跌过」
   就会立刻满仓接飞刀；
 - 关闭开关或任何异常 → 未触发（零风险）。
+
+**开关依赖与实现细节**（2026-10-31 代码复核）
+
+- `paper_policy_floor_enabled` **必须与 `paper_dynamic_exposure` 同开才生效**。托底强度是用来
+  修饰 weak/shock 的，而 weak/shock 由动态机制层产出：只开 floor 时引擎根本不调用
+  `_dynamic_regime()`，`/api/paper/live` 的 `floor` 恒为 `null`。设置页该项 tooltip 已标注这个依赖。
+- `detect_policy_floor` 的**必要条件阈值 `drop_thresh=5%` 目前不可配置**（代码内常量），
+  要改必须动源码并回测——不要误以为设置页能调。
+- 熔断的 `release` 若被填成 ≥ `trigger`（设置页逐字段校验，拦不住跨字段填反），引擎会静默收敛为
+  `trigger × 0.9`；否则状态机会在触发线附近每个 tick 翻转一次，表现为买入被反复暂停又放开。
+- 熔断状态**只在（峰值, 触发态）变化时落库**。tick 每 5 秒一次，每次都写会让 `sas.db` 的 WAL 无意义增长。
+- 动态机制层开启时，`/api/paper/live` 的 `weak` 字段**恒为 `null`**：此时静态 MA 闸门不参与决策，
+  若返回残留值，前端会同时显示「弱市压到 `weak_exposure`」和「机制层压到 `regime_cap`」两个矛盾数字。
+- **均线口径差一天（已知差异，不改）**：静态路径用 `rolling(n).mean().shift(1)` 再取前一交易日，
+  实际是「前两日价格算出的均线」；动态路径把截至前一日的序列整段喂给 `detect_regime` 重算，
+  是「前一日算出的均线」。两者都在无未来函数一侧，但严格程度不同。统一会改变线上判定、
+  需要重新回测，故只记录。
 
 ---
 
