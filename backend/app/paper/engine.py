@@ -723,6 +723,14 @@ class PaperEngine:
             results.append(TradeResult(
                 rec.code, pos["name"], "sell", sold, price, amount, fee,
                 getattr(rec, "reason", "卖出信号")))
+            # 同步内存里的持仓表：`positions` 决定本轮名额（`len(positions) >= max_positions`）
+            # 与轮动触发，卖了不减会让「卖了就买不进新票」——本轮全部报「持仓已满」，
+            # 要等下一轮 tick 才恢复。轮动分支早就 pop 了，这里之前漏了。
+            remaining = int(pos["shares"]) - sold
+            if remaining <= 0:
+                positions.pop(rec.code, None)
+            else:
+                positions[rec.code] = {**pos, "shares": remaining}
 
         # ---- 大盘择时买入闸门：弱市暂停自动买入与轮动（仅保留卖出） ----
         # 动态机制层（paper_dynamic_exposure）开启时，由 vol/回撤/趋势统一驱动降仓与暂停，
@@ -1338,14 +1346,30 @@ class PaperEngine:
     # 账户查询与结算
     # ------------------------------------------------------------------
     async def total_asset(self, prices: dict[str, float] | None = None) -> float:
-        """总资产 = 现金 + 持仓市值（按最新价）。"""
+        """总资产 = 现金 + 持仓市值（按最新价）。
+
+        **取价失败时按成本价计入**，与 :meth:`account_detail` 保持同一口径。这里原来
+        是「取不到价就跳过该持仓」（市值按 0 算）：一旦某只票的实时快照与 K 线**同时**
+        取不到（停牌、数据源熔断——2026-10-31 的日志里就有成片「降级为腾讯K线 / 熔断
+        300 秒」），一个 20% 仓位会瞬间从总资产里消失，8% 的组合回撤熔断当场误触发，
+        而且熔断状态会落库、跨重启保留。
+
+        回退成本价不是"美化净值"：它对浮亏是**中性**的（不涨不跌），比按 0 计市值
+        这种把未实现亏损一次性放大的做法更接近真实。取价失败本身会打 warning 留痕。
+        """
         account = self.ensure_account()
         cash = float(account["cash"])
         market_value = 0.0
         for pos in db.list_paper_positions():
+            shares = int(pos["shares"])
             price = await self._latest_price(pos["code"], prices)
-            if price is not None:
-                market_value += price * int(pos["shares"])
+            if price is None:
+                price = float(pos["cost_price"])
+                logger.warning(
+                    "总资产核算：%s 取价失败，按成本价 %.2f 计入市值（避免误触发熔断）",
+                    pos["code"], price,
+                )
+            market_value += price * shares
         return cash + market_value
 
     async def account_detail(self) -> dict:

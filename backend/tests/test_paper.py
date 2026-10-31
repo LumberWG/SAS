@@ -285,6 +285,49 @@ class TestExecute:
         assert db.get_paper_position("600004") is None
         assert db.get_paper_account()["cash"] > cash_before_sell  # 收回资金
 
+    def test_sell_frees_slot_for_same_batch_buy(self, engine):
+        """同批卖出要立刻腾出名额，否则「卖了就买不进」要等下一轮 tick。"""
+        eng, db, prices = engine
+        eng.settings.paper_max_positions = 1
+        eng.ensure_account()
+        db.add_paper_lot("600004", "测试A", 2000, 10.05, "2020-01-01", "突破")
+        db.update_paper_cash(80000.0)
+
+        results = asyncio.run(eng.execute_recommendations([
+            FakeRec("600004", "测试A", "sell", -4.0, "死叉"),
+            FakeRec("600001", "测试B", "buy", 45.0, "突破"),
+        ]))
+
+        sell = next(r for r in results if r.code == "600004")
+        buy = next(r for r in results if r.code == "600001")
+        assert sell.shares == 2000
+        # 名额只有 1 个：卖出那只是清仓，本轮就该能买新票
+        assert buy.side == "buy", buy.reason
+        assert db.get_paper_position("600001") is not None
+
+    def test_partial_sell_still_occupies_slot(self, engine):
+        """T+1 只能卖昨日批次时，剩余今仓仍占名额，本轮不再买新票。"""
+        from datetime import datetime
+
+        eng, db, prices = engine
+        eng.settings.paper_max_positions = 1
+        eng.ensure_account()
+        today = datetime.now().strftime("%Y-%m-%d")
+        db.add_paper_lot("600004", "测试A", 300, 10.0, "2020-01-01", "突破")
+        db.add_paper_lot("600004", "测试A", 200, 10.0, today, "突破", today=today)
+
+        results = asyncio.run(eng.execute_recommendations([
+            FakeRec("600004", "测试A", "sell", -4.0, "死叉"),
+            FakeRec("600001", "测试B", "buy", 45.0, "突破"),
+        ]))
+
+        sell = next(r for r in results if r.code == "600004")
+        buy = next(r for r in results if r.code == "600001")
+        assert sell.shares == 300                      # 只有昨日批次可卖
+        assert db.get_paper_position("600004")["shares"] == 200
+        assert buy.side == "skip"
+        assert "持仓已满" in buy.reason
+
     def test_t_plus_1_blocks_same_day_sell(self, engine):
         """当日买入不可卖出（T+1）。"""
         from datetime import datetime
@@ -396,6 +439,22 @@ class TestExecute:
         results = asyncio.run(eng.execute_recommendations(recs))
         amounts = {r.code: r.amount for r in results if r.side == "buy"}
         assert amounts["600010"] > max(v for k, v in amounts.items() if k != "600010")
+
+
+class TestAccountValuation:
+    def test_total_asset_falls_back_to_cost_price(self, engine, monkeypatch):
+        """取价失败按成本价计市值：不能让持仓凭空消失，否则回撤熔断误触发。"""
+        eng, db, _ = engine
+        eng.ensure_account()
+        db.upsert_paper_position("600004", "测试A", 2000, 10.05, "2020-01-01", "t")
+        db.update_paper_cash(80000.0)
+
+        async def no_price(code, quotes=None):
+            return None
+
+        monkeypatch.setattr(eng, "_latest_price", no_price)
+        total = asyncio.run(eng.total_asset())
+        assert total == pytest.approx(80000 + 2000 * 10.05, abs=0.01)
 
 
 class TestStopLossTarget:
