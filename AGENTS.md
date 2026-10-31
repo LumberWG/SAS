@@ -53,9 +53,18 @@ cd e:\Study\SAS\backend
 .\.venv\Scripts\python.exe scripts\live_review.py --md     # 实盘 vs 等权基准超额对账
 schtasks /run /tn SASRestart                            # 重启后端（无需 UAC）
 Get-Content e:\Study\SAS\backend\logs\backend.log -Tail 50  # 应用日志（业务判定在这）
+.\.venv\Scripts\python.exe scripts\backup_db.py         # 手动备份库（SQLite 在线 backup API）
+schtasks /run /tn SASDbBackup                           # 每日 15:50 的备份计划任务，立即触发
 ```
 
 服务：`SAS`（后端 :8000，nssm）、`SAS-frontend`（:8080）、`cpolar`（公网隧道）。
+
+**接口已启用访问令牌**：除 `/api/health` 外，所有 `/api/*` 都要带 `X-API-Token`
+（值在 `backend\.env` 的 `API_TOKEN`，不随仓库走）。不带会 **401**，别误判成服务挂了：
+
+```powershell
+Invoke-RestMethod -Headers @{'X-API-Token'='<令牌>'} http://127.0.0.1:8000/api/settings
+```
 
 ## 6. 当前状态（2026-10-31 收盘后）
 
@@ -66,10 +75,14 @@ Get-Content e:\Study\SAS\backend\logs\backend.log -Tail 50  # 应用日志（业
 | `paper_weak_exposure` | 0.3 | 弱市只降仓不全停（`#63`）；0 会让弱市零成交 |
 | `paper_dynamic_exposure` / `paper_policy_floor_enabled` / `paper_circuit_breaker_enabled` | 全 false | 机制层（`#84`/`#85`）已落地但**均未经配对回测**，需单开满 21 个交易日再判读 |
 | 影子策略 | 11-02 起每交易日 16:45 | `default` vs `default_ml` 落 `data/logs/shadow_live.json`，是「ML 能不能开」的证据来源 |
+| `API_TOKEN` | 已启用（2026-10-31） | 值只在 `backend\.env`；前端 401 时弹框输入，`/api/health` 豁免 |
+| `SASDbBackup` | 每日 15:50 | SQLite 在线 backup API → `D:\Backup\SAS\backups\`，保留 30 份 |
 
 ## 7. 数据与产物
 
 - 生产库：`D:\Backup\SAS\data\sas.db`（只读核对时用 `mode=ro`）。
 - K 线与指数：`D:\Backup\SAS\data\klines`，指数文件 `idx_sh000001.parquet`。
 - 应用日志：`backend\logs\backend.log`（10MB×5 轮转）；nssm 的 stderr 基本是空的，别只看那个。
+- 库备份：`D:\Backup\SAS\backups\sas-YYYYMMDD-HHMMSS.db`（保留 30 份）。**别用 `Copy-Item` 备份 WAL 库**，
+  要用 `scripts/backup_db.py`（在线 backup API）。
 - `.env` 在 `.gitignore` 里，不进仓库；发布基线写在 `.env.example`。

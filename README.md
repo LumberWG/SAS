@@ -436,6 +436,35 @@ nssm remove SAS confirm                # 卸载服务
   总仓位压到 30%」「live ML 无信号，回退 14 因子」这类**决定性判定只写在这里**——
   2026-10-31 复盘「为什么零成交」时就是缺这一层，只能靠重跑脚本反推。
 
+**访问令牌（2026-10-31 起启用）**
+
+站点经 cpolar 隧道公网可达，而 `POST /api/settings` 能改止损/交易开关、`/reset` 能还原全部参数、
+`/api/paper/*` 能下单——没有令牌时这些接口**任何人可调**。现在 `backend\.env` 里配了 `API_TOKEN`：
+
+- 所有 `/api/*` 需带 `X-API-Token` 头，**只有 `/api/health` 豁免**（部署脚本/监控探活不受影响）；
+- 前端自动携带（`api/index.ts` 请求拦截器），收到 **401** 会弹「需要访问令牌」输入框，
+  令牌存本机 `localStorage`（换设备/换浏览器要重输一次）；
+- 令牌只存在 `backend\.env`（被 `.gitignore`，且任何接口都不回显）。**忘了就回文件里看那一行**，
+  改完重启 `SAS` 服务生效；
+- 手工调接口要带 header：
+  `Invoke-RestMethod -Headers @{'X-API-Token'='<令牌>'} http://127.0.0.1:8000/api/settings`
+
+**数据库备份（每日 15:50，计划任务 `SASDbBackup`）**
+
+```powershell
+cd e:\Study\SAS\backend
+.\.venv\Scripts\python.exe scripts\backup_db.py            # 手动备份一次
+.\.venv\Scripts\python.exe scripts\backup_db.py --keep 60  # 改保留份数（默认 30）
+schtasks /run /tn SASDbBackup                              # 立即触发计划任务
+```
+
+- 用 SQLite **在线 backup API**（页级一致快照），**不是 `Copy-Item`**：库是 WAL 模式且服务一直在写，
+  直接复制文件可能拿到「主库已改、`-wal` 未合并」的半截状态，恢复时缺最近若干笔成交；
+- 落 `D:\Backup\SAS\backups\sas-YYYYMMDD-HHMMSS.db`，保留最近 **30** 份（每天一份 ≈ 一个月），
+  只清理自己产出的 `sas-*.db`，不碰目录里别的文件；
+- 为什么必须有：账本（`paper_account` / `paper_trades` / `paper_equity`）是唯一的实盘记录，
+  丢了就等于 `scripts/live_review.py` 的对账永久断档。
+
 **模式区分**：
 - **生产模式**（推荐，公网访问用）：只跑 `SAS` 服务一个进程，访问 http://127.0.0.1:8000
 - **开发模式**（改代码调试用）：`python start_dev.py`（前端 Vite HMR + 后端 `--reload` 自动重启），二者不要同时使用（8000 端口冲突）
