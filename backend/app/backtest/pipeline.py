@@ -770,8 +770,13 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
 
     # 大盘择时（regime）：用**前一交易日**上证指数收盘 vs MA(N) 判断强弱。
     # 当日盘中只能看到前一日收盘，所以统一 shift(1)，不留未来函数。
+    # ``regime_ma`` 为 None **或 0** 都表示「不启用大盘择时」：本项目 0 一律当关闭
+    # （与 max_hold_days / t_crash_guard 等一致）。此前只判 is not None，0 会被
+    # max(2, 0) 变成 MA2——等于偷偷开了一条几乎恒弱的 2 日均线，把仓位压到
+    # weak_exposure 却不报错，回测结果看起来像"策略失效"。
+    regime_on = params.regime_ma is not None and int(params.regime_ma) > 0
     regime: dict[str, bool] = {}
-    if params.regime_ma is not None:
+    if regime_on:
         idx_df = prepared.get("index")
         if idx_df is not None and not idx_df.empty:
             n = max(2, int(params.regime_ma))
@@ -1388,7 +1393,7 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
         if params.regime_tiers is not None:
             state = tiers_state.get(date, 3)
             day_exposure = exposure * float(params.regime_tiers[min(max(state, 0), 3)])
-        elif params.weak_exposure is not None and params.regime_ma is not None:
+        elif params.weak_exposure is not None and regime_on:
             if regime.get(date, True):
                 day_exposure = min(exposure, params.weak_exposure)
             elif ramp_days > 0:

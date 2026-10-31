@@ -26,6 +26,19 @@ from app.param_specs import update_settings
 logger = logging.getLogger("sas.api.backtest")
 router = APIRouter(prefix="/backtest", tags=["回测"])
 
+#: 这些参数在 :func:`_defaults_payload` 里用 **0** 表示「不启用」，而 ``PipelineParams``
+#: 用 **None** 表示「不启用」。以 defaults 为基底合并后若不转换，0 会被 pipeline 当成
+#: 「上限 0」这类极端约束——实测 ``entry_max_chase=0`` 等价于「开盘价只要高于信号价就放弃」，
+#: 把 121 个交易日的成交从 91 笔压到 5 笔，看起来像「策略几乎不交易」。
+#: 注意 ``weak_exposure=0`` 不在名单里：配合 ``regime_ma>0`` 时它就是「弱市全暂停」
+#: （``#63`` 的 0.0 档），语义必须保留。
+_ZERO_MEANS_OFF: tuple[str, ...] = (
+    "entry_max_chase", "entry_pullback", "entry_window_minutes",
+    "entry_confirm_minutes", "max_open_gain", "min_volume_ratio",
+    "min_turnover_rate", "breakeven_trigger", "trail_pct", "partial_tp_at",
+    "max_gain_5d", "stop_atr_mult", "queue_top_m", "t_crash_guard",
+)
+
 #: 内存任务表：job_id -> {status, created, elapsed, result, error}
 #: 结果同时落库（db.save_backtest），这里只负责「进行中」的进度查询
 _JOBS: dict[str, dict] = {}
@@ -84,9 +97,14 @@ class BacktestRequest(BaseModel):
     trail_pct: float | None = Field(None, gt=0, description="从高点回撤此比例即卖出（移动止损）")
     trail_arm: float | None = Field(None, ge=0, description="移动止损启用门槛（浮盈曾达）")
     # ---- 大盘择时 ----
-    regime_ma: int | None = Field(None, ge=2, le=250, description="大盘择时均线周期")
+    # ge 放到 0：0 = 关闭择时（pipeline 按 regime_on 判定）。原先 ge=2 会让
+    # 「关掉择时」这个合法诉求只能靠不传字段表达，而 /run 现在以 defaults 为基底，
+    # 不传就等于开——页面上就再也关不掉了。
+    regime_ma: int | None = Field(None, ge=0, le=250, description="大盘择时均线周期（0=关闭）")
     regime_fast_ma: int | None = Field(None, ge=2, le=250, description="择时快线周期")
-    weak_exposure: float | None = Field(None, gt=0, le=1, description="弱市总仓位上限（需 regime_ma）")
+    weak_exposure: float | None = Field(
+        None, ge=0, le=1, description="弱市总仓位上限（需 regime_ma>0；0=弱市全暂停）"
+    )
     regime_flat_below: bool | None = Field(None, description="最弱档清仓")
     regime_ramp_days: int | None = Field(None, ge=0, le=20, description="弱转强后爬坡天数（0=关闭）")
     dd_pause_at: float | None = Field(
@@ -343,6 +361,11 @@ async def run_backtest(req: BacktestRequest) -> dict:
     # dataclass 默认（scoring_mode=None→factors、regime_ma=0→完全不择时），
     # 与前端表单（由 /defaults 填满后整体提交）跑出来的根本不是同一套参数。
     kwargs = {**_defaults_payload(), **req.model_dump(exclude_none=True)}
+    # defaults 里的 0 = 「不启用」，这里换成 None 才是 PipelineParams 认的「不启用」
+    for _k in _ZERO_MEANS_OFF:
+        _v = kwargs.get(_k)
+        if _v is not None and not isinstance(_v, bool) and float(_v) == 0.0:
+            kwargs[_k] = None
     bp = kwargs.pop("board_prefixes", None)
     if bp is not None:
         kwargs["board_prefixes"] = tuple(bp)
