@@ -336,7 +336,11 @@ async def run_backtest(req: BacktestRequest) -> dict:
 
     # 所有非 None 字段透传给 PipelineParams（None=沿用线上配置）；
     # board_prefixes 在请求体里是 list，PipelineParams 要 tuple。
-    kwargs = req.model_dump(exclude_none=True)
+    # 以「线上口径」为基底，再用请求里显式给出的字段覆盖。
+    # 只用 req.model_dump(exclude_none=True) 的话，没传的字段会落到 PipelineParams 的
+    # dataclass 默认（scoring_mode=None→factors、regime_ma=0→完全不择时），
+    # 与前端表单（由 /defaults 填满后整体提交）跑出来的根本不是同一套参数。
+    kwargs = {**_defaults_payload(), **req.model_dump(exclude_none=True)}
     bp = kwargs.pop("board_prefixes", None)
     if bp is not None:
         kwargs["board_prefixes"] = tuple(bp)
