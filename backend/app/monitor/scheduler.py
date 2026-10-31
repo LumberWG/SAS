@@ -506,11 +506,34 @@ class MarketScheduler:
             if self.settings.kline_warmup_top_n > 0:
                 pool = await asyncio.to_thread(get_stock_pool)
                 codes = pool["code"].head(self.settings.kline_warmup_top_n).tolist()
-                return await screener_warmup(codes)
-            return await screener_warmup()
+                res = await screener_warmup(codes)
+            else:
+                res = await screener_warmup()
+            # K线补齐之后再回算广度：广度缓存依赖当日 bar，顺序反过来会少最后一天
+            res["breadth"] = await asyncio.to_thread(self._refresh_breadth)
+            return res
         except Exception as exc:  # noqa: BLE001
             logger.exception("K线预热失败")
             return {"error": str(exc)}
+
+    @staticmethod
+    def _refresh_breadth() -> dict:
+        """回算全市场涨跌家数缓存（约 10s，见 `app/data/breadth.py`）。
+
+        纯观测用途：给复盘回答「那天是普跌还是结构性下跌」。**不参与任何交易判定**——
+        曾经想用它区分 shock / 自由落体，但 4 年非重叠样本只有 5 个、方向还不稳定，
+        见 `BACKTEST_LOG` #86。失败只记录，不影响预热结果。
+        """
+        from app.data.breadth import refresh
+
+        try:
+            out = refresh()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("广度缓存刷新失败: %s", exc)
+            return {"error": str(exc)}
+        if out.empty:
+            return {"error": "无数据"}
+        return {"days": len(out), "last": str(out.index[-1])}
 
     async def _warmup_stale(self) -> dict:
         """开机轻量预热：扫一遍本地缓存，只拉落后于最新交易日的股票。"""

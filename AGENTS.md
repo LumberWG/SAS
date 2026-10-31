@@ -81,6 +81,7 @@ Invoke-RestMethod -Headers @{'X-API-Token'='<令牌>'} http://127.0.0.1:8000/api
 | 影子策略 | 11-02 起每交易日 16:45 | `default` vs `default_ml` 落 `data/logs/shadow_live.json`，是「ML 能不能开」的证据来源 |
 | `API_TOKEN` | 已启用（2026-10-31） | 值只在 `backend\.env`；前端 401 时弹框输入，`/api/health` 豁免 |
 | `SASDbBackup` | 每日 15:50 | SQLite 在线 backup API → `D:\Backup\SAS\backups\`，保留 30 份 |
+| 涨跌家数广度 | 每日 16:00 刷新，**仅观测** | `app/data/breadth.py` → `data\breadth_daily.parquet`。曾想用它区分 shock/自由落体，实测 4 年非重叠只有 5 个样本、方向还不稳（`#86`），**不进任何判定** |
 
 ## 7. 数据与产物
 
