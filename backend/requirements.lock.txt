@@ -1,0 +1,81 @@
+# SAS 后端依赖锁定清单（pip freeze 生成，勿手工编辑）
+#
+# 用途：CI 与「复现历史结论」时安装这一份，而不是 requirements.txt 的 >= 下限。
+#   安装：cd backend && .venv\Scripts\pip install -r requirements.lock.txt
+#   重新生成：.venv\Scripts\pip freeze > requirements.lock.txt 后补回本段注释
+#             （改依赖前先读 CONTRIBUTING「依赖变更」）
+#
+# 为什么必须锁：BACKTEST_LOG #76 的 LightGBM 结论依赖具体版本，
+# app/backtest/ml_scorer.py 的 _resolve_model 不做版本校验——换版本等于换模型，
+# 不锁版本就复现不出当时的收益（记录 #74 Ridge 中位 -0.33pp vs #76 +4.55pp）。
+# 平台：本文件由 Windows + CPython 3.12 冻结；Linux 上若某版本无对应 wheel 请提 issue。
+akshare==1.19.1
+annotated-doc==0.0.5
+annotated-types==0.8.0
+anyio==4.15.1
+APScheduler==3.11.3
+baostock==0.9.4
+beautifulsoup4==4.15.0
+certifi==2026.10.19
+cffi==2.1.1
+charset-normalizer==3.5.2
+click==8.5.0
+cloudpickle==3.1.2
+colorama==0.4.6
+cryptography==50.0.2
+curl_cffi==0.16.3
+decorator==5.3.1
+et_xmlfile==2.0.0
+fastapi==0.152.0
+h11==0.16.0
+html5lib==1.1
+httpcore==1.0.9
+httptools==0.9.0
+httpx==0.28.1
+idna==3.20
+iniconfig==2.3.1
+joblib==1.6.0
+jsonpath==0.82.2
+lightgbm==4.7.0
+lxml==6.1.3
+mini-racer==0.14.1
+narwhals==2.28.0
+numpy==2.5.4
+openpyxl==3.1.5
+opentelemetry-api==1.45.1
+packaging==26.3
+pandas==3.0.6
+pluggy==1.7.0
+pyarrow==26.0.0
+pycparser==3.11
+pydantic==2.14.1
+pydantic-settings==2.16.1
+pydantic_core==2.50.1
+Pygments==2.21.0
+PySocks==1.7.1
+pytdx==1.72
+pytest==9.1.1
+pytest-asyncio==1.4.0
+python-dateutil==2.9.0.post0
+python-dotenv==1.2.4
+PyYAML==6.0.3
+requests==2.34.2
+ruff==0.17.3
+scikit-learn==1.9.1
+scipy==1.18.1
+six==1.17.0
+soupsieve==3.0.3
+starlette==1.9.0
+tabulate==0.10.0
+threadpoolctl==3.7.0
+tqdm==4.70.1
+typing-inspection==0.4.4
+typing_extensions==4.16.0
+tzdata==2026.5
+tzlocal==5.4.4
+urllib3==2.8.0
+uvicorn==0.54.0
+watchfiles==1.3.0
+webencodings==0.6.1
+websockets==17.3
+xlrd==2.0.2

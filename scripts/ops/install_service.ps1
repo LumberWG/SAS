@@ -1,6 +1,6 @@
 # Register SAS backend as a Windows service (auto-start on boot + auto-restart on crash)
 # Usage (Administrator required):
-#   powershell -ExecutionPolicy Bypass -File e:\Study\SAS\install_service.ps1
+#   powershell -ExecutionPolicy Bypass -File e:\Study\SAS\scripts\ops\install_service.ps1
 #
 # What it does:
 #   - Registers 'SAS' service via NSSM (uvicorn production mode, serves frontend dist)

@@ -1,0 +1,87 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 420" width="760" height="420" role="img" aria-label="SAS 分层架构示意">
+  <style>
+    text { font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; fill: #1f2937; }
+    .band { fill: #ffffff; stroke: #e5e7eb; stroke-width: 1; }
+    .box  { fill: #f3f4f6; stroke: #d1d5db; stroke-width: 1; }
+    .box2 { fill: #eef2ff; stroke: #c7d2fe; stroke-width: 1; }
+    .lbl  { font-size: 12px; font-weight: 600; }
+    .t    { font-size: 12px; }
+    .s    { font-size: 10.5px; fill: #4b5563; }
+    .cap  { font-size: 10.5px; fill: #6b7280; }
+  </style>
+
+  <rect width="760" height="420" fill="#fbfbfd"/>
+
+  <!-- 层说明 -->
+  <text class="cap" x="24" y="26">SAS — 分层架构（数据自下而上，请求自上而下）</text>
+  <text class="cap" x="24" y="42">实线框 = 代码模块；每层都能单独跑测试，日志统一落 backend/logs/backend.log</text>
+
+  <!-- L1 前端 -->
+  <rect class="band" x="24" y="58" width="712" height="72" rx="8"/>
+  <text class="lbl" x="40" y="80">① 前端</text>
+  <text class="s"   x="40" y="98">Vue 3 + TypeScript + Vite + Tailwind</text>
+  <rect class="box" x="232" y="70" width="150" height="46" rx="6"/>
+  <text class="t" x="247" y="90">7 个页面</text>
+  <text class="s" x="247" y="106">仪表盘/选股/回测/模拟盘…</text>
+  <rect class="box" x="394" y="70" width="150" height="46" rx="6"/>
+  <text class="t" x="409" y="90">Pinia store</text>
+  <text class="s" x="409" y="106">行情/认证/主题/通知</text>
+  <rect class="box" x="556" y="70" width="164" height="46" rx="6"/>
+  <text class="t" x="571" y="90">TokenGate</text>
+  <text class="s" x="571" y="106">401 时弹框输入令牌</text>
+
+  <!-- L2 接口 -->
+  <rect class="band" x="24" y="142" width="712" height="72" rx="8"/>
+  <text class="lbl" x="40" y="164">② 接口层</text>
+  <text class="s"   x="40" y="182">FastAPI</text>
+  <rect class="box2" x="232" y="154" width="150" height="46" rx="6"/>
+  <text class="t" x="247" y="174">13 个路由模块</text>
+  <text class="s" x="247" y="190">除 /api/health 全部要令牌</text>
+  <rect class="box2" x="394" y="154" width="150" height="46" rx="6"/>
+  <text class="t" x="409" y="174">参数单一写入层</text>
+  <text class="s" x="409" y="190">app_state 覆盖 &gt; .env</text>
+  <rect class="box2" x="556" y="154" width="164" height="46" rx="6"/>
+  <text class="t" x="571" y="174">审计</text>
+  <text class="s" x="571" y="190">settings_audit_*.jsonl</text>
+
+  <!-- L3 业务 -->
+  <rect class="band" x="24" y="226" width="712" height="88" rx="8"/>
+  <text class="lbl" x="40" y="248">③ 业务层</text>
+  <text class="s"   x="40" y="266">纯 Python，</text>
+  <text class="s"   x="40" y="282">可离线单测</text>
+  <rect class="box" x="140" y="238" width="112" height="62" rx="6"/>
+  <text class="t" x="152" y="258">screener</text>
+  <text class="s" x="152" y="274">全市场</text>
+  <text class="s" x="152" y="289">并发扫描</text>
+  <rect class="box" x="262" y="238" width="112" height="62" rx="6"/>
+  <text class="t" x="274" y="258">analysis</text>
+  <text class="s" x="274" y="274">14 因子</text>
+  <text class="s" x="274" y="289">打分/建议</text>
+  <rect class="box" x="384" y="238" width="112" height="62" rx="6"/>
+  <text class="t" x="396" y="258">backtest</text>
+  <text class="s" x="396" y="274">pipeline</text>
+  <text class="s" x="396" y="289">配对/随机段</text>
+  <rect class="box" x="506" y="238" width="112" height="62" rx="6"/>
+  <text class="t" x="518" y="258">paper</text>
+  <text class="s" x="518" y="274">模拟盘引擎</text>
+  <text class="s" x="518" y="289">T+1 批次</text>
+  <rect class="box" x="628" y="238" width="92" height="62" rx="6"/>
+  <text class="t" x="640" y="258">monitor</text>
+  <text class="s" x="640" y="274">APScheduler</text>
+  <text class="s" x="640" y="289">7 个时点</text>
+
+  <!-- L4 数据 -->
+  <rect class="band" x="24" y="326" width="712" height="72" rx="8"/>
+  <text class="lbl" x="40" y="348">④ 数据层</text>
+  <text class="s"   x="40" y="366">外部依赖只在</text>
+  <text class="s"   x="40" y="382">这一层出现</text>
+  <rect class="box" x="232" y="338" width="220" height="46" rx="6"/>
+  <text class="t" x="247" y="358">akshare / baostock</text>
+  <text class="s" x="247" y="374">实时快照 + 日线/分钟线（可代理）</text>
+  <rect class="box" x="464" y="338" width="124" height="46" rx="6"/>
+  <text class="t" x="479" y="358">parquet 缓存</text>
+  <text class="s" x="479" y="374">K线增量</text>
+  <rect class="box" x="600" y="338" width="120" height="46" rx="6"/>
+  <text class="t" x="615" y="358">SQLite (WAL)</text>
+  <text class="s" x="615" y="374">在线 backup API</text>
+</svg>

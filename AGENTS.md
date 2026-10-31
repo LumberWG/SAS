@@ -2,8 +2,17 @@
 
 本文件是**跨工具交接约定**。不管是 CodeBuddy、WorkBuddy 还是别的工具，进仓库先读这里，
 再读 `README.md`（功能）/ `WORKLOG.md`（策略）/ `BACKTEST_LOG.md`（实验）。
+**对外贡献规则**（含从第 4 节提升为硬约束的口径红线）见 `CONTRIBUTING.md`；
+本仓库以 [MIT](LICENSE) 授权。
 
 最后更新：2026-10-31
+
+## 0. 根目录脚本不要随便搬
+
+`serve_frontend.py`（nssm 服务 `SAS-frontend` 入口）、`deploy.ps1` / `restart-backend.ps1` /
+`run-hidden.vbs`（计划任务 `SASDeploy` / `SASRestart` 的入口）、`install-silent-deploy.*`
+（一次性注册上面两个任务）——这些文件的**绝对路径写死在服务与计划任务里**，挪走会静默失效。
+其余运维脚本已收进 `scripts/ops/`，开发脚本在 `scripts/dev/`。
 
 ## 1. 只有一份工作区，不要在别处再 clone
 
@@ -52,7 +61,8 @@ git -c user.name=LumberWG -c user.email=663589316@qq.com commit -m "..."
 
 ```powershell
 cd e:\Study\SAS\backend
-.\.venv\Scripts\python.exe -m pytest tests -q          # 全量单测（当前 310 passed）
+.\.venv\Scripts\python.exe -m pytest tests -q          # 全量单测（当前 320 passed，全离线，约 35s）
+.\.venv\Scripts\python.exe -m ruff check .             # 代码检查（配置在 backend\pyproject.toml）
 .\.venv\Scripts\python.exe scripts\weekly_review.py --md   # 周度复盘（零成交归因）
 .\.venv\Scripts\python.exe scripts\live_review.py --md     # 实盘 vs 等权基准超额对账
 schtasks /run /tn SASRestart                            # 重启后端（无需 UAC）

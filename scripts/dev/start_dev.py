@@ -5,7 +5,9 @@ import time
 import urllib.request
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent
+#: 本文件在 scripts/dev/ 下，仓库根目录要往上两级
+#: （2026-10-31 从根目录移入，之前是 .parent，移动后必须改，否则会去 scripts/dev/backend 找解释器）
+ROOT = Path(__file__).resolve().parents[2]
 BACKEND = str(ROOT / "backend")
 FRONTEND = str(ROOT / "frontend")
 PYTHON = str(Path(BACKEND) / ".venv" / "Scripts" / "python.exe")

@@ -1,5 +1,5 @@
 ﻿# 一次性安装：注册静默部署任务 SASDeploy（必须以管理员身份运行）
-# 装好之后，双击 deploy-silent.vbs 即可部署，不弹窗口、不弹 UAC。
+# 装好之后，双击 scripts\ops\deploy-silent.vbs 即可部署，不弹窗口、不弹 UAC。
 # 日志：D:\Backup\SAS\data\logs\deploy.log
 $ErrorActionPreference = 'Stop'
 
@@ -45,7 +45,7 @@ Register-ScheduledTask -TaskName $TaskName -Action $action -Principal $runAs `
     -Description 'SAS 静默部署：构建前端 + 重启服务 + 健康检查（无窗口、无 UAC）' | Out-Null
 
 Write-Host ('[OK] 已注册计划任务 ' + $TaskName) -ForegroundColor Green
-Write-Host ('     入口：' + (Join-Path $Root 'deploy-silent.vbs') + '（双击即可，无窗口）') -ForegroundColor Gray
+Write-Host ('     入口：' + (Join-Path $Root 'scripts\ops\deploy-silent.vbs') + '（双击即可，无窗口）') -ForegroundColor Gray
 Write-Host ('     日志：' + (Join-Path $Root 'data\logs\deploy.log')) -ForegroundColor Gray
 Write-Host ('     手动触发：schtasks /run /tn ' + $TaskName) -ForegroundColor Gray
 
@@ -60,7 +60,7 @@ if (Test-Path $RestartScript) {
         -Description 'SAS 静默重启后端：仅重启 SAS 服务 + 健康检查（无窗口、无 UAC）' | Out-Null
 
     Write-Host ('[OK] 已注册计划任务 ' + $RestartTaskName) -ForegroundColor Green
-    Write-Host ('     入口：' + (Join-Path $Root 'restart-backend.vbs') + '（双击即可，无窗口）') -ForegroundColor Gray
+    Write-Host ('     入口：' + (Join-Path $Root 'scripts\ops\restart-backend.vbs') + '（双击即可，无窗口）') -ForegroundColor Gray
     Write-Host ('     日志：' + (Join-Path $Root 'data\logs\restart.log')) -ForegroundColor Gray
     Write-Host ('     手动触发：schtasks /run /tn ' + $RestartTaskName) -ForegroundColor Gray
 } else {

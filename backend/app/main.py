@@ -32,7 +32,7 @@ LOG_FILE = BASE_DIR / "backend" / "logs" / "backend.log"
 def _setup_file_logging() -> Path | None:
     """把日志同时落一份文件，返回日志路径（失败返回 None，不影响启动）。
 
-    为什么必须：服务由 `restart_backend.bat` / vbs 以**隐藏窗口**启动，stderr 无人接收，
+    为什么必须：服务由 `restart-backend.ps1`（经 `run-hidden.vbs` 隐藏窗口）启动，stderr 无人接收，
     于是「评分 xx<25，仅记录不下单」「live ML 无信号，回退 14 因子」这类**决定性判定
     全部只活在内存里**。2026-10-31 复盘「为什么零成交」时，只能靠重跑脚本反推，
     就是因为这里缺一环。

@@ -1,0 +1,78 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 300" width="760" height="300" role="img" aria-label="SAS 交易日调度时间轴">
+  <style>
+    text { font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; fill: #1f2937; }
+    .card { fill: #ffffff; stroke: #d1d5db; stroke-width: 1; }
+    .hot  { fill: #eef2ff; stroke: #c7d2fe; stroke-width: 1; }
+    .time { font-size: 13px; font-weight: 700; fill: #3730a3; }
+    .name { font-size: 11.5px; font-weight: 600; }
+    .desc { font-size: 10px; fill: #4b5563; }
+    .cap  { font-size: 10.5px; fill: #6b7280; }
+  </style>
+
+  <rect width="760" height="300" fill="#fbfbfd"/>
+  <text class="cap" x="24" y="24">一个交易日：调度器实际注册的时点（backend/app/monitor/scheduler.py）</text>
+  <text class="cap" x="24" y="40">左侧浅蓝 = 交易时段内按间隔跑；其余为 cron（交易日 mon–fri，时区取配置）</text>
+
+  <!-- 时间轴 -->
+  <line x1="40" y1="196" x2="724" y2="196" stroke="#9ca3af" stroke-width="1.5"/>
+  <polygon points="724,196 714,192 714,200" fill="#9ca3af"/>
+  <text class="cap" x="40" y="216">09:00</text>
+  <text class="cap" x="352" y="216">11:30 / 13:00 午休</text>
+  <text class="cap" x="668" y="216">17:00</text>
+
+  <!-- 09:20 -->
+  <line x1="80" y1="196" x2="80" y2="176" stroke="#9ca3af"/>
+  <rect class="card" x="40" y="96" width="112" height="80" rx="6"/>
+  <text class="time" x="52" y="116">09:20</text>
+  <text class="name" x="52" y="134">开盘前分析</text>
+  <text class="desc" x="52" y="150">自选股 + 指数</text>
+  <text class="desc" x="52" y="164">生成当日建议</text>
+
+  <!-- 盘中 -->
+  <line x1="248" y1="196" x2="248" y2="176" stroke="#c7d2fe"/>
+  <rect class="hot" x="166" y="60" width="164" height="116" rx="6"/>
+  <text class="time" x="178" y="80">09:30–15:00</text>
+  <text class="name" x="178" y="98">盘中每 1 分钟</text>
+  <text class="desc" x="178" y="114">自选股分析出信号</text>
+  <text class="name" x="178" y="134">撮合每 5 秒</text>
+  <text class="desc" x="178" y="150">买窗口仅开盘后 5 分钟</text>
+  <text class="desc" x="178" y="164">卖出 / 止盈止损全天</text>
+
+  <!-- 15:30 -->
+  <line x1="392" y1="196" x2="392" y2="176" stroke="#9ca3af"/>
+  <rect class="card" x="352" y="96" width="112" height="80" rx="6"/>
+  <text class="time" x="364" y="116">15:30</text>
+  <text class="name" x="364" y="134">收盘选股</text>
+  <text class="desc" x="364" y="150">全市场扫描</text>
+  <text class="desc" x="364" y="164">TopN 入自选</text>
+
+  <!-- 15:35 -->
+  <line x1="496" y1="196" x2="496" y2="176" stroke="#9ca3af"/>
+  <rect class="card" x="464" y="96" width="112" height="80" rx="6"/>
+  <text class="time" x="476" y="116">15:35</text>
+  <text class="name" x="476" y="134">盘后分析</text>
+  <text class="desc" x="476" y="150">生成次日关注</text>
+
+  <!-- 15:40 -->
+  <line x1="600" y1="196" x2="600" y2="176" stroke="#9ca3af"/>
+  <rect class="card" x="576" y="96" width="112" height="80" rx="6"/>
+  <text class="time" x="588" y="116">15:40</text>
+  <text class="name" x="588" y="134">收盘结算</text>
+  <text class="desc" x="588" y="150">净值快照 + 择时</text>
+  <text class="desc" x="588" y="164">兜底止盈止损</text>
+
+  <!-- 16:00 / 16:45 -->
+  <line x1="700" y1="196" x2="700" y2="176" stroke="#9ca3af"/>
+  <rect class="card" x="688" y="60" width="60" height="116" rx="6"/>
+  <text class="time" x="698" y="80">16:00</text>
+  <text class="desc" x="698" y="96">K线预热</text>
+  <text class="desc" x="698" y="110">广度刷新</text>
+  <text class="time" x="698" y="134">16:45</text>
+  <text class="desc" x="698" y="150">影子账户</text>
+  <text class="desc" x="698" y="164">default vs ML</text>
+
+  <!-- 底部旁白 -->
+  <rect x="24" y="240" width="712" height="44" rx="6" fill="#f9fafb" stroke="#e5e7eb"/>
+  <text class="desc" x="38" y="258">另有两条常驻间隔任务：快照刷新 60s、异动检测 5min（涨跌停 / 放量突破 / 急涨急跌）。</text>
+  <text class="desc" x="38" y="274">所有时点都在设置页可调；改完下一个 tick 生效，无需重启服务。</text>
+</svg>

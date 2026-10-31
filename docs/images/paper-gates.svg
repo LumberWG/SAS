@@ -1,0 +1,88 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 380" width="760" height="380" role="img" aria-label="模拟盘下单链路与买入闸门">
+  <style>
+    text { font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif; fill: #1f2937; }
+    .step { fill: #ffffff; stroke: #d1d5db; stroke-width: 1; }
+    .key  { fill: #eef2ff; stroke: #c7d2fe; stroke-width: 1; }
+    .sell { fill: #fef2f2; stroke: #fecaca; stroke-width: 1; }
+    .h    { font-size: 12px; font-weight: 700; }
+    .t    { font-size: 11px; }
+    .s    { font-size: 9.5px; fill: #4b5563; }
+    .cap  { font-size: 10.5px; fill: #6b7280; }
+  </style>
+
+  <rect width="760" height="380" fill="#fbfbfd"/>
+  <text class="cap" x="24" y="24">模拟盘一轮撮合：卖出先跑（释放资金与名额），再逐级过滤买入候选</text>
+  <text class="cap" x="24" y="40">框内小字是命中后写进结果里的 skip 原因——「为什么没买」在界面上直接可读</text>
+
+  <!-- 卖出 -->
+  <rect class="sell" x="24" y="58" width="180" height="88" rx="6"/>
+  <text class="h" x="38" y="78">① 卖出（最高优先）</text>
+  <text class="s" x="38" y="96">T+1：只卖 buy_date &lt; 今天</text>
+  <text class="s" x="38" y="111">的批次，FIFO 最老先卖</text>
+  <text class="s" x="38" y="126">成交后立即腾出持仓名额</text>
+  <text class="s" x="38" y="139">（本轮就能买新票）</text>
+
+  <!-- 闸门 -->
+  <rect class="key" x="220" y="58" width="180" height="88" rx="6"/>
+  <text class="h" x="234" y="78">② 大盘闸门</text>
+  <text class="s" x="234" y="96">弱市 / 机制层 / 回撤熔断</text>
+  <text class="s" x="234" y="111">只压「总仓位上限」</text>
+  <text class="s" x="234" y="126">全暂停档才拒买</text>
+
+  <rect class="step" x="416" y="58" width="180" height="88" rx="6"/>
+  <text class="h" x="430" y="78">③ 准入五道闸</text>
+  <text class="s" x="430" y="96">北交所 / 板块范围 /</text>
+  <text class="s" x="430" y="111">大市值 / 名称可信 /</text>
+  <text class="s" x="430" y="126">当日成交额 TopN 池</text>
+
+  <rect class="step" x="612" y="58" width="124" height="88" rx="6"/>
+  <text class="h" x="626" y="78">④ 切入点</text>
+  <text class="s" x="626" y="96">不追高</text>
+  <text class="s" x="626" y="111">回踩未到位</text>
+  <text class="s" x="626" y="126">→ 等待，不丢弃</text>
+
+  <!-- 第二行 -->
+  <rect class="step" x="24" y="166" width="180" height="88" rx="6"/>
+  <text class="h" x="38" y="186">⑤ 评分分档</text>
+  <text class="s" x="38" y="204">&lt; 25 分：只记录不下单</text>
+  <text class="s" x="38" y="219">25–40：权重打 5 折</text>
+  <text class="s" x="38" y="234">≥ 40：全额权重</text>
+
+  <rect class="key" x="220" y="166" width="180" height="88" rx="6"/>
+  <text class="h" x="234" y="186">⑥ 名额与预算</text>
+  <text class="s" x="234" y="204">名额 = 上限 − 现有持仓</text>
+  <text class="s" x="234" y="219">预算受总仓位（80%）</text>
+  <text class="s" x="234" y="234">扣减，只在高分股间分</text>
+
+  <rect class="step" x="416" y="166" width="180" height="88" rx="6"/>
+  <text class="h" x="430" y="186">⑦ 单票上限与整手</text>
+  <text class="s" x="430" y="204">单票 ≤ 总资产 20%</text>
+  <text class="s" x="430" y="219">股数向下取整到 100 股</text>
+  <text class="s" x="430" y="234">费用超现金则逐手回退</text>
+
+  <rect class="step" x="612" y="166" width="124" height="88" rx="6"/>
+  <text class="h" x="626" y="186">⑧ 成交落库</text>
+  <text class="s" x="626" y="204">批次 + 流水</text>
+  <text class="s" x="626" y="219">含费成本价</text>
+  <text class="s" x="626" y="234">止损线一次定死</text>
+
+  <!-- 箭头 -->
+  <g stroke="#9ca3af" fill="none" stroke-width="1.2">
+    <path d="M204 102 H216"/><path d="M400 102 H412"/><path d="M596 102 H608"/>
+    <path d="M674 150 V162"/><path d="M608 210 H600"/><path d="M396 210 H404"/><path d="M200 210 H216"/>
+  </g>
+  <g fill="#9ca3af">
+    <polygon points="220,102 212,98 212,106"/><polygon points="416,102 408,98 408,106"/>
+    <polygon points="612,102 604,98 604,106"/><polygon points="674,166 670,158 678,158"/>
+    <polygon points="596,210 604,206 604,214"/><polygon points="400,210 408,206 408,214"/>
+    <polygon points="220,210 212,206 212,214"/>
+  </g>
+
+  <!-- 底部 -->
+  <rect x="24" y="270" width="712" height="88" rx="6" fill="#f9fafb" stroke="#e5e7eb"/>
+  <text class="t" x="38" y="290">没成交也要能解释：每一条被拒的候选都会带一个具体原因，界面「切入点判定」面板直接展示。</text>
+  <text class="s" x="38" y="308">典型假结论：「线上买不进任何票」。先查是不是 14 因子喂了没有指标的 frame（bias6/atr 缺失 →</text>
+  <text class="s" x="38" y="322">多数因子退化为 0、总分被压进 ±20，全部低于 25 分档），而不是去调阈值。</text>
+  <text class="s" x="38" y="340">另一类：弱市闸门把全部买单打成 skip。看 GET /api/paper/live 的 regime.paused_count 与</text>
+  <text class="s" x="38" y="354">每日结算落库的 paper_regime_state:日期，能把「被拦」与「本来没信号」区分开。</text>
+</svg>

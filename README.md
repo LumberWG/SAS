@@ -4,6 +4,44 @@
 
 > **免责声明：本系统仅供学习研究使用，所有数据与结论不构成任何投资建议。股市有风险，投资需谨慎。**
 
+## 速览
+
+三张示意图把「代码长什么样 / 一天怎么跑 / 下单为什么没成交」讲完（可点开放大）：
+
+| 分层架构 | 交易日时间轴 | 下单链路与买入闸门 |
+| --- | --- | --- |
+| [![分层架构](docs/images/architecture.svg)](docs/images/architecture.svg) | [![交易日时间轴](docs/images/daily-timeline.svg)](docs/images/daily-timeline.svg) | [![下单链路](docs/images/paper-gates.svg)](docs/images/paper-gates.svg) |
+
+> 上述为**示意图**（按 `backend/app` 实际模块与 `scheduler.py` 实际时点绘制），不是界面截图。
+> 界面截图欢迎提 PR 放进 `docs/images/`——请避免露出真实账户金额与密钥。
+
+## 快速开始（Windows，约 5 分钟）
+
+```powershell
+git clone https://github.com/LumberWG/SAS.git
+cd SAS
+
+# 1) 后端
+cd backend
+python -m venv .venv
+.venv\Scripts\pip install -r requirements.txt     # 要严格复现历史结论，改装 requirements.lock.txt
+copy .env.example .env                             # 按需改 API_TOKEN / 数据目录 / LLM
+.venv\Scripts\python -m uvicorn app.main:app --host 127.0.0.1 --port 8000
+
+# 2) 前端（另开一个终端，回到仓库根目录）
+cd ..\frontend
+npm ci
+npm run dev                                        # → http://localhost:5173
+```
+
+- **首次启动会构建 K 线缓存**（全市场日线，耗时数分钟；分钟线需 `backend\scripts\preload_minutes*.py` 另行拉取），
+  期间选股 / 回测结果偏少是正常的，别急着判定「策略无效」。
+- 只想一条命令起前后端：`python scripts\dev\start_dev.py`（含端口清理与健康检查，前端 HMR + 后端 `--reload`）。
+- `API_TOKEN` 留空时接口不校验令牌；**一旦设置**，除 `/api/health` 外所有 `/api/*` 都要带 `X-API-Token`，
+  前端会弹框让你输入（浏览器本地保存）。curl 调试记得加 `-H "X-API-Token: ..."`。
+- 还要配 LLM / 通知 / 数据源代理？见下文「完整安装与配置」；生产部署（nssm 服务 + 计划任务）
+  见「代码更新流程」。
+
 ## 功能总览
 
 | 模块 | 能力 |
@@ -293,7 +331,9 @@ python -c "import secrets; print(secrets.token_urlsafe(24))"   # 生成一个
 └─────────────────────────────────────────────────────────────┘
 ```
 
-## 快速开始
+## 完整安装与配置
+
+> 上面的「快速开始」是最短可跑路径；这里补齐 LLM / 通知 / Linux 差异等可选项。
 
 ### 1. 后端
 
@@ -412,8 +452,8 @@ K线：东方财富(akshare) → 雪球(0.07s，真实成交额) → 腾讯(prox
 生产环境建议把后端注册为系统服务，实现开机自启与进程崩溃自动重启：
 
 ```powershell
-# 管理员 PowerShell（或右键 install_service.ps1 → 使用 PowerShell 运行）
-powershell -ExecutionPolicy Bypass -File e:\Study\SAS\install_service.ps1
+# 管理员 PowerShell（或右键 scripts\ops\install_service.ps1 → 使用 PowerShell 运行）
+powershell -ExecutionPolicy Bypass -File e:\Study\SAS\scripts\ops\install_service.ps1
 ```
 
 脚本自动完成：
@@ -460,7 +500,7 @@ schtasks /run /tn SASDbBackup                              # 立即触发计划�
 
 **模式区分**：
 - **生产模式**（推荐，公网访问用）：只跑 `SAS` 服务一个进程，访问 http://127.0.0.1:8000
-- **开发模式**（改代码调试用）：`python start_dev.py`（前端 Vite HMR + 后端 `--reload` 自动重启），二者不要同时使用（8000 端口冲突）
+- **开发模式**（改代码调试用）：`python scripts\dev\start_dev.py`（前端 Vite HMR + 后端 `--reload` 自动重启），二者不要同时使用（8000 端口冲突）
 
 ### 8. 扫描加速（默认范围 + K线预热）
 
@@ -568,7 +608,7 @@ powershell -ExecutionPolicy Bypass -File e:\Study\SAS\deploy.ps1
 git add -A && git commit -m "..." && git push
 ```
 
-**开发调试期**（不想反复构建/重启）：用 `python start_dev.py`——前端保存即热更新，后端保存自动重启（`--reload`）。调试完成后再跑 `deploy.ps1` 发布到生产。
+**开发调试期**（不想反复构建/重启）：用 `python scripts\dev\start_dev.py`——前端保存即热更新，后端保存自动重启（`--reload`）。调试完成后再跑 `deploy.ps1` 发布到生产。
 
 ## 测试
 
@@ -606,8 +646,10 @@ SAS/
 │   │   ├── llm/               # OpenAI 兼容客户端 + 决策仪表盘
 │   │   ├── monitor/           # APScheduler 调度器
 │   │   └── notify/            # 通知管道（控制台/Webhook/邮件预留）
-│   ├── tests/                 # 320 个单元测试
-│   └── requirements.txt
+│   ├── tests/                 # 320 个单元测试（全部离线，无网络依赖）
+│   ├── requirements.txt       # 依赖下限（日常开发）
+│   ├── requirements.lock.txt  # 锁定版本（CI / 复现历史回测结论）
+│   └── pyproject.toml         # requires-python + ruff + pytest 配置（不是打包清单）
 ├── frontend/
 │   ├── src/
 │   │   ├── views/             # Dashboard/Screening/Signals/Advisory/PaperTrading/Backtest/StockDetail
@@ -617,9 +659,22 @@ SAS/
 │   │   ├── stores/            # Pinia 全局状态
 │   │   └── router/
 │   └── package.json
-├── start_dev.py               # 一键启动前后端（含端口清理与健康检查）
+├── scripts/
+│   ├── dev/start_dev.py       # 一键启动前后端（含端口清理与健康检查）
+│   └── ops/                   # 运维脚本：install_service.ps1 / 分钟线导出 / 静默触发入口
+├── docs/images/               # README 示意图（架构 / 时间轴 / 下单链路）
+├── .github/workflows/ci.yml   # CI：ruff + 320 例单测
+├── serve_frontend.py          # 前端静态服务 + /api 反代（nssm 服务 SAS-frontend 的入口）
+├── deploy.ps1                 # 部署：构建前端 + 重启服务 + 健康检查（计划任务 SASDeploy 的入口）
+├── restart-backend.ps1        # 只重启后端（计划任务 SASRestart 的入口）
+├── run-hidden.vbs             # 上面两个任务的隐藏窗口启动器
+├── install-silent-deploy.*    # 一次性注册上面两个计划任务（管理员运行）
 └── data/                      # 运行时生成：klines/*.parquet + sas.db（不入库）
 ```
+
+> 根目录这几个脚本（`serve_frontend.py` / `deploy.ps1` / `restart-backend.ps1` / `run-hidden.vbs` /
+> `install-silent-deploy.*`）**不要移动**：nssm 服务与 Windows 计划任务里写死了它们的绝对路径，
+> 挪走会让「双击部署 / 重启」和前端服务一起失效。要挪就连任务一起改（`schtasks /change` + `nssm set`）。
 
 ## 界面与视觉规范
 

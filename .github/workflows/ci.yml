@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# 同一分支的连续推送只保留最新一次，省 runner
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # 代码检查跑在 Linux 上：纯静态分析，与部署平台无关，起得最快。
+  # 规则集见 backend/pyproject.toml，起步只开「一定是 bug」的 E9/F63/F7/F82。
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: 安装 ruff
+        run: pip install ruff==0.17.3
+      - name: ruff check（backend）
+        working-directory: backend
+        run: ruff check . --output-format=github
+      - name: 语法编译（后端 + 运维/开发脚本）
+        run: python -m compileall -q backend scripts serve_frontend.py
+        # 只做编译，不导入：akshare / baostock 等在 Linux 上装齐前也能先抓出语法错误
+
+  # 单元测试跑在 Windows 上：与本项目实际部署平台一致，且 requirements.lock.txt
+  # 就是从 Windows + CPython 3.12 冻结出来的（锁版本只在同平台真正等价）。
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements.lock.txt
+      - name: 安装锁定依赖
+        working-directory: backend
+        run: python -m pip install --disable-pip-version-check -r requirements.lock.txt
+      - name: 单元测试
+        working-directory: backend
+        # 测试全部离线（0 处直连 akshare / baostock / HTTP），无需任何数据目录或密钥
+        run: python -m pytest

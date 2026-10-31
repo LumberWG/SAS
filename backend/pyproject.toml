@@ -1,0 +1,39 @@
+# SAS 后端 —— 工具配置（不是打包清单）
+#
+# 依赖清单的唯一来源仍是 requirements.txt（下限）与 requirements.lock.txt（锁定），
+# 这里刻意不声明 [build-system]，因此不支持 `pip install .`：本项目按整站部署
+# （后端 nssm 服务 + 前端静态目录），不对外发 Python 包。
+#
+# 装依赖：pip install -r requirements.txt        # 日常开发
+#         pip install -r requirements.lock.txt   # CI / 复现历史回测结论
+
+[project]
+name = "sas-backend"
+version = "0.1.0"
+description = "SAS — A 股智能分析系统后端：实时行情 / 选股 / 回测 / 模拟盘"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [{ name = "LumberWG" }]
+
+[tool.ruff]
+# 与 requires-python 同一口径，避免 lint 放过 3.11 不支持的语法
+target-version = "py311"
+line-length = 100
+exclude = [".venv", "__pycache__", "data"]
+
+[tool.ruff.lint]
+# 起步只开「一定是 bug」的四类规则：
+#   E9  语法错误（E999 等）
+#   F63 非法比较（is 与字面量比较等）
+#   F7  语法层问题（F701/F702 等）
+#   F82 未定义名（F821 等）
+#
+# 为什么不开默认全集：存量代码按 ruff 默认规则仍有 380+ 条风格告警（I001 导入排序 54、
+# UP006 注解 15、RUF100 冗余 noqa 106……）。一次性全量格式化会把 105 个文件搅进同一个
+# diff，让 WORKLOG / BACKTEST_LOG 的「改动可追溯」失效。规则按模块逐步收紧，
+# 每收紧一类就整文件跑 `ruff check --fix`，并在 WORKLOG 第十一节记一条。
+select = ["E9", "F63", "F7", "F82"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

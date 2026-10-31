@@ -3,7 +3,7 @@
 #   SAS          - backend API  (uvicorn, :8000)
 #   SAS-frontend - static dist + /api reverse proxy (:8080)
 # Usage:  schtasks /run /tn SASRestart     (no UAC prompt, no window)
-#         or double-click restart-backend.vbs
+#         or double-click scripts\ops\restart-backend.vbs
 # Log:    data\logs\restart.log
 # ASCII only: PowerShell 5.1 reads BOM-less files as ANSI.
 $Root   = Split-Path -Parent $MyInvocation.MyCommand.Path
