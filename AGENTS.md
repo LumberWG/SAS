@@ -43,6 +43,10 @@ git -c user.name=LumberWG -c user.email=663589316@qq.com commit -m "..."
   不要写死 500 再互相比较。
 - **ML 打分看 `effective`**：`effective=false` 说明整段回退 14 因子，此时结果与基线一模一样，
   不能当作「ML 有效」的证据。
+- **测试会读到 `.env` 的 `API_TOKEN`**：`tests/conftest.py` 已在会话级把它置空（就地改单例，
+  不清 lru 缓存）。删掉这个夹具，接口用例会成片 401，看着像功能坏了。
+- **备份 WAL 库不能用 `Copy-Item`**：服务在写主库时 `-wal` 里还有未合并的提交，直接复制会丢
+  最近几笔成交。用 `scripts/backup_db.py`（SQLite 在线 backup API）。
 
 ## 5. 常用命令
 
