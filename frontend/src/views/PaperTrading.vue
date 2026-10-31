@@ -333,6 +333,65 @@ const liveStatusText = computed(() => {
   return live.value.trading ? '自动交易中 · 人工不干预' : '待开盘 · 信号排队中'
 })
 
+// ---- 机制层（BACKTEST_LOG #84 / #85）：默认全关，任一开关打开才渲染整块 ----
+const REGIME_LABEL: Record<string, string> = {
+  calm: '平稳',
+  weak: '弱势',
+  shock: '震荡',
+  crisis: '危机',
+  managed_downtrend: '托底型阴跌',
+}
+
+/** 三个开关任一开启才显示；全关时页面与改造前一致，不给用户增加噪音 */
+const mechanismOn = computed(() => {
+  const r = live.value?.regime
+  return !!(r && (r.dynamic || r.circuit_breaker?.enabled || r.floor))
+})
+
+/** 徽章：熔断优先级最高（它凌驾于机制层与任何信号之上），其次是当日机制态 */
+const mechanismBadge = computed(() => {
+  const r = live.value?.regime
+  if (r?.circuit_breaker?.tripped) {
+    return { text: '回撤熔断', cls: 'border-down/40 bg-down/10 text-down' }
+  }
+  const st = r?.regime_state
+  if (!st) return { text: '待判定', cls: 'border-base-600 bg-base-800/40 text-content-muted' }
+  const tone: Record<string, string> = {
+    calm: 'border-up/40 bg-up/10 text-up',
+    weak: 'border-warn/40 bg-warn/10 text-warn',
+    shock: 'border-warn/40 bg-warn/10 text-warn',
+    crisis: 'border-down/40 bg-down/10 text-down',
+    managed_downtrend: 'border-primary/40 bg-primary/10 text-primary-light',
+  }
+  return {
+    text: REGIME_LABEL[st] ?? st,
+    cls: tone[st] ?? 'border-base-600 bg-base-800/40 text-content-muted',
+  }
+})
+
+const capPct = computed(() => {
+  const v = live.value?.regime?.regime_cap
+  return v == null ? '—' : `${(v * 100).toFixed(0)}%`
+})
+
+const ddPct = computed(() => {
+  const v = live.value?.regime?.regime_metrics?.max_drawdown
+  return v == null ? '—' : `${(v * 100).toFixed(1)}%`
+})
+
+const floorPct = computed(() => {
+  const v = live.value?.regime?.floor?.score
+  return v == null ? '—' : `${(v * 100).toFixed(0)}%`
+})
+
+const floorText = computed(() => {
+  const lv = live.value?.regime?.floor?.level
+  if (lv === 'strong') return '托底证据强'
+  if (lv === 'weak') return '托底证据弱'
+  return '无明显托底'
+})
+
+
 onMounted(() => {
   load()
   loadWatchItems()
@@ -619,6 +678,58 @@ onUnmounted(() => {
         class="ml-auto text-[12.5px] text-primary-light hover:underline"
       >
         去设置页关闭闸门
+      </RouterLink>
+    </div>
+
+    <!--
+      机制层（BACKTEST_LOG #84 / #85）：动态降暴露 / 政策托底 / 硬性回撤熔断。
+      三个开关默认全关，全关时整块不渲染 —— 页面与改造前完全一致，不会凭空多出信息。
+    -->
+    <div
+      v-if="mechanismOn"
+      class="flex flex-wrap items-center gap-x-4 gap-y-1.5 rounded-lg border px-4 py-3 text-[13px]"
+      :class="mechanismBadge.cls"
+    >
+      <span class="font-medium">机制层 · {{ mechanismBadge.text }}</span>
+
+      <span v-if="live?.regime?.dynamic" class="text-content-muted">
+        仓位上限
+        <span class="font-num text-content">{{ capPct }}</span>
+        <span v-if="live?.regime?.regime_metrics" class="text-content-faint">
+          （波动率比
+          <span class="font-num">{{ live.regime.regime_metrics.vol_ratio ?? '—' }}</span>
+          · 120 日回撤 <span class="font-num">{{ ddPct }}</span>
+          <span v-if="live.regime.regime_metrics.trend_weak">· 趋势走弱</span>）
+        </span>
+      </span>
+
+      <span
+        v-if="live?.regime?.floor"
+        class="text-content-muted"
+        :title="live.regime.floor.reason || ''"
+      >
+        托底强度 <span class="font-num text-content">{{ floorPct }}</span>
+        · {{ floorText }}
+        <span v-if="live.regime.floor.available === false" class="text-content-faint">
+          （仅指数代理）
+        </span>
+      </span>
+
+      <span v-if="live?.regime?.circuit_breaker?.enabled" class="text-content-muted">
+        回撤熔断
+        <span :class="live.regime.circuit_breaker.tripped ? 'font-medium' : ''">
+          {{ live.regime.circuit_breaker.tripped ? '已触发 · 暂停买入' : '未触发' }}
+        </span>
+        <span v-if="live.regime.circuit_breaker.peak" class="text-content-faint">
+          （峰值 <span class="font-num">{{ live.regime.circuit_breaker.peak.toFixed(2) }}</span>）
+        </span>
+      </span>
+
+      <RouterLink
+        to="/settings"
+        class="ml-auto text-[12.5px] text-primary-light hover:underline"
+      >
+        去设置页调整机制层
       </RouterLink>
     </div>
 

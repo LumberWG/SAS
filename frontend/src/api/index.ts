@@ -858,6 +858,36 @@ export interface PaperLiveStatus {
     /** 弱市保留仓位比例：0=全暂停买入；>0 时只把总仓位上限压到该比例 */
     weak_exposure?: number
     day: string
+    /**
+     * 动态机制降暴露（BACKTEST_LOG #84）。开关默认关，关时 `regime_state` 恒为 null；
+     * 状态取值 calm / weak / shock / crisis / managed_downtrend。
+     */
+    dynamic?: boolean
+    regime_state?: string | null
+    /** 机制层给出的总仓位上限（只降不升）；当日未判定时为 null */
+    regime_cap?: number | null
+    regime_metrics?: {
+      vol_ratio?: number
+      max_drawdown?: number
+      trend_weak?: boolean
+    } | null
+    /** 硬性回撤熔断（#85）：峰值落库跨重启保留，峰值字段为空表示还没跑过 */
+    circuit_breaker?: {
+      enabled: boolean
+      tripped: boolean
+      peak: number | null
+    }
+    /**
+     * 政策托底强度（#85）：仅 `paper_policy_floor_enabled` 开启时才有值。
+     * `available=false` 表示没有 ETF/期指/新闻等直接信号，只用指数底部特征代理。
+     */
+    floor?: {
+      score?: number | null
+      level?: string
+      available?: boolean
+      reason?: string
+      components?: Record<string, number>
+    } | null
   }
   recent_trades: PaperLiveTrade[]
   last_error: string
