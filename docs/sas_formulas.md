@@ -150,6 +150,10 @@ action = buy   若 total ≥ +15
 
 ## 4. 模拟下单与风控公式（`paper/engine.py`）
 
+> **只做多，不做空**：面向散户，无融券/卖空。下文所有「卖出 / sell」= 平掉已有多头批次
+> （`reduce_paper_sellable()`，上限为可卖股数，不会为负）；无持仓时卖出信号跳过（`无持仓可卖`），
+> 不会产生空头仓位。回测同口径，故「空仓」= 现金等待，不是反向持仓。
+>
 > 账户：默认初始资金 10 万，单账户，状态全落 SQLite。常量 `LOT_SIZE=100`。
 > 风控三项 2026-10-30 起从硬编码挪进 `Settings`（设置页可改，也可由回测中心「落盘」写入）：
 > `paper_stop_loss=0.08`、`paper_take_profit=0.20`、`paper_single_position_max=0.20`；

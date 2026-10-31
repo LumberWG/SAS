@@ -1,7 +1,7 @@
 # AGENTS.md — 给任何 AI 编码工具的入场须知
 
 本文件是**跨工具交接约定**。不管是 CodeBuddy、WorkBuddy 还是别的工具，进仓库先读这里，
-再读 `README.md`（功能）/ `WORKLOG.md`（策略）/ `BACKTEST_LOG.md`（实验）。
+再读 `README.md`（功能）/ `docs/flow.md`（全链路流程与参数）/ `WORKLOG.md`（策略）/ `BACKTEST_LOG.md`（实验）。
 **对外贡献规则**（含从第 4 节提升为硬约束的口径红线）见 `CONTRIBUTING.md`；
 本仓库以 [MIT](LICENSE) 授权。
 

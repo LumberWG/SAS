@@ -15,6 +15,17 @@
 > 上述为**示意图**（按 `backend/app` 实际模块与 `scheduler.py` 实际时点绘制），不是界面截图。
 > 界面截图欢迎提 PR 放进 `docs/images/`——请避免露出真实账户金额与密钥。
 
+## 文档地图
+
+| 想了解 | 看这里 |
+| --- | --- |
+| 能做什么、怎么装、怎么部署 | 本文件 |
+| **一次买卖从哪来、经过哪些判定、被哪些参数挡住** | [`docs/flow.md`](docs/flow.md)（全链路流程图 + 参数总表 + skip 原因速查） |
+| 公式与代码落点（选股→策略→因子→下单风控→撮合→参数表→回测对齐） | [`docs/sas_formulas.md`](docs/sas_formulas.md) |
+| 哪些想法试过、结论如何、为什么**不采纳** | [`BACKTEST_LOG.md`](BACKTEST_LOG.md) |
+| 策略变更逐条记录（含「为什么」） | [`WORKLOG.md`](WORKLOG.md) 第十一节 |
+| 怎么贡献、口径红线、验收纪律 | [`CONTRIBUTING.md`](CONTRIBUTING.md) |
+
 ## 快速开始（Windows，约 5 分钟）
 
 ```powershell
@@ -463,7 +474,7 @@ schtasks /run /tn SASDbBackup                              # 立即触发计划�
 - **总资产口径**：`现金 + Σ持仓市值`。某只票取价失败（停牌 / 数据源熔断）时按**成本价**计入市值，
   与持仓明细同一口径，并在应用日志留一条 warning——不再按 0 计，否则一个 20% 仓位会瞬间「消失」，
   8% 的组合回撤熔断会当场误触发（状态落库、跨重启保留）
-- **交易规则（对齐 A 股）**：T+1（当日买入次日可卖）、佣金万 2.5（最低 5 元）+ 卖出印花税千 1 + 双边过户费万 0.1；四项费率都在设置里（`trade_fee_commission_rate` / `_commission_min` / `_stamp_rate` / `_transfer_rate`），**回测与实盘共用同一份**，佣金谈下来只改一处
+- **交易规则（对齐 A 股）**：**只做多，不做空/融券**——「卖出」只用于平掉已有的多头批次，无持仓的卖出信号直接跳过（`无持仓可卖`），持仓股数由批次表汇总、不会减成负数；回测同口径。T+1（当日买入次日可卖）、佣金万 2.5（最低 5 元）+ 卖出印花税千 1 + 双边过户费万 0.1；四项费率都在设置里（`trade_fee_commission_rate` / `_commission_min` / `_stamp_rate` / `_transfer_rate`），**回测与实盘共用同一份**，佣金谈下来只改一处
 - **成交价**：卖出 / 止盈止损 = 执行时刻最新价（快照优先，失败退化 K 线收盘价）；**买入只在开盘后
   `paper_buy_open_window_minutes`（默认 5）分钟内成交**（与回测「次日开盘价」口径对齐），窗口外的买单留在
   队列等下一个开盘，有效期顺延。2026-10-30 用 `intraday_entry` 回测验证过「放开到全时段」：
@@ -589,7 +600,10 @@ SAS/
 ├── scripts/
 │   ├── dev/start_dev.py       # 一键启动前后端（含端口清理与健康检查）
 │   └── ops/                   # 运维脚本：install_service.ps1 / 分钟线导出 / 静默触发入口
-├── docs/images/               # README 示意图（架构 / 时间轴 / 下单链路）
+├── docs/
+│   ├── flow.md                # 全链路流程图（选股→打分→队列→下单），含参数总表与 skip 原因速查
+│   ├── sas_formulas.md        # 公式与实现口径备查
+│   └── images/                # README 示意图（架构 / 时间轴 / 下单链路）
 ├── .github/workflows/ci.yml   # CI：ruff + 320 例单测
 ├── serve_frontend.py          # 前端静态服务 + /api 反代（nssm 服务 SAS-frontend 的入口）
 ├── deploy.ps1                 # 部署：构建前端 + 重启服务 + 健康检查（计划任务 SASDeploy 的入口）
