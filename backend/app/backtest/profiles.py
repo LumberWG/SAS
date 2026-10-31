@@ -298,6 +298,14 @@ PROFILES: dict[str, dict] = {
     # 策略集 A/B：只看突破类 vs 只看交叉/超卖类
     "strat_break": {"strategies": ("海龟突破", "平台突破", "动量突破")},
     "strat_cross": {"strategies": ("均线放量", "MACD金叉", "KDJ超卖金叉")},
+    # ---- 单策略对比（记录 #72 选股策略横向评测）：6 个内置策略逐一单开，
+    #     与 default(全开) 在同一批 21 日随机段上配对，回答「选股策略本身谁更强」。 ----
+    "s_turtle": {"strategies": ("海龟突破",)},
+    "s_ma": {"strategies": ("均线放量",)},
+    "s_macd": {"strategies": ("MACD金叉",)},
+    "s_kdj": {"strategies": ("KDJ超卖金叉",)},
+    "s_mom": {"strategies": ("动量突破",)},
+    "s_plat": {"strategies": ("平台突破",)},
     # ---- E34：按 IC 强度加权反转（记录 #22/#23 的后续） ----
     # `rev_inv` 是「14 因子整体取负」，等价于假设全部因子反向且等强；
     # 但实测 20 日 IC 从 turnover −0.159 到 vol_ratio −0.051 差 3 倍，故按强度分配权重。
@@ -537,6 +545,76 @@ PROFILES: dict[str, dict] = {
     "ddc15": {"dd_pause_at": 0.15, "dd_pause_days": 10},
     "ddc10_20": {"dd_pause_at": 0.10, "dd_pause_days": 20},
     "ddc10_s30": {"dd_pause_at": 0.10, "dd_pause_days": 10, "slippage": 0.003},
+    # ---- 短周期实验（用户 B 选项：不炒长线、想更短平快；记录 #72b）----
+    # 重要发现：回测 ``default`` 实际**不含**线上出场结构——``trail_pct`` /
+    # ``breakeven_trigger`` / ``stop_atr_mult`` 在 ``PipelineParams`` 默认都是 ``None``，
+    # 且 ``pipeline.py`` 不读 ``settings.paper_trail_pct/breakeven/atr``，只回退仓位/轮动等。
+    # 即此前验收测的是「裸版」固定 -8%/+20%，线上引擎额外有 ATR 止损 2.0 + 移动止损 0.10 +
+    # 保本 0.10。下面两个 profile 量化该建模缺口，并试短周期。均不含大盘择时（与验收基准一致）。
+    "live_def": {
+        "stop_atr_mult": 2.0,
+        "breakeven_trigger": 0.10,
+        "trail_pct": 0.10,
+        "trail_arm": 0.0,
+    },
+    "fast": {
+        "stop_atr_mult": 2.0,
+        "take_profit": 0.15,
+        "breakeven_trigger": 0.05,
+        "trail_pct": 0.08,
+        "trail_arm": 0.06,
+        "partial_tp_at": 0.08,
+    },
+    # ---- 路线 C 验证：涨跌停 mask 的 A/B 反事实（记录 #73）----
+    # ``no_mask`` = 关掉全部涨跌停不可交易约束（买入涨停、卖出跌停、盘中止损/止盈封板日
+    # 均不再跳过），用来量化「mask 把多少水分挤掉」。与 ``default`` 同段配对即得其增量贡献。
+    "no_mask": {"disable_limit_mask": True},
+    # ---- A-minus：ML 截面排序替换层（记录 #74，路线图 B 第一步）----
+    # 仅替换 14 因子打分：段前走前训练 Ridge，预测转当日截面分位(0~100) 作分数。
+    # 与 default 的唯一差异是 scoring_mode，其余（策略/风控/择时/阈值）完全一致，便于净对比。
+    # 若某段模型 OOS rank-IC<=0 自动回退 14 因子（不注入噪声）。
+    "ml_default": {
+        "scoring_mode": "ml",
+        "ml_label_horizon": 15,
+    },
+    # 融合版：0.5 × ML分位 + 0.5 × 14因子归一分，作为稳健性对照。
+    "ml_blend": {
+        "scoring_mode": "ml_blend",
+        "ml_label_horizon": 15,
+        "ml_blend": 0.5,
+    },
+    # ---- 路线 A 完整版（LightGBM + 完整 Alpha158 + 行业中性，记录 #75）----
+    # 默认走 LightGBM（环境无 lightgbm 时自动回退 Ridge，纪律不变）。
+    "ml_lgb": {
+        "scoring_mode": "ml",
+        "ml_label_horizon": 15,
+        "ml_model": "lightgbm",
+    },
+    # 融合版：0.5 × LightGBM分位 + 0.5 × 14因子归一分。
+    "ml_lgb_blend": {
+        "scoring_mode": "ml_blend",
+        "ml_label_horizon": 15,
+        "ml_model": "lightgbm",
+        "ml_blend": 0.5,
+    },
+    # 行业内中性化版：扣行业（或板块）均值再排分位，消除行业暴露。
+    "ml_lgb_ind": {
+        "scoring_mode": "ml",
+        "ml_label_horizon": 15,
+        "ml_model": "lightgbm",
+        "industry_neutral": True,
+    },
+    # ---- 路线 A 完整版验收通过后的「生产候选默认」（记录 #76）----
+    # 与 default({}) 的唯一差异：打分层换成 LightGBM（带因子回退兜底），
+    # 其余（6 策略 / 风控 / 择时 / 阈值）完全继承 default。
+    # 验收结论：18 段配对中位超额 +4.55%（>3.5pp 显著线），16/18 段有信号、2 段无信号回退因子。
+    # 建议作为线上默认打分层；原 default(14 因子) 保留为对照基线，未覆盖。
+    "default_ml": {
+        "scoring_mode": "ml",
+        "ml_label_horizon": 15,
+        "ml_model": "lightgbm",
+        "ml_require_ic": 0.0,
+    },
 }
 
 # ---- E48：成交价随机扰动（稳健性检验，BACKTEST_LOG #67 §8）----

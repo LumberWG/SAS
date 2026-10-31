@@ -71,6 +71,7 @@ class Recommender:
         name: str,
         current_price: float | None = None,
         sentiment: dict | None = None,
+        ml_scores: dict | None = None,
     ) -> Recommendation | None:
         """分析单只自选股，返回建议（数据不足返回 None）。
 
@@ -126,10 +127,29 @@ class Recommender:
             reason_parts.append("；".join(negatives))
         if sentiment_level:
             reason_parts.append(f"市场情绪{sentiment_level}({weight:+})")
+
+        # —— 线上 ML 打分覆盖（default_ml 实时版）——
+        # 启用且当日有 ML 分位时，用 ML 分位(0~100) 替换 14 因子分做排序/仓位定价；
+        # 买入触发保留因子信号作安全网：ML 分位达半额线才判 buy，因子卖出仍优先。
+        ml_score = (
+            float(ml_scores[code])
+            if ml_scores and code in ml_scores and ml_scores[code] is not None
+            else None
+        )
+        if ml_score is not None:
+            score = ml_score
+            action = (
+                "buy" if ml_score >= self.settings.paper_half_score
+                else ("sell" if result.action == "sell" else "hold")
+            )
+            reason_parts[0] = f"ML打分 {ml_score:.0f}（14因子 {result.total:+.0f}）"
+        else:
+            score = result.total
+
         reason = "，".join(reason_parts)
 
         return Recommendation(
-            code=code, name=name, action=action, score=result.total,
+            code=code, name=name, action=action, score=score,
             reason=reason, price=round(price, 2),
             stop_loss=stop, target_price=target, sentiment=sentiment_level,
             detail=json.dumps(result.breakdown(), ensure_ascii=False),
@@ -168,13 +188,27 @@ class Recommender:
             asyncio.to_thread(_quote_prices),
             asyncio.to_thread(market_sentiment),
         )
+
+        # 线上 ML 打分（default_ml 实时版）：整批只构建一次，逐只查表。
+        # 仅在 settings.live_ml_scoring 时启用；失败/无信号则回退 14 因子（不影响本轮）。
+        ml_scores: dict[str, float] = {}
+        if self.settings.live_ml_scoring:
+            try:
+                from app.analysis.live_ml import get_live_ml_scores
+
+                codes = [str(r["code"]) for r in watchlist]
+                ml_scores = await asyncio.to_thread(get_live_ml_scores, codes)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("线上 ML 打分构建失败，本批回退 14 因子: %s", exc)
+                ml_scores = {}
+
         semaphore = asyncio.Semaphore(self.settings.scan_concurrency)
 
         async def one(row) -> Recommendation | None:
             async with semaphore:
                 return await self.analyze_stock(
                     row["code"], row["name"],
-                    quotes.get(str(row["code"])), sentiment,
+                    quotes.get(str(row["code"])), sentiment, ml_scores,
                 )
 
         results = await asyncio.gather(

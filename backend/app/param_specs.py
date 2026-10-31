@@ -489,6 +489,7 @@ _SHORT_LABELS: dict[str, str] = {
     "shadow_universe": "影子池规模",
     "shadow_profiles": "影子策略方案",
     "intraday_analysis_interval": "盘中分析间隔",
+    "live_ml_scoring": "线上ML打分",
 }
 
 #: 「首句截断」用的分隔符（没进 `_SHORT_LABELS` 的键走这条路）

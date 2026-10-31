@@ -66,14 +66,23 @@ def _seed(db, shares=1000, cost=10.0, buy_date=None, tag="base"):
 
 
 def test_disabled_by_default(monkeypatch, tmp_path):
-    """开关默认关：t_tick 直接返回空，不动盘。"""
+    """开关默认关：t_tick 直接返回空，不动盘。
+
+    断言的是 **Settings 的字段默认值**，不是运行时的 ``e.settings``——
+    后者会被 ``app_state`` 覆盖层与 ``.env`` 改掉（线上 ``paper_t_active``
+    曾被运行时打开），拿它断言会让「默认值」这个用例随运行时配置漂移。
+    """
+    from app.config import Settings
+
+    assert Settings.model_fields["paper_t_active"].default is False
+
     new_db = Database(tmp_path / "t_off.db")
     monkeypatch.setattr(engine_module, "db", new_db)
     from app.data.snapshot_store import snapshot_store
     monkeypatch.setattr(snapshot_store, "peek_snapshot",
                         lambda: _snap(10, 11, 9, 10, 11))
     e = PaperEngine()
-    assert e.settings.paper_t_active is False
+    monkeypatch.setattr(e.settings, "paper_t_active", False, raising=False)
     assert asyncio.run(e.t_tick({"300001": 11.0})) == []
 
 

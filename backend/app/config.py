@@ -219,6 +219,13 @@ class Settings(BaseSettings):
     # ---- 做T引擎（真实 tick：严格 T+1 多批次；默认全部关闭） ----
     paper_t_active: bool = False
     paper_t_size: float = 0.25             # 单次做T比例（相对总仓）
+
+    # ---------- 线上 ML 打分（default_ml 实时版） ----------
+    # True 时 recommender 用 LightGBM 截面分位(0~100) 替换 14 因子分做排序与仓位定价；
+    # 买入触发仍保留 14 因子信号作安全网（ML 只能降权/跳过，不能凭空制造买入）。
+    # 与回测 default_ml 同模型/同行业中性/同 OOS-IC 回退纪律。默认 False（14 因子基线）。
+    # 详见 BACKTEST_LOG #78。改 True 后需重启服务生效（且 .env 亦可设置）。
+    live_ml_scoring: bool = False
     paper_t_up_sell: float = 0.05          # 开盘涨幅超此先卖锁利
     paper_t_up_buyback: float = 0.03       # 从高点回调超此买回
     # 下跌加仓在单边弱市会放大亏损（回测 E 版验证），默认调到「跌 20% 才加」≈关闭

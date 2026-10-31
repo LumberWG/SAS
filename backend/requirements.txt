@@ -25,6 +25,13 @@ APScheduler>=3.10.0        # 定时任务（盘中行情刷新、收盘选股）
 # ---- HTTP 客户端（LLM 调用） ----
 httpx>=0.27.0
 
+# ---- 可选：ML 打分（BACKTEST_LOG 记录 #74~#78，路线 A） ----
+# 缺失时 `app/backtest/ml_scorer.py` 自动回退 Ridge **不报错**，但两条路径结论不同
+# （#74 Ridge 中位 −0.33pp vs #76 LightGBM +4.55pp）。要在别的机器复现 ML 结论必须装。
+# 也不要在两个版本间漂移：`_resolve_model` 不做版本校验，换版本等于换模型。
+lightgbm>=4.3.0
+scikit-learn>=1.4.0
+
 # ---- 工具 ----
 python-dotenv>=1.0.0
 

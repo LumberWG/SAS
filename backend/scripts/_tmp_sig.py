@@ -1,7 +1,7 @@
 import sqlite3
 from collections import Counter
 
-c = sqlite3.connect(r"e:/Study/SAS/data/sas.db")
+c = sqlite3.connect(r"D:/Backup/SAS/data/sas.db")
 tabs = [r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'")]
 print("ALL TABLES:", tabs)
 for tb in tabs:

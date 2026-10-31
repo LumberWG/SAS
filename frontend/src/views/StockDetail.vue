@@ -143,11 +143,14 @@ watch(code, async () => {
   await Promise.all([loadKline(), loadIntraday(), loadQuote(), loadAnalysis(), loadWatchStatus()])
 })
 
-/** 分时图副标题：交易日期 + 昨收基准。 */
+/** 分时图副标题：交易日期 + 数据来源 + 昨收基准。 */
 const intradayHint = computed(() => {
   const d = intraday.value
   if (!d) return '分时走势'
   const parts = [d.date ?? '最近交易日']
+  // 当日实时 / D 盘历史：让你一眼看出这根曲线是不是当天的
+  if (d.source === 'realtime') parts.push('实时')
+  else if (d.source === 'local') parts.push('本地历史')
   if (d.prev_close != null) parts.push(`昨收 ${d.prev_close.toFixed(2)}`)
   return parts.join(' · ')
 })

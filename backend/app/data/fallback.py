@@ -157,7 +157,12 @@ def _decode_json_bytes(raw: bytes) -> str:
 #: 而 proxy.finance.qq.com 与 ifzq.gtimg.cn 的同源接口仍可用，
 #: 因此这里按顺序尝试，任一成功即返回。
 _TENCENT_KLINE_ENDPOINTS = (
-    ("https://proxy.finance.qq.com/ifzqgtimg/appstock/app/fqkline/get", True),
+    # 主力：web.ifzq 支持前/后复权（qfqday/hfqday），实测 0.05~0.3s。
+    # 不能用 proxy.finance.qq.com：该主机 TLS 握手要 40s 且响应体不是 JSON
+    # （实测 600000 等全部 JSONDecodeError），排在前面会让每只股票白等
+    # 十几秒超时——这才是全市场预热要跑 20 分钟的根因。
+    ("https://web.ifzq.gtimg.cn/appstock/app/fqkline/get", True),
+    # 兜底：只有不复权（day），但延迟同样低（0.04s）
     ("https://ifzq.gtimg.cn/appstock/app/kline/kline", False),
 )
 
@@ -190,7 +195,9 @@ def tencent_kline(code: str, adjust: str = "qfq", count: int = 300) -> pd.DataFr
             else f"{symbol},day,,,{count}"
         )
         try:
-            data = _get_json(url, {"param": param})
+            # 300 根 K 线响应体很小，正常 0.05~0.3s；8s 还没回就是主机不可用，
+            # 不要再等 15s——全市场预热时每个坑都是乘以 5000 只的
+            data = _get_json(url, {"param": param}, timeout=8.0)
         except Exception as exc:  # noqa: BLE001 - 换下一个主机
             errors.append(exc)
             continue
@@ -251,10 +258,12 @@ def sina_kline(symbol: str, datalen: int = 300) -> pd.DataFrame:
 # ----------------------------------------------------------------------
 # 分时（腾讯逐分钟）
 # ----------------------------------------------------------------------
-#: 腾讯分时可用主机（与日K同源，web 主机在部分网络返回 501）
+#: 腾讯分时可用主机，**按实测延迟排序**：
+#: web 主机直连 0.06~0.6s；proxy 主机在部分网络（本机实测）首次握手要 20s 才通，
+#: 放在后面，避免盘中分时被它拖到超时。
 _TENCENT_MINUTE_ENDPOINTS = (
-    "https://proxy.finance.qq.com/ifzqgtimg/appstock/app/minute/query",
     "https://web.ifzq.gtimg.cn/appstock/app/minute/query",
+    "https://proxy.finance.qq.com/ifzqgtimg/appstock/app/minute/query",
 )
 _INTRADAY_COLUMNS = ["date", "time", "price", "avg_price", "volume", "amount"]
 
@@ -284,7 +293,8 @@ def tencent_minute(code: str) -> pd.DataFrame:
     errors: list[Exception] = []
     for url in _TENCENT_MINUTE_ENDPOINTS:
         try:
-            data = _get_json(url, {"code": symbol}, timeout=8.0)
+            # 分时是盘中高频调用，单主机超时要短；真挂了立刻换主机而不是干等
+            data = _get_json(url, {"code": symbol}, timeout=5.0)
         except Exception as exc:  # noqa: BLE001 - 换下一个主机
             errors.append(exc)
             continue

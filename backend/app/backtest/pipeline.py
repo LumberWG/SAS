@@ -243,6 +243,25 @@ class PipelineParams:
     #: 只要窗口内某根 5 分钟 bar 打开过就以它的收盘价成交。
     #: 对应线上 ``paper_buy_open_window_minutes`` 的「窗口内多次撮合」语义。
     open_fill_minutes: int = 0
+    #: 涨跌停可交易性约束开关（默认开启，与线上 engine 一致）。
+    #: False = 启用完整 mask：涨停买不到（开盘段/盘中买入）、跌停卖不出（开盘段 pending_sell +
+    #: 盘中止损/止盈卖出）均跳过，真实还原 A 股限价不可成交；True = 仅用于测量「mask 把多少水分
+    #: 挤掉」，线上与回测默认均不开启。
+    disable_limit_mask: bool = False
+    # ---- A-minus：ML 截面排序替换层（仅替换 14 因子打分，其余链路不动） ----
+    #: 评分模式：None/"factors"（默认，14 因子启发式）/ "ml"（学习型截面排序）/
+    #: "ml_blend"（ML 预测与 14 因子加权融合）。
+    scoring_mode: str | None = None
+    #: 标签前瞻天数（与策略中位持仓对齐，默认 15）。
+    ml_label_horizon: int | None = None
+    #: ml_blend 模式下 ML 分位的权重（0~1），其余给 14 因子归一分。默认 0.5。
+    ml_blend: float | None = None
+    #: OOS rank-IC 低于此值视为无信号，整段回退到 14 因子（不注入噪声）。默认 0.0。
+    ml_require_ic: float | None = None
+    #: ML 模型：None/"lightgbm"（默认，不可用时自动回退 ridge）/"ridge"。路线 A 完整版。
+    ml_model: str | None = None
+    #: 行业内中性化：True 时扣掉行业（或板块）均值再排分位，消除行业暴露。默认 False。
+    industry_neutral: bool = False
 
 
 def calc_fee(side: str, amount: float) -> float:
@@ -478,6 +497,30 @@ def _prepare(params: PipelineParams) -> dict:
         except Exception:  # noqa: BLE001
             continue
 
+    # ---- A-minus：段前走前训练 + 预测表（仅替换 14 因子打分） ----
+    ml_pred: dict[tuple[str, str], float] = {}
+    ml_oos_ic: float = 0.0
+    if params.scoring_mode in ("ml", "ml_blend"):
+        try:
+            from app.backtest.ml_scorer import build_ml_predictions, DEFAULT_HORIZON
+            horizon = int(params.ml_label_horizon or DEFAULT_HORIZON)
+            require_ic = float(params.ml_require_ic if params.ml_require_ic is not None else 0.0)
+            # 训练要用「段起始日之前」的历史——这些历史已随 klines 的 320 根尾部载入，
+            # 但 prepared["dates"] 被过滤到 [start,end]，故这里取 klines 全量日期并集，
+            # 训练集=其中 < start 的部分，预测集=段内日期。
+            ml_all_dates = sorted({d for df in klines.values() for d in df["date"]})
+            ml_pred, ml_oos_ic = build_ml_predictions(
+                klines, ml_all_dates, params.start_date, horizon=horizon, require_ic=require_ic,
+                model=params.ml_model or "lightgbm",
+                industry_neutral=bool(params.industry_neutral),
+            )
+            if ml_pred:
+                logger.info("ML 排序层已构建：OOS rank-IC=%.4f，预测对=%d", ml_oos_ic, len(ml_pred))
+            else:
+                logger.warning("ML 排序层无信号（OOS IC=%.4f），本段回退到 14 因子", ml_oos_ic)
+        except Exception:  # noqa: BLE001 - ML 失败不阻断回测，安全回退因子
+            logger.warning("ML 排序层构建异常，回退到 14 因子", exc_info=True)
+
     try:
         pool = get_stock_pool()
         names = dict(zip(pool["code"], pool["name"]))
@@ -495,6 +538,8 @@ def _prepare(params: PipelineParams) -> dict:
         "names": names,
         "pos_index": pos_index,
         "index": _load_index(str(settings.kline_dir)),
+        "ml_pred": ml_pred,
+        "ml_oos_ic": ml_oos_ic,
         "strategies": [registry.create(n) for n in registry.names()],
     }
 
@@ -531,7 +576,50 @@ def _signals_key(params: PipelineParams) -> tuple:
     """
     return (tuple(params.strategies or ()),
             tuple(sorted((params.factor_weights or {}).items())),
-            bool(params.invert_score))
+            bool(params.invert_score),
+            params.scoring_mode or "factors",
+            int(params.ml_label_horizon or 0),
+            float(params.ml_blend if params.ml_blend is not None else -1.0),
+            params.ml_model or "lightgbm",
+            bool(params.industry_neutral))
+
+
+def _rank_score(
+    prepared: dict,
+    params: PipelineParams,
+    code: str,
+    frame: pd.DataFrame,
+    date: str,
+    half_score: float,
+) -> tuple[float, str]:
+    """统一的候选评分入口：返回 ``(total, action)``。
+
+    - ``scoring_mode`` 为 ``"ml"`` / ``"ml_blend"`` 且本段 ML 预测表非空时，
+      用「段前训练模型 → 当日截面分位(0~100)」作为分数；``ml_blend`` 再与
+      14 因子归一分加权融合；
+    - 其余情况（含 ML 无信号回退）用默认 14 因子 ``compute_factors``。
+    ``half_score`` 用作 ML 分位的买入门槛（percentile），与交易循环阈值体系一致。
+    """
+    mode = params.scoring_mode
+    if mode in ("ml", "ml_blend") and prepared.get("ml_pred"):
+        p = prepared["ml_pred"].get((code, date))
+        if p is not None:
+            ml_score = float(p)
+            if mode == "ml_blend":
+                try:
+                    ft = float(compute_factors(frame, params.factor_weights).total)
+                except Exception:  # noqa: BLE001
+                    ft = 0.0
+                fscore = (ft + 100.0) / 2.0  # [-100,100] -> [0,100]
+                blend = float(params.ml_blend if params.ml_blend is not None else 0.5)
+                total = blend * ml_score + (1.0 - blend) * fscore
+            else:
+                total = ml_score
+            action = "buy" if total >= half_score else "hold"
+            return total, action
+    res = compute_factors(frame, params.factor_weights)
+    return float(res.total), res.action
+
 
 
 def _ensure_signals(prepared: dict, params: PipelineParams) -> dict[str, list[dict]]:
@@ -558,6 +646,8 @@ def _build_signals(prepared: dict, params: PipelineParams) -> dict[str, list[dic
     names: dict[str, str] = prepared["names"]
     pos_index: dict[str, dict[str, int]] = prepared["pos_index"]
     strategies = _pick_strategies(prepared["strategies"], params.strategies)
+    settings = get_settings()
+    half_score = float(params.half_score if params.half_score is not None else settings.paper_half_score)
 
     watch: "OrderedDict[str, int]" = OrderedDict()  # code -> 0（FIFO 淘汰）
     signals: dict[str, list[dict]] = {}
@@ -608,19 +698,17 @@ def _build_signals(prepared: dict, params: PipelineParams) -> dict[str, list[dic
         while len(watch) > params.watch_cap:
             watch.popitem(last=False)
 
-        # 第 2 次排序：自选股按 14 因子总分排名
+        # 第 2 次排序：自选股按评分排名（14 因子 或 ML 截面排序）
         scored: list[dict] = []
         for code in list(watch):
             idx = pos_index.get(code, {}).get(date)
             if idx is None:
                 continue
+            frame = klines[code].iloc[: idx + 1]
             try:
-                result = compute_factors(
-                    klines[code].iloc[: idx + 1], params.factor_weights
-                )
+                total, action = _rank_score(prepared, params, code, frame, date, half_score)
             except Exception:  # noqa: BLE001
                 continue
-            total = float(result.total)
             if params.invert_score:
                 # E33 反转版：翻转总分后重新判级（buy 变成「原来最弱的那批」）
                 total = -total
@@ -629,8 +717,6 @@ def _build_signals(prepared: dict, params: PipelineParams) -> dict[str, list[dic
                     "buy" if total >= buy_th
                     else ("sell" if total <= sell_th else "hold")
                 )
-            else:
-                action = result.action
             scored.append({
                 "code": code, "name": names.get(code, code),
                 "score": total, "action": action,
@@ -647,6 +733,13 @@ def _prepare_cached(params: PipelineParams) -> dict:
     key = (
         params.start_date, params.end_date, params.universe_size,
         tuple(params.board_prefixes or ()),
+        # A-minus：ml_pred 依赖评分模式，必须纳入缓存键，否则 ML 方案会复用
+        # 首个（default）方案的 prepared 而静默回退到 14 因子。模型/中性化同理。
+        params.scoring_mode or "factors",
+        int(params.ml_label_horizon or 0),
+        float(params.ml_blend if params.ml_blend is not None else -1.0),
+        params.ml_model or "lightgbm",
+        bool(params.industry_neutral),
     )
     if _PREPARED is not None and _PREPARED_KEY == key:
         logger.info("复用已准备的K线与指标（%s ~ %s，Top%d）", *key[:3])
@@ -1200,7 +1293,7 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
                 if not (px > 0):
                     continue
                 pc = prev_close(code, date)
-                if pc and px >= pc * 1.095:
+                if pc and px >= pc * 1.095 and not params.disable_limit_mask:
                     continue                      # 涨停买不到（与开盘段同口径）
                 # 截断日线：历史**原始** OHLCV（不含当日）+ 当日截至该时点的聚合 bar。
                 # 必须剔除 klines 里预计算的指标列——它们是用整表（含当日及之后）算的。
@@ -1223,17 +1316,14 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
                     frame = add_all_indicators(
                         pd.concat([hist, pd.DataFrame([row])], ignore_index=True)
                     )
-                    res = compute_factors(frame, params.factor_weights)
+                    total, action = _rank_score(prepared, params, code, frame, date, half_score)
                 except Exception:  # noqa: BLE001 - 单票算不出来就跳过，不影响整轮
                     continue
-                total = float(res.total)
                 if params.invert_score:
                     total = -total
                     buy_th, sell_th = thresholds()
                     action = ("buy" if total >= buy_th
                               else ("sell" if total <= sell_th else "hold"))
-                else:
-                    action = res.action
                 if action != "buy" or total < half_score:
                     continue
                 # ⑤ 切入点：与开盘段同口径，基准都是前一日收盘
@@ -1287,7 +1377,7 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
             if px is None or code not in positions:
                 pending_sells.pop(code, None)
                 continue
-            if pc and px <= pc * 0.905:
+            if pc and px <= pc * 0.905 and not params.disable_limit_mask:
                 continue  # 跌停卖不出，顺延
             sell(code, date, px, reason)
             pending_sells.pop(code, None)
@@ -1337,7 +1427,7 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
             if px is None:
                 continue                          # 停牌/当日无数据
             forced_fill: float | None = None       # 开板补单：已有确定成交价，不再套执行价模型
-            if pc and px >= pc * 1.095:
+            if pc and px >= pc * 1.095 and not params.disable_limit_mask:
                 # 涨停或停牌买不到（判定用原始开盘价，滑点不影响能否成交）。
                 # 线上窗口内每 5 秒有一次撮合，「开盘价一次性成交」把窗口压成一个点：
                 # 开盘一字板就当天放弃，忽略了 09:35 之后可能开板的事实。
@@ -1465,6 +1555,12 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
             high = price_on(code, date, "high")
             close_px = price_on(code, date, "close")
             if open_px is None or low is None or high is None:
+                continue
+            pc = prev_close(code, date)
+            if (not params.disable_limit_mask) and pc and open_px <= pc * 0.905:
+                # 跌停：无法卖出（与开盘段 pending_sells 同口径）。盘中止损/止盈/做T 在
+                # 封板日都无法成交，跳过卖出动作、顺延至下一交易日；仅更新 peak 避免未来函数。
+                p["peak"] = max(float(p.get("peak") or 0.0), high or 0.0)
                 continue
             # E47：开盘段成交基准价（止损/止盈在开盘瞬间成交时用它，而不是开盘价单点）
             fill_open = exec_open_price(code, date) or open_px

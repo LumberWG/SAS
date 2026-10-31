@@ -1,6 +1,6 @@
 ﻿# 一次性安装：注册静默部署任务 SASDeploy（必须以管理员身份运行）
 # 装好之后，双击 deploy-silent.vbs 即可部署，不弹窗口、不弹 UAC。
-# 日志：e:\Study\SAS\data\logs\deploy.log
+# 日志：D:\Backup\SAS\data\logs\deploy.log
 $ErrorActionPreference = 'Stop'
 
 # 提权窗口一闪而过，输出同时落盘，失败时可直接查看

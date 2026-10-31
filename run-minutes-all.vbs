@@ -3,7 +3,7 @@
 '  Double-click to start exporting 5m bars, then 1m bars.
 '  Runs hidden and detached: closing anything here will NOT stop it.
 '  If the job dies (e.g. db service dropped), it is retried up to 6 times.
-'  Log: E:\Study\SAS\data\logs\minutes_all.log
+'  Log: D:\Backup\SAS\data\logs\minutes_all.log
 ' ============================================================
 
 Set sh  = CreateObject("WScript.Shell")
@@ -12,7 +12,7 @@ Set fso = CreateObject("Scripting.FileSystemObject")
 workDir = "E:\Study\SAS\backend"
 pyExe   = workDir & "\.venv\Scripts\python.exe"
 script  = workDir & "\scripts\run_minutes_all.py"
-logFile = "E:\Study\SAS\data\logs\minutes_all.log"
+logFile = "D:\Backup\SAS\data\logs\minutes_all.log"
 
 If Not fso.FileExists(pyExe) Then
     MsgBox "python.exe not found:" & vbCrLf & pyExe, 16, "SAS Export"

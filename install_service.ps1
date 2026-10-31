@@ -15,7 +15,7 @@
 $ErrorActionPreference = "Stop"
 $Python = "e:\Study\SAS\backend\.venv\Scripts\python.exe"
 $WorkDir = "e:\Study\SAS\backend"
-$LogDir = "e:\Study\SAS\data\logs"
+$LogDir = "D:\Backup\SAS\data\logs"
 
 # ---------- 0. Admin check ----------
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -85,5 +85,5 @@ Write-Host ""
 Write-Host "Done. Useful commands:" -ForegroundColor Cyan
 Write-Host "  Restart   : Restart-Service SAS"
 Write-Host "  Stop      : Stop-Service SAS"
-Write-Host "  Logs      : Get-Content e:\Study\SAS\data\logs\sas-service.log -Tail 50"
+Write-Host "  Logs      : Get-Content D:\Backup\SAS\data\logs\sas-service.log -Tail 50"
 Write-Host "  Uninstall : nssm remove SAS confirm"

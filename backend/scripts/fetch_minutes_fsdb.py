@@ -25,7 +25,7 @@ _LOCK = threading.Lock()
 _SERVER_LOCK = threading.Lock()
 
 FSDB_ROOT = Path(os.getenv("SAS_FSDB_DIR", r"D:\Backup\SAS\fsdb\stockdb"))
-DATA_ROOT = Path(os.getenv("SAS_DATA_DIR", r"E:\Study\SAS\data"))
+DATA_ROOT = Path(os.getenv("SAS_DATA_DIR", r"D:\Backup\SAS\data"))
 OUT_DIR = DATA_ROOT / "minute5_fsdb"
 KLINE_DIR = DATA_ROOT / "klines"
 
@@ -73,23 +73,43 @@ def port_open(timeout: float = 1.0) -> bool:
         s.close()
 
 
-def ensure_server(wait_s: int = 120) -> bool:
-    """stockdb.exe 掉线时自动拉起来（作为本进程的子进程，父进程活着它就活着）。"""
-    if port_open():
-        return True
-    log("!! 数据库 7899 未监听，正在重启 stockdb.exe ...")
+def _start_via_service() -> bool:
+    """装了 Windows 服务就优先走服务（服务存在时独立进程会被拒绝启动）。"""
+    try:
+        r = subprocess.run(["net", "start", "stockdb"], capture_output=True, timeout=180)
+        if r.returncode == 0:
+            log("已通过服务 net start stockdb 启动")
+            return True
+    except Exception:  # noqa: BLE001
+        pass
+    return False
+
+
+def _start_via_popen() -> bool:
+    """回退：直接拉起（必须显式传 conf，否则静默退出、不监听端口）。"""
     try:
         subprocess.Popen(
-            [str(FSDB_ROOT / "stockdb.exe")],
+            [str(FSDB_ROOT / "stockdb.exe"), str(FSDB_ROOT / "stockdb.conf")],
             cwd=str(FSDB_ROOT),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             creationflags=subprocess.CREATE_NEW_PROCESS_GROUP,
         )
+        log("已独立进程启动 stockdb.exe（conf=stockdb.conf）")
+        return True
     except Exception as e:  # noqa: BLE001
         log(f"!! 启动失败 {type(e).__name__}: {e}")
         return False
+
+
+def ensure_server(wait_s: int = 120) -> bool:
+    if port_open():
+        return True
+    log("!! 数据库 7899 未监听，正在启动 stockdb ...")
+    _start_via_service()
+    if not port_open():
+        _start_via_popen()
     for i in range(wait_s):
         time.sleep(1)
         if port_open():
@@ -100,8 +120,8 @@ def ensure_server(wait_s: int = 120) -> bool:
     return False
 
 
-def to_frame(code: str, freq: str = FREQ) -> pd.DataFrame:
-    rows = rd.get_data(code, start=START, end=END, frequency=freq, fq=None)
+def to_frame(code: str, freq: str = FREQ, start: str = "", end: str = "") -> pd.DataFrame:
+    rows = rd.get_data(code, start=start or START, end=end or END, frequency=freq, fq=None)
     if not isinstance(rows, list) or not rows:
         return pd.DataFrame(columns=FIELDS)
     df = pd.DataFrame(rows)
@@ -160,23 +180,31 @@ def ensure_server_ts() -> bool:
         return ensure_server()
 
 
-def process_one(code: str, out: Path, freq: str, out_dir: Path, force: bool):
-    """处理单只股票，返回 (status, detail)。status ∈ {ok, skip, fail}。"""
+def process_one(
+    code: str, out: Path, freq: str, out_dir: Path, force: bool,
+    start: str = "", end: str = "", min_rows: int = MIN_ROWS,
+):
+    """处理单只股票，返回 (status, detail)。status ∈ {ok, skip, fail}。
+
+    ``start`` / ``end`` 为空时沿用模块级 ``START`` / ``END``（日更与全量导出行为不变）；
+    ``min_rows`` 是「已导出多少行算完整」的阈值，导短区间（如只导 2024 一年）时必须调小，
+    否则会被误判为不完整而反复重抓。
+    """
     if not force:
-        if existing_rows(out) >= MIN_ROWS:
+        if existing_rows(out) >= min_rows:
             mark_done(out_dir, freq, code)
             return ("skip", None)
 
     t0 = time.time()
     try:
-        df = to_frame(code, freq)
+        df = to_frame(code, freq, start=start, end=end)
     except Exception as e:  # noqa: BLE001
         net_like = isinstance(e, (TimeoutError, ConnectionError, OSError)) or any(
             k in str(e).lower() for k in ("connect", "timeout", "refused", "reset")
         )
         if net_like and ensure_server_ts():
             try:
-                df = to_frame(code, freq)
+                df = to_frame(code, freq, start=start, end=end)
             except Exception as e2:  # noqa: BLE001
                 return ("fail", f"重试异常 {type(e2).__name__}: {str(e2)[:70]}")
         else:
@@ -199,6 +227,16 @@ def main() -> None:
     ap.add_argument("--freq", default=FREQ, choices=["1m", "5m", "15m", "30m", "60m"], help="K 线周期")
     ap.add_argument("--out", default="", help="输出目录（默认按周期自动选）")
     ap.add_argument("--workers", type=int, default=8, help="并发线程数（5m 建议 12~16，1m 建议 4）")
+    ap.add_argument(
+        "--start", default="",
+        help=f"起始日期 YYYYMMDD（默认模块常量 {START}）。导早期历史时用它，"
+             "配合 --out 指到独立目录，避免覆盖现有导出",
+    )
+    ap.add_argument("--end", default="", help=f"结束日期 YYYYMMDD（默认 {END}）")
+    ap.add_argument(
+        "--min-rows", type=int, default=MIN_ROWS,
+        help=f"已导出多少行算完整（默认 {MIN_ROWS}）；导短区间时需调小，否则会被误判为不完整",
+    )
     args = ap.parse_args()
 
     freq = args.freq
@@ -206,6 +244,8 @@ def main() -> None:
         DATA_ROOT / "minute1_fsdb" if freq == "1m" else OUT_DIR
     )
 
+    start_date = args.start or START
+    end_date = args.end or END
     out_dir.mkdir(parents=True, exist_ok=True)
     if not ensure_server():
         log("[FATAL] 数据库未就绪，退出。请手动双击 fsdb\\stockdb\\stockdb.exe")
@@ -233,7 +273,7 @@ def main() -> None:
             continue
         pending.append(code)
 
-    log(f"任务：{total} 只 · {freq} · {START}~{END} · 输出 {out_dir}")
+    log(f"任务：{total} 只 · {freq} · {start_date}~{end_date} · 输出 {out_dir}")
     log(f"已完成 {skip} 只，待处理 {len(pending)} 只，并发 {max(1, args.workers)}")
 
     if pending:
@@ -241,7 +281,10 @@ def main() -> None:
         finished = 0
         with ThreadPoolExecutor(max_workers=workers) as ex:
             futmap = {
-                ex.submit(process_one, c, out_dir / f"{c}.parquet", freq, out_dir, args.force): c
+                ex.submit(
+                    process_one, c, out_dir / f"{c}.parquet", freq, out_dir,
+                    args.force, start_date, end_date, args.min_rows,
+                ): c
                 for c in pending
             }
             for fut in as_completed(futmap):

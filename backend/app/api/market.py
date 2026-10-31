@@ -46,6 +46,58 @@ def _is_trading_time(now: datetime | None = None) -> bool:
     return (9 * 60 + 30) <= minutes <= (11 * 60 + 30) or (13 * 60) <= minutes <= (15 * 60)
 
 
+#: 分时源分界时刻：工作日 9:15（集合竞价）。之后当日曲线一律取实时。
+INTRADAY_LIVE_FROM_MINUTE = 9 * 60 + 15
+
+
+def _intraday_source(now: datetime | None = None) -> str:
+    """决定分时图取哪个源：``realtime``（当日）还是 ``local``（D 盘历史）。
+
+    规则只有一条 —— **工作日 9:15 之后一律走实时源，其余时间读本地**：
+
+    - 9:15 之后（含午休、收盘后直到次日凌晨）：实时源返回当日的完整曲线，
+      不依赖 16:40 批量导出是否跑完，也不会拿到上一交易日的过期数据；
+    - 9:15 之前、周六周日：读 ``minute1_fsdb``，即 D 盘上一交易日的分时
+      （9:15 前当日还没有任何成交，本地就是最新的可用数据）；
+    - 节假日即使是工作日也走实时，此时实时源返回上一交易日，``date`` 字段会写明。
+    """
+    now = now or datetime.now()
+    if now.weekday() >= 5:  # 周六/周日
+        return "local"
+    return "realtime" if now.hour * 60 + now.minute >= INTRADAY_LIVE_FROM_MINUTE else "local"
+
+
+async def _intraday_local_fallback(code: str) -> pd.DataFrame | None:
+    """实时源不可用时，退回本地最近交易日的分时（不校验日期）。
+
+    宁可展示上一交易日的收盘走势，也好过直接报错；返回的 ``date`` 字段会告诉
+    前端这是哪一天的数据。
+    """
+    try:
+        from app.data.minute import get_intraday_local
+
+        return await asyncio.to_thread(get_intraday_local, code)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("本地分时兜底失败 code=%s: %s", code, exc)
+        return None
+
+
+def _clip_trading_minutes(df: pd.DataFrame) -> pd.DataFrame:
+    """只保留连续竞价时段（09:30-11:30 / 13:00-15:00）的分钟。
+
+    实时源收盘后会多出 15:06-15:30 一批"盘后定价"记录：价格恒等于收盘价、
+    成交量近乎为 0。直接画出来会把 x 轴拉长半小时、右侧拖一条平线，也与本地
+    导出的 242 根对不上。统一裁掉，两个源的时间轴就一致了。
+    """
+    if df is None or df.empty or "time" not in df.columns:
+        return df
+    hhmm = df["time"].astype(str).str.slice(0, 5)
+    keep = (hhmm.ge("09:30") & hhmm.le("11:30")) | (hhmm.ge("13:00") & hhmm.le("15:00"))
+    trimmed = df[keep]
+    # 时间字段异常导致全被裁掉时，宁可原样返回也不给空图
+    return trimmed.reset_index(drop=True) if not trimmed.empty else df
+
+
 def _market_temperature(up: int, down: int, flat: int, limit_up: int, total: int) -> float:
     """市场温度计（0-100）。
 
@@ -269,18 +321,30 @@ def stock_quote(code: str) -> dict:
 async def stock_intraday(code: str) -> dict:
     """个股分时（逐分钟价格 / 均价 / 成交量），供详情页分时图使用。
 
-    主源东财逐笔成交聚合，失败降级腾讯分时；非交易时段返回最近交易日数据。
+    数据来源按日期分工，见 :func:`_intraday_source`：
+
+    - **当日**（工作日 9:15 之后）：实时源（腾讯分钟线，约 0.1s），保证盘中实时；
+    - **上一交易日及更早**（开盘前 / 周末）：读 D 盘 ``minute1_fsdb``，零联网。
+
+    实时源失败时退回本地最近交易日；本地也没有（新股未导出）时再由实时源兜底。
     """
     code = code.zfill(6)
 
-    # 本地 1 分钟数据优先：免联网、毫秒级，且不为数据源限频所困
-    df = None
-    try:
-        from app.data.minute import get_intraday_local
+    now = datetime.now()
+    source_used = _intraday_source(now)
 
-        df = await asyncio.to_thread(get_intraday_local, code)
-    except Exception as exc:  # noqa: BLE001 - 本地读失败不影响联网降级
-        logger.warning("本地分时读取失败 code=%s: %s", code, exc)
+    df = None
+    if source_used == "local":
+        try:
+            from app.data.minute import get_intraday_local
+
+            df = await asyncio.to_thread(get_intraday_local, code)
+        except Exception as exc:  # noqa: BLE001 - 本地读失败不影响联网降级
+            logger.warning("本地分时读取失败 code=%s: %s", code, exc)
+        if df is None or df.empty:
+            # 本地没有这只股票（新股 / 尚未导出）——退回实时源当兜底
+            logger.info("本地无分时，转实时源 code=%s", code)
+            source_used = "realtime"
 
     if df is None or df.empty:
         source = get_data_source()
@@ -290,10 +354,30 @@ async def stock_intraday(code: str) -> dict:
                 asyncio.to_thread(source.get_intraday, code), timeout=15
             )
         except asyncio.TimeoutError:
-            raise HTTPException(status_code=503, detail="分时数据源暂时不可用（超时）") from None
+            df = await _intraday_local_fallback(code)
+            if df is None or df.empty:
+                raise HTTPException(status_code=503, detail="分时数据源暂时不可用（超时）") from None
+            source_used = "local"
+            logger.warning("实时分时超时，已退回本地最近交易日 code=%s", code)
         except Exception as exc:  # noqa: BLE001
-            logger.exception("获取分时失败 code=%s", code)
-            raise HTTPException(status_code=502, detail=f"数据源异常: {exc}") from exc
+            df = await _intraday_local_fallback(code)
+            if df is None or df.empty:
+                logger.exception("获取分时失败 code=%s", code)
+                raise HTTPException(status_code=502, detail=f"数据源异常: {exc}") from exc
+            source_used = "local"
+            logger.warning("实时分时异常，已退回本地最近交易日 code=%s: %s", code, exc)
+
+    if df is None or df.empty:
+        raise HTTPException(status_code=404, detail=f"股票 {code} 暂无分时数据")
+
+    df = _clip_trading_minutes(df)
+    # 裁剪后可能为空（例如 9:15-9:30 集合竞价期间实时源还没有分钟数据）：
+    # 此时退回本地最近交易日，好过给前端一张空图或 404。
+    if df is None or df.empty:
+        df = await _intraday_local_fallback(code)
+        if df is not None and not df.empty:
+            source_used = "local"
+            logger.info("实时源无分钟数据，退回本地最近交易日 code=%s", code)
 
     if df is None or df.empty:
         raise HTTPException(status_code=404, detail=f"股票 {code} 暂无分时数据")
@@ -314,6 +398,15 @@ async def stock_intraday(code: str) -> dict:
     def _num(value, digits: int = 3) -> float | None:
         return None if value is None or pd.isna(value) else round(float(value), digits)
 
+    def _clock(value) -> str:
+        """时间统一成 HH:MM:SS —— 腾讯源给 HH:MM，本地 parquet 给 HH:MM:SS，
+        两种源交替使用，不统一的话前端 x 轴刻度会跳变。"""
+        text = str(value).strip()
+        parts = text.split(":")
+        if len(parts) == 2:
+            return f"{text}:00"
+        return text
+
     date = None
     if "date" in df.columns:
         dates = df["date"].dropna()
@@ -323,8 +416,9 @@ async def stock_intraday(code: str) -> dict:
     return _with_disclaimer({
         "code": code,
         "date": date,
+        "source": source_used,   # realtime=当日实时 / local=D 盘历史
         "prev_close": prev_close,
-        "times": [str(t) for t in df["time"]],
+        "times": [_clock(t) for t in df["time"]],
         "prices": [_num(v) for v in df["price"]],
         "avg_prices": [_num(v) for v in df["avg_price"]],
         "volumes": [0.0 if pd.isna(v) else float(v) for v in df["volume"]],

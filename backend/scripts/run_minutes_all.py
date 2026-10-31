@@ -16,7 +16,7 @@ from pathlib import Path
 HERE = Path(__file__).resolve().parent
 PY = sys.executable
 FETCH = HERE / "fetch_minutes_fsdb.py"
-DATA = Path(os.getenv("SAS_DATA_DIR", r"E:\Study\SAS\data"))
+DATA = Path(os.getenv("SAS_DATA_DIR", r"D:\Backup\SAS\data"))
 
 # 退市/停牌等无数据代码占比估计，达到该比例视为该周期已跑完
 DONE_RATIO = 0.95

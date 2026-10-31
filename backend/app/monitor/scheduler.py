@@ -148,8 +148,8 @@ class MarketScheduler:
             )
 
         self.scheduler.start()
-        # 开机后台预热K线（低并发，不阻塞服务就绪；其余由16:00调度补全）
-        asyncio.create_task(self.warmup_klines())
+        # 开机后台预热K线（低并发，不阻塞服务就绪；只补落后的，不整市场重跑）
+        asyncio.create_task(self.warmup_klines(boot=True))
         logger.info(
             "调度器已启动（快照60s / 异动5min / 开盘9:20 / 盘中%dm / "
             "实时撮合%ds / 收盘选股15:30 / 盘后15:35 / 结算15:40 / K线预热16:00%s）",
@@ -491,9 +491,18 @@ class MarketScheduler:
     # ------------------------------------------------------------------
     # K线预热（后台，加速扫描）
     # ------------------------------------------------------------------
-    async def warmup_klines(self) -> dict:
-        """全市场K线预热：后台增量刷新本地 Parquet 缓存，消除扫描实时网络拉取。"""
+    async def warmup_klines(self, boot: bool = False) -> dict:
+        """全市场K线预热：后台增量刷新本地 Parquet 缓存，消除扫描实时网络拉取。
+
+        Args:
+            boot: 开机调用。此时**只补真正落后的股票**——收盘（16:00）那次
+                已经是全市场，重启再全量重跑一遍纯属浪费（5000+ 只需 40~60
+                分钟，把磁盘和默认线程池占满），而且开机时当日 bar 可能
+                还没生成，重拉也拿不到新数据。
+        """
         try:
+            if boot:
+                return await self._warmup_stale()
             if self.settings.kline_warmup_top_n > 0:
                 pool = await asyncio.to_thread(get_stock_pool)
                 codes = pool["code"].head(self.settings.kline_warmup_top_n).tolist()
@@ -502,6 +511,27 @@ class MarketScheduler:
         except Exception as exc:  # noqa: BLE001
             logger.exception("K线预热失败")
             return {"error": str(exc)}
+
+    async def _warmup_stale(self) -> dict:
+        """开机轻量预热：扫一遍本地缓存，只拉落后于最新交易日的股票。"""
+        from app.data.kline_health import find_laggards, scan_last_dates
+
+        kdir = self.settings.kline_dir
+        last = await asyncio.to_thread(scan_last_dates, kdir)
+        if not last:
+            return {"skipped": "本地无K线缓存"}
+        todo, dead, target = find_laggards(last)
+        if not todo:
+            logger.info("开机预热：%d 只日K均已最新（%s），跳过", len(last), target)
+            return {"skipped": "全部最新", "total": len(last), "target": target}
+
+        codes = [c for c, _ in todo]
+        logger.info(
+            "开机预热：%d/%d 只落后于 %s，只补这些（停牌/退市 %d 只跳过）",
+            len(codes), len(last), target, len(dead),
+        )
+        res = await screener_warmup(codes)
+        return {**res, "target": target, "lagging": len(codes), "dead": len(dead)}
 
     # ------------------------------------------------------------------
     # 影子账户（16:45）：冻结参数逐日重跑，只记录不下单

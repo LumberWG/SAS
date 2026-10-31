@@ -191,6 +191,50 @@ def test_accept_verdict_three_lines():
     assert verdict([], [])["ok"] is False
 
 
+def test_intraday_bar_count_skips_lunch_break():
+    """全时段买入的时点折算：午休不产生 5 分钟 bar，13:30 是第 30 根而非第 48 根。"""
+    from app.backtest.pipeline import _intraday_bar_count as count
+
+    assert count("09:30") == 0          # 开盘瞬间还没有完整 bar
+    assert count("09:35") == 1
+    assert count("09:45") == 3
+    assert count("11:30") == 24         # 上午 24 根
+    assert count("12:00") == 24         # 午休沿用上午
+    assert count("13:00") == 24
+    assert count("13:30") == 30
+    assert count("15:00") == 48
+    assert count("15:30") == 48         # 收盘后按最后一根截断
+    assert count("oops") == 0
+
+
+def test_open_window_fill_returns_first_opened_price(monkeypatch):
+    """开板补单：窗口内第一根「低于前收×1.095」的分钟价成交，一直封板返回 None。"""
+    import app.backtest.pipeline as pl
+
+    def bars(prices):
+        return {
+            "open": [prices[0]] * len(prices), "close": list(prices),
+            "high": list(prices), "low": list(prices),
+            "volume": [1.0] * len(prices), "amount": [1.0] * len(prices),
+        }
+
+    # 前收 10 → 涨停线 10.95：前两根仍在板上，第 3 根 10.5 才打开
+    monkeypatch.setattr(
+        pl, "get_minute_day_bars", lambda code, date: bars([11.0, 11.0, 10.5, 10.4])
+    )
+    assert pl._open_window_fill("600000", "2026-10-30", 10.0, 30) == 10.5
+
+    # 窗口只有 2 根，一直封板 → 买不到
+    monkeypatch.setattr(
+        pl, "get_minute_day_bars", lambda code, date: bars([11.0, 11.1])
+    )
+    assert pl._open_window_fill("600000", "2026-10-30", 10.0, 5) is None
+
+    # 无本地分钟数据 → 保守判为买不到（不降级成开盘价成交）
+    monkeypatch.setattr(pl, "get_minute_day_bars", lambda code, date: None)
+    assert pl._open_window_fill("600000", "2026-10-30", 10.0, 30) is None
+
+
 def test_slippage_cost_sign_convention():
     """成交偏离的符号约定：cost_bps > 0 一律表示"比开盘价吃亏"。"""
     from scripts.slippage_audit import bucket_of, cost_bps

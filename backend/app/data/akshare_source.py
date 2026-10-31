@@ -401,18 +401,24 @@ class AkshareDataSource(BaseDataSource):
     def get_intraday(self, code: str) -> pd.DataFrame:
         """单只股票当日分时（逐分钟价格 / 当日均价 / 成交量）。
 
-        主源东财逐笔成交（聚合为分钟）；失败降级腾讯分时——
-        腾讯源自带累计成交量与成交额，均价口径一致，且收盘后仍返回上一交易日。
+        **先腾讯、后东财**：腾讯分时是官方分钟线，直连 0.1~0.6s 即可拿到；
+        东财那条走逐笔成交明细再本地聚合，单只 8s 起、盘中还容易被限流。
+        两者口径一致：价格为分钟收盘，volume 为分钟成交量（手），
+        avg_price 为当日累计成交均价；收盘后均返回最近交易日。
         """
         try:
-            df = self._call("stock_intraday_em", symbol=code, timeout=8.0, retries=0)
-            minute = _ticks_to_minutes(df)
-            if not minute.empty:
-                return minute
-            raise DataSourceError("akshare.stock_intraday_em 返回空数据")
+            df = tencent_minute(code)
+            if df is not None and not df.empty:
+                return df
+            raise DataSourceError("tencent_minute 返回空数据")
         except Exception as exc:  # noqa: BLE001 - 数据源异常统一降级
-            logger.warning("东方财富分时不可用(%s)，降级为腾讯分时 code=%s", exc, code)
-        return tencent_minute(code)
+            logger.warning("腾讯分时不可用(%s)，降级为东财逐笔 code=%s", exc, code)
+
+        df = self._call("stock_intraday_em", symbol=code, timeout=6.0, retries=0)
+        minute = _ticks_to_minutes(df)
+        if minute.empty:
+            raise DataSourceError("akshare.stock_intraday_em 返回空数据")
+        return minute
 
     # ------------------------------------------------------------------
     # 降级K线链

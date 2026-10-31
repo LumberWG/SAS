@@ -174,7 +174,7 @@ class TestShadowJob:
         )
         monkeypatch.setattr(sched_mod, "get_settings", lambda: settings)
 
-        async def fake_warmup():
+        async def fake_warmup(boot: bool = False):  # noqa: ARG001 - 兼容开机调用
             return {}
 
         async def runner() -> set[str]:

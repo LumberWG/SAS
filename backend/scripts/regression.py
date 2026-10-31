@@ -47,10 +47,16 @@ def _run_window(task: tuple) -> tuple[str, list[dict], dict]:
     rows: list[dict] = []
     details: dict[str, dict] = {}
     for name in names:
-        params = PipelineParams(
-            start_date=start, end_date=end, universe_size=universe,
-            initial_capital=capital, max_positions=max_positions, **PROFILES[name],
-        )
+        # profile 允许覆盖脚本级默认（否则同一轮里没法对比不同股票池 / 持仓数：
+        # 以前 `universe_size=universe` 与 `**PROFILES[name]` 同时出现会直接 TypeError）。
+        # 只在该键**没有**被 profile 指定时才填脚本参数，避免把 profile 的值顶掉。
+        overrides = dict(PROFILES[name])
+        overrides.setdefault("universe_size", universe)
+        if capital is not None:
+            overrides.setdefault("initial_capital", capital)
+        if max_positions is not None:
+            overrides.setdefault("max_positions", max_positions)
+        params = PipelineParams(start_date=start, end_date=end, **overrides)
         t0 = time.time()
         try:
             result = _run_sync(params)
