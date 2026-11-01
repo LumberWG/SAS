@@ -3,8 +3,8 @@
  * 个股详情：分时图 / K线图（可切换）+ 指标面板 + LLM 决策仪表盘。
  */
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
-import { useRoute } from 'vue-router'
-import { CheckCircle2, AlertTriangle, XCircle, Sparkles, Star } from 'lucide-vue-next'
+import { useRoute, useRouter } from 'vue-router'
+import { ArrowLeft, CheckCircle2, AlertTriangle, XCircle, Sparkles, Star } from 'lucide-vue-next'
 
 import {
   addWatch,
@@ -23,7 +23,25 @@ import IntradayChart from '../components/IntradayChart.vue'
 import KLineChart from '../components/KLineChart.vue'
 
 const route = useRoute()
+const router = useRouter()
 const code = computed(() => String(route.params.code ?? '600519'))
+
+/**
+ * 返回进入本页之前的页面。
+ *
+ * 用 history 而不是写死 `router.push('/signals')`：个股详情有四个入口
+ * （信号页 / 选股中心 / 智能建议 / 模拟盘持仓），写死会把选股中心的筛选条件
+ * 和模拟盘的 tab 全部丢掉。`history.state.back` 由 vue-router 维护，刷新后
+ * 仍在；直接打开链接（新标签 / 收藏）时为 null，此时退回信号页兜底。
+ */
+function goBack() {
+  const state = window.history.state as { back?: string | null } | null
+  if (state?.back) {
+    router.back()
+    return
+  }
+  router.push('/signals')
+}
 
 const quote = ref<StockQuote | null>(null)
 const kline = ref<{ dates: string[]; kline: number[][]; volumes: number[] } | null>(null)
@@ -195,6 +213,15 @@ function statusColor(status: string) {
 
 <template>
   <div class="space-y-5">
+    <!-- 返回：回到进入前的页面（直达链接/新标签打开时回退到信号页） -->
+    <button
+      class="inline-flex items-center gap-1.5 text-[13.5px] text-content-muted transition-colors hover:text-content"
+      @click="goBack"
+    >
+      <ArrowLeft class="h-4 w-4" />
+      返回
+    </button>
+
     <!-- 股票头部信息 -->
     <div class="glass-card flex flex-wrap items-center justify-between gap-4 p-5">
       <div class="flex flex-wrap items-center justify-between gap-4">
