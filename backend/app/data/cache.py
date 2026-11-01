@@ -10,6 +10,8 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+from contextlib import contextmanager
+from contextvars import ContextVar
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -22,6 +24,82 @@ from app.config import get_settings
 def _now() -> str:
     """当前时间字符串（本地时区）。"""
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+
+# ----------------------------------------------------------------------
+# 账本作用域（线上模拟盘 / 并行模拟账本）
+# ----------------------------------------------------------------------
+#: 并行模拟账本的独立表：与 paper_* 一比一同构，只多一列 account_id。
+#: 线上模拟盘继续用 paper_* 表（单账户），影子账本写 sim_* 表，互不影响。
+_SIM_TABLES = {
+    "paper_account": "sim_account",
+    "paper_positions": "sim_positions",
+    "paper_position_lots": "sim_lots",
+    "paper_trades": "sim_trades",
+    "paper_equity": "sim_equity",
+}
+
+#: 当前账本 id；None = 线上主账本（paper_* 表）。
+#: 用 ContextVar 而不是给引擎里 20 多处 db 调用加参数：tick 里
+#: ``with ledger_scope(id)`` 把一个代码块切到某个影子账本，引擎内的
+#: ``db.paper_*`` 会自动落到 sim_* 表 —— 交易规则代码一行都不用改，
+#: 也就不会出现「改漏一处导致线上主账本被污染」。
+_LEDGER_CTX: ContextVar[int | None] = ContextVar("sas_ledger", default=None)
+
+
+@contextmanager
+def ledger_scope(account_id: int | None):
+    """把 with 块内所有 ``db.paper_*`` 调用路由到指定模拟账本。"""
+    token = _LEDGER_CTX.set(account_id)
+    try:
+        yield
+    finally:
+        _LEDGER_CTX.reset(token)
+
+
+def current_ledger() -> int | None:
+    """当前账本 id（None=线上主账本）。"""
+    return _LEDGER_CTX.get()
+
+
+class _Scope:
+    """当前账本的 SQL 片段生成器：表名 / account_id 过滤 / 前缀参数。
+
+    ``where``/``args``/``cols``/``vals`` 必须成对使用，参数顺序才与列顺序一致。
+    """
+
+    __slots__ = ("account_id",)
+
+    def __init__(self, account_id: int | None) -> None:
+        self.account_id = account_id
+
+    @property
+    def sim(self) -> bool:
+        return self.account_id is not None
+
+    def t(self, base: str) -> str:
+        return _SIM_TABLES[base] if self.sim else base
+
+    def where(self, cond: str = "") -> str:
+        if not self.sim:
+            return f" WHERE {cond}" if cond else ""
+        return f" WHERE account_id=? AND {cond}" if cond else " WHERE account_id=?"
+
+    def args(self, *values: Any) -> tuple:
+        return (self.account_id, *values) if self.sim else values
+
+    def cols(self, cols: str) -> str:
+        return f"account_id,{cols}" if self.sim else cols
+
+    def vals(self, n: int) -> str:
+        return ",".join(["?"] * (n + 1)) if self.sim else ",".join(["?"] * n)
+
+    def conflict(self, key: str) -> str:
+        return f"account_id,{key}" if self.sim else key
+
+
+def _scope() -> _Scope:
+    return _Scope(_LEDGER_CTX.get())
 
 
 # ----------------------------------------------------------------------
@@ -224,6 +302,72 @@ CREATE TABLE IF NOT EXISTS paper_equity (
     cash          REAL NOT NULL,
     market_value  REAL NOT NULL,
     created_at    TEXT NOT NULL
+);
+-- 并行模拟账本（同一份信号 + 不同处置参数各自记账；与 paper_* 完全隔离，
+-- 主键带 account_id，因此同一代码在不同账本可以各自持仓、各有一条净值）
+CREATE TABLE IF NOT EXISTS sim_account (
+    account_id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    tag             TEXT NOT NULL UNIQUE,        -- 方案标签（前端/接口用它定位账本）
+    profile         TEXT NOT NULL DEFAULT '',    -- 来源方案名（app/backtest/profiles.py）
+    overrides       TEXT NOT NULL DEFAULT '{}',  -- 已换算成 paper_* 的覆盖参数（JSON）
+    initial_capital REAL NOT NULL,
+    cash            REAL NOT NULL,
+    enabled         INTEGER NOT NULL DEFAULT 1,
+    note            TEXT NOT NULL DEFAULT '',
+    created_at      TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS sim_positions (
+    account_id INTEGER NOT NULL,
+    code       TEXT NOT NULL,
+    name       TEXT,
+    shares     INTEGER NOT NULL,
+    cost_price REAL NOT NULL,
+    buy_date   TEXT NOT NULL,
+    strategy   TEXT,
+    score      REAL DEFAULT 0,
+    stop_price REAL,
+    peak_price REAL,
+    sellable_shares INTEGER DEFAULT 0,
+    t_t_sold   INTEGER DEFAULT 0,
+    t_sold_date TEXT,
+    t_down_armed INTEGER DEFAULT 0,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (account_id, code)
+);
+CREATE TABLE IF NOT EXISTS sim_lots (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id INTEGER NOT NULL,
+    code       TEXT NOT NULL,
+    shares     INTEGER NOT NULL,
+    cost_price REAL NOT NULL,
+    buy_date   TEXT NOT NULL,
+    tag        TEXT DEFAULT 'base',
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_sim_lots_acct ON sim_lots(account_id, code);
+CREATE TABLE IF NOT EXISTS sim_trades (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    account_id INTEGER NOT NULL,
+    code       TEXT NOT NULL,
+    name       TEXT,
+    side       TEXT NOT NULL,
+    price      REAL NOT NULL,
+    shares     INTEGER NOT NULL,
+    amount     REAL NOT NULL,
+    fee        REAL NOT NULL,
+    reason     TEXT,
+    trade_date TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_sim_trades_acct ON sim_trades(account_id, trade_date);
+CREATE TABLE IF NOT EXISTS sim_equity (
+    account_id   INTEGER NOT NULL,
+    date         TEXT NOT NULL,
+    total_asset  REAL NOT NULL,
+    cash         REAL NOT NULL,
+    market_value REAL NOT NULL,
+    created_at   TEXT NOT NULL,
+    PRIMARY KEY (account_id, date)
 );
 -- 智能建议（盘中买卖建议 / 盘后明日关注，按批次存储）
 CREATE TABLE IF NOT EXISTS recommendations (
@@ -640,10 +784,13 @@ class Database:
     # ---------------- 模拟交易 ----------------
 
     def get_paper_account(self) -> dict[str, Any] | None:
-        """模拟账户（不存在返回 None）。"""
+        """模拟账户（不存在返回 None）。账本作用域内返回该影子账本的账户行。"""
+        led = _scope()
         with self._lock, self._connect() as conn:
             row = conn.execute(
-                "SELECT * FROM paper_account WHERE id=1"
+                f"SELECT * FROM {led.t('paper_account')}"
+                f"{led.where('' if led.sim else 'id=1')}",
+                led.args(),
             ).fetchone()
         return dict(row) if row else None
 
@@ -652,6 +799,10 @@ class Database:
         existing = self.get_paper_account()
         if existing:
             return existing
+        led = _scope()
+        if led.sim:
+            # 影子账本由 ensure_sim_accounts() 预建；走到这里说明账本行已被删
+            raise RuntimeError(f"影子账本 {led.account_id} 不存在，请重启服务重建")
         with self._lock, self._connect() as conn:
             conn.execute(
                 "INSERT INTO paper_account(id, initial_capital, cash, created_at)"
@@ -661,20 +812,30 @@ class Database:
         return {"initial_capital": initial_capital, "cash": initial_capital}
 
     def update_paper_cash(self, cash: float) -> None:
+        led = _scope()
         with self._lock, self._connect() as conn:
-            conn.execute("UPDATE paper_account SET cash=? WHERE id=1", (cash,))
+            conn.execute(
+                f"UPDATE {led.t('paper_account')} SET cash=?"
+                f"{led.where('' if led.sim else 'id=1')}",
+                (cash, *led.args()),
+            )
 
     def list_paper_positions(self) -> list[dict[str, Any]]:
+        led = _scope()
         with self._lock, self._connect() as conn:
             rows = conn.execute(
-                "SELECT * FROM paper_positions ORDER BY created_at"
+                f"SELECT * FROM {led.t('paper_positions')}{led.where()}"
+                " ORDER BY created_at",
+                led.args(),
             ).fetchall()
         return [dict(r) for r in rows]
 
     def get_paper_position(self, code: str) -> dict[str, Any] | None:
+        led = _scope()
         with self._lock, self._connect() as conn:
             row = conn.execute(
-                "SELECT * FROM paper_positions WHERE code=?", (code,)
+                f"SELECT * FROM {led.t('paper_positions')}{led.where('code=?')}",
+                led.args(code),
             ).fetchone()
         return dict(row) if row else None
 
@@ -684,74 +845,96 @@ class Database:
         stop_price: float | None = None, peak_price: float | None = None,
     ) -> None:
         """新增/覆盖持仓（同代码重复买入时摊薄成本由调用方算好传入）。"""
+        led = _scope()
+        cols = (
+            "code, name, shares, cost_price, buy_date, strategy, score,"
+            " stop_price, peak_price, created_at"
+        )
+        params = (
+            code, name, shares, cost_price, buy_date, strategy, score,
+            stop_price, peak_price, _now(),
+        )
         with self._lock, self._connect() as conn:
             conn.execute(
-                "INSERT INTO paper_positions(code, name, shares, cost_price,"
-                " buy_date, strategy, score, stop_price, peak_price, created_at)"
-                " VALUES(?,?,?,?,?,?,?,?,?,?)"
-                " ON CONFLICT(code) DO UPDATE SET name=excluded.name,"
+                f"INSERT INTO {led.t('paper_positions')}({led.cols(cols)})"
+                f" VALUES({led.vals(10)})"
+                f" ON CONFLICT({led.conflict('code')}) DO UPDATE SET name=excluded.name,"
                 " shares=excluded.shares, cost_price=excluded.cost_price,"
                 " buy_date=excluded.buy_date, strategy=excluded.strategy,"
                 " score=excluded.score, stop_price=excluded.stop_price,"
                 " peak_price=excluded.peak_price",
-                (code, name, shares, cost_price, buy_date, strategy, score,
-                 stop_price, peak_price, _now()),
+                led.args(*params),
             )
 
     def update_paper_peak(self, code: str, peak_price: float) -> None:
         """更新持仓期最高价（移动/保本止损跟踪用）。"""
+        led = _scope()
         with self._lock, self._connect() as conn:
             conn.execute(
-                "UPDATE paper_positions SET peak_price=? WHERE code=?",
-                (peak_price, code),
+                f"UPDATE {led.t('paper_positions')} SET peak_price=?"
+                f"{led.where('code=?')}",
+                (peak_price, *led.args(code)),
             )
 
     def count_paper_trades(
         self, reason_prefix: str, trade_date: str, side: str = "sell"
     ) -> int:
         """统计某日某类交易笔数（轮动替换的每日次数限制用）。"""
+        led = _scope()
         with self._lock, self._connect() as conn:
             row = conn.execute(
-                "SELECT COUNT(*) AS n FROM paper_trades"
-                " WHERE trade_date=? AND side=? AND reason LIKE ?",
-                (trade_date, side, f"{reason_prefix}%"),
+                f"SELECT COUNT(*) AS n FROM {led.t('paper_trades')}"
+                f"{led.where('trade_date=? AND side=? AND reason LIKE ?')}",
+                led.args(trade_date, side, f"{reason_prefix}%"),
             ).fetchone()
         return int(row["n"] if row else 0)
 
     def remove_paper_position(self, code: str) -> None:
+        led = _scope()
         with self._lock, self._connect() as conn:
-            conn.execute("DELETE FROM paper_positions WHERE code=?", (code,))
+            conn.execute(
+                f"DELETE FROM {led.t('paper_positions')}{led.where('code=?')}",
+                led.args(code),
+            )
 
     # ---------------- 持仓批次（做T / 严格 T+1：每批带 buy_date 算可卖） ----------------
     def _aggregate_paper_summary(self, conn, code: str) -> bool:
         """从 lots 聚合汇总行的 shares/cost_price/buy_date；无批次则删汇总行。返回是否仍有持仓。"""
+        led = _scope()
         lots = conn.execute(
-            "SELECT shares, cost_price, buy_date FROM paper_position_lots WHERE code=?",
-            (code,),
+            f"SELECT shares, cost_price, buy_date FROM {led.t('paper_position_lots')}"
+            f"{led.where('code=?')}",
+            led.args(code),
         ).fetchall()
         if not lots:
-            conn.execute("DELETE FROM paper_positions WHERE code=?", (code,))
+            conn.execute(
+                f"DELETE FROM {led.t('paper_positions')}{led.where('code=?')}",
+                led.args(code),
+            )
             return False
         total_shares = sum(int(r["shares"]) for r in lots)
         total_cost = sum(int(r["shares"]) * float(r["cost_price"]) for r in lots)
         agg_cost = (total_cost / total_shares) if total_shares else 0.0
         max_buy = max(str(r["buy_date"]) for r in lots)
         conn.execute(
-            "UPDATE paper_positions SET shares=?, cost_price=?, buy_date=? WHERE code=?",
-            (total_shares, round(agg_cost, 4), max_buy, code),
+            f"UPDATE {led.t('paper_positions')} SET shares=?, cost_price=?, buy_date=?"
+            f"{led.where('code=?')}",
+            (total_shares, round(agg_cost, 4), max_buy, *led.args(code)),
         )
         return True
 
     def _refresh_paper_sellable(self, conn, code: str, today: str) -> int:
+        led = _scope()
         row = conn.execute(
-            "SELECT COALESCE(SUM(shares),0) AS s FROM paper_position_lots "
-            "WHERE code=? AND buy_date < ?",
-            (code, today),
+            f"SELECT COALESCE(SUM(shares),0) AS s FROM {led.t('paper_position_lots')}"
+            f"{led.where('code=? AND buy_date < ?')}",
+            led.args(code, today),
         ).fetchone()
         sellable = int(row["s"]) if row else 0
         conn.execute(
-            "UPDATE paper_positions SET sellable_shares=? WHERE code=?",
-            (sellable, code),
+            f"UPDATE {led.t('paper_positions')} SET sellable_shares=?"
+            f"{led.where('code=?')}",
+            (sellable, *led.args(code)),
         )
         return sellable
 
@@ -763,29 +946,35 @@ class Database:
     ) -> None:
         """新增一个买入批次（开仓 / 做T加仓 / 做T买回都走这里；buy_date=当日→次日可卖）。"""
         today = today or datetime.now().strftime("%Y-%m-%d")
+        led = _scope()
         with self._lock, self._connect() as conn:
             conn.execute(
-                "INSERT INTO paper_position_lots(code, shares, cost_price, buy_date, tag, created_at)"
-                " VALUES(?,?,?,?,?,?)",
-                (code, shares, cost_price, buy_date, tag, _now()),
+                f"INSERT INTO {led.t('paper_position_lots')}"
+                f"({led.cols('code, shares, cost_price, buy_date, tag, created_at')})"
+                f" VALUES({led.vals(6)})",
+                led.args(code, shares, cost_price, buy_date, tag, _now()),
             )
             exists = conn.execute(
-                "SELECT 1 FROM paper_positions WHERE code=?", (code,)
+                f"SELECT 1 FROM {led.t('paper_positions')}{led.where('code=?')}",
+                led.args(code),
             ).fetchone()
             if exists:
                 self._aggregate_paper_summary(conn, code)
             else:
+                cols = (
+                    "code,name,shares,cost_price,buy_date,strategy,score,"
+                    "stop_price,peak_price,sellable_shares,created_at"
+                )
                 conn.execute(
-                    "INSERT INTO paper_positions(code,name,shares,cost_price,buy_date,"
-                    " strategy,score,stop_price,peak_price,sellable_shares,created_at)"
-                    " VALUES(?,?,?,?,?,?,?,?,?,?,?)",
-                    (code, name, shares, round(cost_price, 4), buy_date,
-                     strategy, score, stop_price, peak_price, 0, _now()),
+                    f"INSERT INTO {led.t('paper_positions')}({led.cols(cols)})"
+                    f" VALUES({led.vals(11)})",
+                    led.args(code, name, shares, round(cost_price, 4), buy_date,
+                             strategy, score, stop_price, peak_price, 0, _now()),
                 )
             conn.execute(
-                "UPDATE paper_positions SET name=?, strategy=?, score=?, "
-                "stop_price=?, peak_price=? WHERE code=?",
-                (name, strategy, score, stop_price, peak_price, code),
+                f"UPDATE {led.t('paper_positions')} SET name=?, strategy=?, score=?, "
+                f"stop_price=?, peak_price=?{led.where('code=?')}",
+                (name, strategy, score, stop_price, peak_price, *led.args(code)),
             )
             self._refresh_paper_sellable(conn, code, today)
 
@@ -798,11 +987,12 @@ class Database:
         """
         if want_shares <= 0:
             return 0
+        led = _scope()
         with self._lock, self._connect() as conn:
             lots = conn.execute(
-                "SELECT id, shares FROM paper_position_lots "
-                "WHERE code=? AND tag=? AND buy_date < ? ORDER BY buy_date, id",
-                (code, tag, today),
+                f"SELECT id, shares FROM {led.t('paper_position_lots')}"
+                f"{led.where('code=? AND tag=? AND buy_date < ?')} ORDER BY buy_date, id",
+                led.args(code, tag, today),
             ).fetchall()
             remaining = int(want_shares)
             sold = 0
@@ -812,10 +1002,12 @@ class Database:
                 take = min(int(lot["shares"]), remaining)
                 new_shares = int(lot["shares"]) - take
                 if new_shares <= 0:
-                    conn.execute("DELETE FROM paper_position_lots WHERE id=?", (lot["id"],))
+                    conn.execute(
+                        f"DELETE FROM {led.t('paper_position_lots')} WHERE id=?",
+                        (lot["id"],))
                 else:
                     conn.execute(
-                        "UPDATE paper_position_lots SET shares=? WHERE id=?",
+                        f"UPDATE {led.t('paper_position_lots')} SET shares=? WHERE id=?",
                         (new_shares, lot["id"]),
                     )
                 remaining -= take
@@ -828,11 +1020,12 @@ class Database:
         """从可卖批次（buy_date<today，FIFO 最老先卖）减仓，返回实际卖出股数；刷新汇总与可卖。"""
         if want_shares <= 0:
             return 0
+        led = _scope()
         with self._lock, self._connect() as conn:
             lots = conn.execute(
-                "SELECT id, shares FROM paper_position_lots WHERE code=? AND buy_date < ? "
-                "ORDER BY buy_date, id",
-                (code, today),
+                f"SELECT id, shares FROM {led.t('paper_position_lots')}"
+                f"{led.where('code=? AND buy_date < ?')} ORDER BY buy_date, id",
+                led.args(code, today),
             ).fetchall()
             remaining = int(want_shares)
             sold = 0
@@ -842,10 +1035,12 @@ class Database:
                 take = min(int(lot["shares"]), remaining)
                 new_shares = int(lot["shares"]) - take
                 if new_shares <= 0:
-                    conn.execute("DELETE FROM paper_position_lots WHERE id=?", (lot["id"],))
+                    conn.execute(
+                        f"DELETE FROM {led.t('paper_position_lots')} WHERE id=?",
+                        (lot["id"],))
                 else:
                     conn.execute(
-                        "UPDATE paper_position_lots SET shares=? WHERE id=?",
+                        f"UPDATE {led.t('paper_position_lots')} SET shares=? WHERE id=?",
                         (new_shares, lot["id"]),
                     )
                 remaining -= take
@@ -855,14 +1050,19 @@ class Database:
             return sold
 
     def list_paper_lots(self, code: str | None = None) -> list[dict[str, Any]]:
+        led = _scope()
         with self._lock, self._connect() as conn:
             if code:
                 rows = conn.execute(
-                    "SELECT * FROM paper_position_lots WHERE code=? ORDER BY id", (code,)
+                    f"SELECT * FROM {led.t('paper_position_lots')}"
+                    f"{led.where('code=?')} ORDER BY id",
+                    led.args(code),
                 ).fetchall()
             else:
                 rows = conn.execute(
-                    "SELECT * FROM paper_position_lots ORDER BY code, id"
+                    f"SELECT * FROM {led.t('paper_position_lots')}{led.where()}"
+                    " ORDER BY code, id",
+                    led.args(),
                 ).fetchall()
         return [dict(r) for r in rows]
 
@@ -872,22 +1072,28 @@ class Database:
         在 engine 切换到批次卖出逻辑后、首次启动时调用一次，避免历史持仓因无 lot 而无法卖出。
         """
         today = today or datetime.now().strftime("%Y-%m-%d")
+        led = _scope()
         with self._lock, self._connect() as conn:
             rows = conn.execute(
-                "SELECT code, shares, cost_price, buy_date FROM paper_positions"
+                f"SELECT code, shares, cost_price, buy_date FROM "
+                f"{led.t('paper_positions')}{led.where()}",
+                led.args(),
             ).fetchall()
             for r in rows:
                 code = r["code"]
                 has = conn.execute(
-                    "SELECT 1 FROM paper_position_lots WHERE code=?", (code,)
+                    f"SELECT 1 FROM {led.t('paper_position_lots')}{led.where('code=?')}",
+                    led.args(code),
                 ).fetchone()
                 if has:
                     self._refresh_paper_sellable(conn, code, today)
                     continue
                 conn.execute(
-                    "INSERT INTO paper_position_lots(code, shares, cost_price, buy_date, created_at)"
-                    " VALUES(?,?,?,?,?)",
-                    (code, int(r["shares"]), float(r["cost_price"]), str(r["buy_date"]), _now()),
+                    f"INSERT INTO {led.t('paper_position_lots')}"
+                    f"({led.cols('code, shares, cost_price, buy_date, created_at')})"
+                    f" VALUES({led.vals(5)})",
+                    led.args(code, int(r["shares"]), float(r["cost_price"]),
+                             str(r["buy_date"]), _now()),
                 )
                 self._refresh_paper_sellable(conn, code, today)
 
@@ -914,38 +1120,48 @@ class Database:
             vals.append(t_sold_date or None)
         if not sets:
             return
-        vals.append(code)
+        led = _scope()
         with self._lock, self._connect() as conn:
             conn.execute(
-                "UPDATE paper_positions SET " + ",".join(sets) + " WHERE code=?", vals
+                f"UPDATE {led.t('paper_positions')} SET " + ",".join(sets)
+                + led.where("code=?"),
+                (*vals, *led.args(code)),
             )
 
     def insert_paper_trade(
         self, code: str, name: str, side: str, price: float, shares: int,
         amount: float, fee: float, reason: str, trade_date: str,
     ) -> None:
+        led = _scope()
+        cols = (
+            "code, name, side, price, shares, amount, fee, reason,"
+            " trade_date, created_at"
+        )
         with self._lock, self._connect() as conn:
             conn.execute(
-                "INSERT INTO paper_trades(code, name, side, price, shares,"
-                " amount, fee, reason, trade_date, created_at)"
-                " VALUES(?,?,?,?,?,?,?,?,?,?)",
-                (code, name, side, price, shares, amount, fee, reason,
-                 trade_date, _now()),
+                f"INSERT INTO {led.t('paper_trades')}({led.cols(cols)})"
+                f" VALUES({led.vals(10)})",
+                led.args(code, name, side, price, shares, amount, fee, reason,
+                         trade_date, _now()),
             )
 
     def list_paper_trades(
         self, limit: int = 100, code: str | None = None
     ) -> list[dict[str, Any]]:
         """交易流水（按时间倒序）。"""
+        led = _scope()
         with self._lock, self._connect() as conn:
             if code:
                 rows = conn.execute(
-                    "SELECT * FROM paper_trades WHERE code=? ORDER BY id DESC LIMIT ?",
-                    (code, limit),
+                    f"SELECT * FROM {led.t('paper_trades')}{led.where('code=?')}"
+                    " ORDER BY id DESC LIMIT ?",
+                    led.args(code, limit),
                 ).fetchall()
             else:
                 rows = conn.execute(
-                    "SELECT * FROM paper_trades ORDER BY id DESC LIMIT ?", (limit,)
+                    f"SELECT * FROM {led.t('paper_trades')}{led.where()}"
+                    " ORDER BY id DESC LIMIT ?",
+                    led.args(limit),
                 ).fetchall()
         return [dict(r) for r in rows]
 
@@ -953,29 +1169,44 @@ class Database:
         self, date: str, total_asset: float, cash: float, market_value: float
     ) -> None:
         """保存每日净值快照（同日覆盖）。"""
+        led = _scope()
+        cols = "date, total_asset, cash, market_value, created_at"
         with self._lock, self._connect() as conn:
             conn.execute(
-                "INSERT INTO paper_equity(date, total_asset, cash, market_value,"
-                " created_at) VALUES(?,?,?,?,?)"
-                " ON CONFLICT(date) DO UPDATE SET total_asset=excluded.total_asset,"
-                " cash=excluded.cash, market_value=excluded.market_value",
-                (date, total_asset, cash, market_value, _now()),
+                f"INSERT INTO {led.t('paper_equity')}({led.cols(cols)})"
+                f" VALUES({led.vals(5)})"
+                f" ON CONFLICT({led.conflict('date')}) DO UPDATE SET"
+                " total_asset=excluded.total_asset, cash=excluded.cash,"
+                " market_value=excluded.market_value",
+                led.args(date, total_asset, cash, market_value, _now()),
             )
 
     def list_paper_equity(self, limit: int = 250) -> list[dict[str, Any]]:
         """净值曲线（按日期升序，限制条数）。"""
+        led = _scope()
         with self._lock, self._connect() as conn:
             rows = conn.execute(
-                "SELECT * FROM paper_equity ORDER BY date LIMIT ?", (limit,)
+                f"SELECT * FROM {led.t('paper_equity')}{led.where()}"
+                " ORDER BY date LIMIT ?",
+                led.args(limit),
             ).fetchall()
         return [dict(r) for r in rows]
 
     def reset_paper_account(self, initial_capital: float) -> None:
-        """重置模拟账户：清空持仓/流水/净值，资金恢复初始值。"""
+        """重置模拟账户：清空持仓/批次/流水/净值，资金恢复初始值。"""
+        led = _scope()
         with self._lock, self._connect() as conn:
-            conn.execute("DELETE FROM paper_positions")
-            conn.execute("DELETE FROM paper_trades")
-            conn.execute("DELETE FROM paper_equity")
+            for base in (
+                "paper_positions", "paper_position_lots", "paper_trades", "paper_equity",
+            ):
+                conn.execute(f"DELETE FROM {led.t(base)}{led.where()}", led.args())
+            if led.sim:
+                conn.execute(
+                    f"UPDATE {led.t('paper_account')} SET initial_capital=?, cash=?"
+                    f"{led.where()}",
+                    (initial_capital, initial_capital, *led.args()),
+                )
+                return
             conn.execute(
                 "INSERT INTO paper_account(id, initial_capital, cash, created_at)"
                 " VALUES(1,?,?,?)"
@@ -983,6 +1214,67 @@ class Database:
                 " cash=excluded.cash",
                 (initial_capital, initial_capital, _now()),
             )
+
+    # ---------------- 并行模拟账本（sim_*，与 paper_* 隔离） ----------------
+
+    def list_sim_accounts(self, enabled_only: bool = False) -> list[dict[str, Any]]:
+        """并行模拟账本清单（含现金/初始资金；enabled_only 只返回启用的）。"""
+        sql = "SELECT * FROM sim_account"
+        if enabled_only:
+            sql += " WHERE enabled=1"
+        sql += " ORDER BY account_id"
+        with self._lock, self._connect() as conn:
+            rows = conn.execute(sql).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_sim_account(self, tag: str) -> dict[str, Any] | None:
+        with self._lock, self._connect() as conn:
+            row = conn.execute(
+                "SELECT * FROM sim_account WHERE tag=?", (tag,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def ensure_sim_accounts(self, specs: list[dict]) -> list[dict[str, Any]]:
+        """按配置同步账本：新建缺失的、刷新 profile/overrides、停用不在清单里的。
+
+        账本一旦建立就保留自己的现金与持仓（只在首次创建时写 initial_capital），
+        改配置不会把已有净值曲线推倒重来；从清单里移除只是置 ``enabled=0``，
+        数据留着便于事后回看，重新加回来即可继续。
+        """
+        with self._lock, self._connect() as conn:
+            existing = {
+                r["tag"]: dict(r)
+                for r in conn.execute("SELECT * FROM sim_account").fetchall()
+            }
+            keep = {s["tag"] for s in specs}
+            for s in specs:
+                overrides = json.dumps(s.get("overrides") or {}, ensure_ascii=False)
+                note = str(s.get("note") or "")
+                if s["tag"] in existing:
+                    conn.execute(
+                        "UPDATE sim_account SET profile=?, overrides=?, enabled=1, note=?"
+                        " WHERE tag=?",
+                        (s["profile"], overrides, note, s["tag"]),
+                    )
+                else:
+                    cap = float(s.get("initial_capital") or 0)
+                    conn.execute(
+                        "INSERT INTO sim_account(tag, profile, overrides, initial_capital,"
+                        " cash, enabled, note, created_at) VALUES(?,?,?,?,?,1,?,?)",
+                        (s["tag"], s["profile"], overrides, cap, cap, note, _now()),
+                    )
+            for tag in existing:
+                if tag not in keep:
+                    conn.execute("UPDATE sim_account SET enabled=0 WHERE tag=?", (tag,))
+        return self.list_sim_accounts()
+
+    def reset_sim_account(self, tag: str, initial_capital: float) -> None:
+        """按 tag 重置某个并行账本（只清它自己的持仓/流水/净值）。"""
+        acct = self.get_sim_account(tag)
+        if not acct:
+            raise KeyError(f"未知账本: {tag}")
+        with ledger_scope(int(acct["account_id"])):
+            self.reset_paper_account(initial_capital)
 
     # ---------------- 智能建议 ----------------
 

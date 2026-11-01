@@ -169,8 +169,10 @@ class TradeResult:
 class PaperEngine:
     """模拟交易引擎（进程内单例，状态全部落 SQLite）。"""
 
-    def __init__(self) -> None:
-        self.settings = get_settings()
+    def __init__(self, settings: object | None = None) -> None:
+        # settings 可注入：并行模拟账本用 ``OverlaySettings`` 覆盖 paper_* 参数，
+        # 引擎内所有 ``self.settings.xxx`` 一行不改就能跑出各自的处置口径。
+        self.settings = settings if settings is not None else get_settings()
         # 大盘择时闸门的当日状态：让 /api/paper/live 能直接回答「今天为什么没买」，
         # 不用再翻 data/logs 里的「大盘弱势」行（2026-10-30 全天 1999 条，就是从那翻出来的）。
         self._regime_day: str = ""
@@ -318,21 +320,29 @@ class PaperEngine:
             return False, f"不在当日成交额Top{top_n}池（与回测口径对齐）"
         return True, ""
 
-    def entry_gate(self, rec, *, positions: dict, market_weak: bool) -> tuple[bool, str]:
-        """五段式④ 交易池判定（前置闸，不取价）：择时 / 已持仓 / 板块范围 / 名额。
+    def entry_gate(self, rec, *, positions: dict, timing_pause: bool) -> tuple[bool, str]:
+        """五段式④ 交易池判定（前置闸，不取价），判定顺序即语义：
+
+        1. 板块范围 / 北交所 / 大市值 / 名称 / 成交额池（``_buy_allowed``，**永久性**拒绝）；
+        2. 择时：仅 ``timing_pause=True``（**「全暂停」档**）时拦下；降仓档放行，
+           由 ``exposure_cap`` 控总量，不在这里拒；
+        3. 已持仓；
+        4. 持仓名额 ``paper_max_positions``。
+
+        第 1 步必须排在第 2 步之前：否则弱势期间所有票都显示「大盘弱势」，
+        交易池面板看不出 688 这类票其实是被「不在可交易范围」拒掉的
+        （真实原因被临时闸门盖住）。
 
         与 :meth:`entry_price_ok` 合起来构成 ``entry_check``；拆成两段是为了
         保持原实现的取价时机——被前置闸拒掉的票不必再去拉一次实时价。
         """
         code = str(getattr(rec, "code", "") or "")
         name = str(getattr(rec, "name", "") or code)
-        # 先判**永久性**拒绝（范围/大市值/名称/池子），再判临时性的「大盘弱势」：
-        # 否则弱势期间所有票都显示「大盘弱势」，交易池面板看不出 688 这类票
-        # 其实是因为「不在可交易范围」被拒的（真实原因被临时闸门盖住）。
+        # 永久性拒绝优先于临时性择时（见 docstring 第 1/2 步的顺序理由）
         allowed, why = self._buy_allowed(code, name)
         if not allowed:
             return False, why
-        if market_weak:
+        if timing_pause:
             return False, "大盘弱势，暂停买入"
         if code in positions:
             return False, "已持仓"
@@ -374,12 +384,16 @@ class PaperEngine:
         signal_price: float | None = None,
         *,
         positions: dict | None = None,
-        market_weak: bool = False,
+        timing_pause: bool = False,
     ) -> tuple[bool, str]:
-        """五段式④⑤ 统一判定入口：前置闸 + 切入点（供 API/测试/前端解释原因）。"""
+        """五段式④⑤ 统一判定入口：前置闸 + 切入点（供 API/测试/前端解释原因）。
+
+        ``timing_pause`` 传的是「全暂停」档（大盘弱势且已达暂停阈值），不是
+        「大盘弱势」本身；降仓档不应传 True，否则会和实盘路径口径不一致。
+        """
         if positions is None:
             positions = {p["code"]: p for p in db.list_paper_positions()}
-        ok, why = self.entry_gate(rec, positions=positions, market_weak=market_weak)
+        ok, why = self.entry_gate(rec, positions=positions, timing_pause=timing_pause)
         if not ok or price is None:
             return ok, why
         return self.entry_price_ok(rec, price, signal_price)
@@ -908,9 +922,10 @@ class PaperEngine:
         candidates: list[tuple[float, object, float]] = []
         for rec in buy_candidates:
             name = getattr(rec, "name", "") or rec.code
-            # ④ 交易池前置闸：择时 / 已持仓 / 板块范围 / 名额
-            #    只有「全暂停」档才在这里拒掉买入；降仓档放行，由 exposure_cap 控总量
-            ok, why = self.entry_gate(rec, positions=positions, market_weak=weak_pause_all)
+            # ④ 交易池前置闸：范围/大市值/名称/池子 → 择时 → 已持仓 → 名额
+            #    只有「全暂停」档（weak_pause_all）才在这里拒掉买入；降仓档放行，
+            #    由上面算出的 exposure_cap 控总量
+            ok, why = self.entry_gate(rec, positions=positions, timing_pause=weak_pause_all)
             if not ok:
                 results.append(TradeResult(
                     rec.code, name, "skip", 0, 0.0, 0.0, 0.0, why))
@@ -1437,15 +1452,20 @@ class PaperEngine:
             "positions": positions,
         }
 
-    async def settle(self) -> dict:
-        """每日收盘结算：止盈止损检查 + 记录净值快照 + 记录当日择时状态。"""
+    async def settle(self, *, record_regime: bool = True) -> dict:
+        """每日收盘结算：止盈止损检查 + 记录净值快照 + 记录当日择时状态。
+
+        ``record_regime=False`` 用于并行模拟账本：择时状态是全局单例（每日一行），
+        各账本的 ``paper_regime_ma`` 可能不同，让它们各自写会把主账本那行覆盖掉。
+        """
         await self.check_stop_loss_target()
         detail = await self.account_detail()
         today = datetime.now().strftime("%Y-%m-%d")
         db.save_paper_equity(
             today, detail["total_asset"], detail["cash"], detail["market_value"]
         )
-        await self._save_regime_snapshot(today, detail)
+        if record_regime:
+            await self._save_regime_snapshot(today, detail)
         logger.info("模拟盘收盘结算：总资产 %.2f（%+.2f%%）",
                     detail["total_asset"], detail["return_pct"])
         return detail

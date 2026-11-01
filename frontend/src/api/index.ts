@@ -964,6 +964,44 @@ export function resetPaperAccount(): Promise<{ reset: boolean }> {
   return http.post('/paper/reset').then((r) => r.data)
 }
 
+// ---- 并行模拟账本（同一信号、不同处置参数，各自记账） ----
+
+export interface PaperSimAccount {
+  tag: string
+  profile: string
+  enabled: boolean
+  initial_capital: number
+  cash: number
+  total_asset: number
+  return_pct: number
+  positions: number
+  equity_days: number
+  as_of: string | null
+  overrides: Record<string, number | string>
+}
+
+export interface PaperSimOverview {
+  enabled: boolean
+  profiles: string
+  accounts: PaperSimAccount[]
+  skipped: string[]
+}
+
+export function getPaperSim(): Promise<PaperSimOverview> {
+  return http.get('/paper/sim').then((r) => r.data)
+}
+
+export function getPaperSimEquity(): Promise<{
+  live: Array<{ date: string; total_asset: number }>
+  series: Record<string, Array<{ date: string; total_asset: number }>>
+}> {
+  return http.get('/paper/sim/equity').then((r) => r.data)
+}
+
+export function resetPaperSim(tag: string): Promise<{ tag: string; reset: boolean }> {
+  return http.post('/paper/sim/reset', null, { params: { tag } }).then((r) => r.data)
+}
+
 // ==================== K线预热 ====================
 
 export function warmupKlines(): Promise<{ started: boolean; message: string }> {

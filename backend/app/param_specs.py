@@ -96,6 +96,11 @@ _LAYOUT: tuple[tuple[str, str, tuple[tuple[str, str, tuple[str, ...]], ...]], ..
                 "只记录不交易的对照实验",
                 ("shadow_start", "shadow_tag", "shadow_universe", "shadow_profiles"),
             ),
+            (
+                "并行账本",
+                "同一信号多种参数同时跑，实时对比净值",
+                ("paper_sim_enabled", "paper_sim_profiles", "paper_sim_capital"),
+            ),
             ("盘中分析", "盘中分析的触发间隔", ("intraday_analysis_interval",)),
         ),
     ),
@@ -348,6 +353,9 @@ _DEPENDS_ON: dict[str, str] = {
     "shadow_tag": "shadow_start",
     "shadow_universe": "shadow_start",
     "shadow_profiles": "shadow_start",
+    # 并行模拟账本：关掉总开关后，方案清单与本金都无从生效
+    "paper_sim_profiles": "paper_sim_enabled",
+    "paper_sim_capital": "paper_sim_enabled",
     # 各种「总开关 + 细项」：关掉后细项无意义
     "paper_rotation_min_score": "paper_rotation_enabled",
     "paper_rotation_gap": "paper_rotation_enabled",
@@ -546,6 +554,9 @@ _SHORT_LABELS: dict[str, str] = {
     "shadow_tag": "影子策略标签",
     "shadow_universe": "影子池规模",
     "shadow_profiles": "影子策略方案",
+    "paper_sim_enabled": "并行账本",
+    "paper_sim_profiles": "账本方案",
+    "paper_sim_capital": "账本本金",
     "intraday_analysis_interval": "盘中分析间隔",
     "live_ml_scoring": "线上ML打分",
 }
@@ -569,6 +580,9 @@ _DESC_OVERRIDES: dict[str, str] = {
     "llm_timeout": "单次请求超时（秒）",
     "shadow_tag": "影子策略落库时用的标签，便于区分多组实验",
     "shadow_universe": "影子策略使用的股票池规模（成交额 TopN）",
+    "paper_sim_enabled": "同一份信号按不同处置参数并行记账，盘中实时对比各账本净值",
+    "paper_sim_profiles": "逗号分隔的方案名，取自回测方案库，只支持止损/仓位/择时这类处置参数",
+    "paper_sim_capital": "每个并行账本的初始资金；0 = 跟随模拟盘本金",
 }
 
 

@@ -19,12 +19,14 @@ import { chartTheme, tooltipStyle } from '../lib/chartTheme'
 import { use } from 'echarts/core'
 import { CanvasRenderer } from 'echarts/renderers'
 import { LineChart } from 'echarts/charts'
-import { GridComponent, TooltipComponent } from 'echarts/components'
+import { GridComponent, LegendComponent, TooltipComponent } from 'echarts/components'
 
 import {
   getPaperAccount,
   getPaperEquity,
   getPaperLive,
+  getPaperSim,
+  getPaperSimEquity,
   getPaperTrades,
   getWatchlist,
   placePaperOrder,
@@ -33,11 +35,12 @@ import {
   tickPaper,
   type PaperAccount,
   type PaperLiveStatus,
+  type PaperSimAccount,
   type PaperTrade,
   type WatchItem,
 } from '../api'
 
-use([CanvasRenderer, LineChart, GridComponent, TooltipComponent])
+use([CanvasRenderer, LineChart, GridComponent, LegendComponent, TooltipComponent])
 
 const router = useRouter()
 const route = useRoute()
@@ -66,6 +69,11 @@ const account = ref<PaperAccount | null>(null)
 const trades = ref<PaperTrade[]>([])
 const equity = ref<Array<{ date: string; total_asset: number }>>([])
 const live = ref<PaperLiveStatus | null>(null)
+// ---- 并行模拟账本（同一信号、不同处置参数） ----
+const simAccounts = ref<PaperSimAccount[]>([])
+const simEnabled = ref(false)
+const simSkipped = ref<string[]>([])
+const simSeries = ref<Record<string, Array<{ date: string; total_asset: number }>>>({})
 const resetting = ref(false)
 const ticking = ref(false)
 const switching = ref(false)
@@ -98,8 +106,22 @@ async function load() {
     if (modeError.value) modeError.value = ''
     // 手动模式下列表里的现价用于下单参考，随轮询一起刷新
     if (!liveData.auto_trade) loadWatchItems()
+    void loadSim()
   } catch {
     // 保留旧数据
+  }
+}
+
+/** 并行账本单独加载：未启用或接口异常时静默跳过，不影响主账户展示 */
+async function loadSim() {
+  try {
+    const [overview, series] = await Promise.all([getPaperSim(), getPaperSimEquity()])
+    simAccounts.value = overview.accounts
+    simEnabled.value = overview.enabled
+    simSkipped.value = overview.skipped
+    simSeries.value = series.series
+  } catch {
+    // 附加能力，失败不打扰用户
   }
 }
 
@@ -321,6 +343,79 @@ const equityOption = computed(() => {
     ],
   }
 })
+
+/**
+ * 并行账本对比曲线：统一画「累计收益率(%)」。
+ * 各账本本金可能不同（paper_sim_capital），比绝对净值会把本金差异当成业绩差异。
+ */
+const simOption = computed(() => {
+  const c = chartTheme()
+  const dates = equity.value.map((e) => e.date)
+  const liveInit = account.value?.initial_capital ?? 100000
+  const palette = [c.up, c.down, c.warn, c.accent, c.primary, c.neutral]
+  const series: Record<string, unknown>[] = []
+
+  if (equity.value.length) {
+    series.push({
+      name: '线上',
+      type: 'line',
+      smooth: true,
+      symbol: 'none',
+      lineStyle: { width: 2, color: c.primaryLight },
+      data: equity.value.map((e) => Number((((e.total_asset / liveInit) - 1) * 100).toFixed(2))),
+    })
+  }
+  simAccounts.value.forEach((a, i) => {
+    const rows = simSeries.value[a.tag] || []
+    if (!rows.length) return
+    const byDate = new Map(rows.map((r) => [r.date.slice(5), r.total_asset]))
+    const init = a.initial_capital || 100000
+    series.push({
+      name: a.tag,
+      type: 'line',
+      smooth: true,
+      symbol: 'none',
+      connectNulls: true,
+      lineStyle: { width: 1.6, color: palette[i % palette.length] },
+      data: dates.map((d) => {
+        const v = byDate.get(d)
+        return v == null ? null : Number((((v / init) - 1) * 100).toFixed(2))
+      }),
+    })
+  })
+
+  return {
+    animation: false,
+    grid: { left: 56, right: 20, top: 34, bottom: 30 },
+    legend: { top: 0, textStyle: { color: c.textFaint, fontSize: 11 } },
+    tooltip: {
+      trigger: 'axis',
+      ...tooltipStyle(c),
+      valueFormatter: (v: number | null) => (v == null ? '--' : `${v.toFixed(2)}%`),
+    },
+    xAxis: {
+      type: 'category',
+      data: dates,
+      axisLabel: { color: c.textFaint, fontSize: 11 },
+    },
+    yAxis: {
+      type: 'value',
+      scale: true,
+      axisLabel: { color: c.textFaint, fontSize: 11, formatter: '{value}%' },
+      splitLine: { lineStyle: { color: c.splitLine } },
+    },
+    series,
+  }
+})
+
+/** 账本参数一句话摘要：只显示被覆盖的项，默认项不占地方 */
+function simParamText(a: PaperSimAccount): string {
+  const entries = Object.entries(a.overrides || {})
+  if (!entries.length) return '线上默认参数'
+  return entries
+    .map(([k, v]) => `${k.replace(/^paper_/, '')}=${typeof v === 'number' ? v : String(v)}`)
+    .join(' · ')
+}
 
 function pctTone(pct: number): string {
   return pct > 0 ? 'text-up' : pct < 0 ? 'text-down' : 'text-content'
@@ -830,6 +925,71 @@ onUnmounted(() => {
           <p class="text-[14.5px]">暂无净值数据</p>
           <p class="text-[12.5px]">每个交易日收盘后自动记录（需后端保持运行）</p>
         </div>
+      </div>
+    </div>
+
+    <!-- 并行账本对比：同一份信号、不同处置参数各记各的账 -->
+    <div
+      v-if="tab === 'account' && (simAccounts.length > 0 || simSkipped.length > 0)"
+      class="glass-card p-5"
+    >
+      <div class="mb-3 flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <h3 class="text-subheading">并行账本对比</h3>
+          <p class="mt-1 text-[12.5px] text-content-faint">
+            同一份信号、不同处置参数各自撮合记账；曲线为累计收益率（消除本金差异）
+          </p>
+        </div>
+        <span class="text-[12.5px] text-content-faint">
+          {{ simEnabled ? `${simAccounts.length} 个账本` : '未启用（PAPER_SIM_ENABLED）' }}
+        </span>
+      </div>
+
+      <div v-if="simAccounts.length > 0" class="overflow-x-auto">
+        <table class="w-full text-left text-[13.5px]">
+          <thead class="border-b border-base-600/60 text-content-faint">
+            <tr>
+              <th class="px-3 py-2 font-medium">账本</th>
+              <th class="px-3 py-2 text-right font-medium">净值</th>
+              <th class="px-3 py-2 text-right font-medium">收益</th>
+              <th class="px-3 py-2 text-right font-medium">持仓</th>
+              <th class="px-3 py-2 text-right font-medium">净值日</th>
+              <th class="px-3 py-2 font-medium">参数</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="a in simAccounts" :key="a.tag" class="border-b border-base-700/40">
+              <td class="px-3 py-2 font-medium text-content">{{ a.tag }}</td>
+              <td class="px-3 py-2 text-right font-num">{{ a.total_asset.toFixed(0) }}</td>
+              <td class="px-3 py-2 text-right font-num" :class="pctTone(a.return_pct)">
+                {{ (a.return_pct > 0 ? '+' : '') + a.return_pct.toFixed(2) }}%
+              </td>
+              <td class="px-3 py-2 text-right font-num">{{ a.positions }}</td>
+              <td class="px-3 py-2 text-right font-num text-content-faint">{{ a.as_of || '--' }}</td>
+              <td class="px-3 py-2 text-[12.5px] text-content-muted">{{ simParamText(a) }}</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <v-chart
+        v-if="simAccounts.length > 0 && equity.length > 0"
+        :option="simOption"
+        style="height: 240px"
+        class="mt-4"
+        autoresize
+      />
+      <p v-else class="mt-3 text-[12.5px] text-content-faint">
+        还没有账本净值：收盘 15:40 结算后出第一条（盘中成交看各账本流水）
+      </p>
+
+      <div v-if="simSkipped.length > 0" class="mt-3 rounded-lg border border-base-600/60 p-3">
+        <p class="text-[12.5px] font-medium text-warn">
+          以下方案未参与并行（含选股侧参数，tick 级无法复现）
+        </p>
+        <ul class="mt-1 list-disc pl-5 text-[12.5px] text-content-muted">
+          <li v-for="s in simSkipped" :key="s">{{ s }}</li>
+        </ul>
       </div>
     </div>
 

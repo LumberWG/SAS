@@ -10,8 +10,9 @@ from pydantic import BaseModel
 
 from app.api.utils import with_disclaimer
 from app.config import get_settings
-from app.data.cache import db
+from app.data.cache import db, ledger_scope
 from app.paper.engine import PaperEngine
+from app.paper.ledger import ledger_equity, ledger_overview, sim_specs
 from app.paper.live import live_trader
 
 logger = logging.getLogger("sas.api.paper")
@@ -153,3 +154,53 @@ async def paper_reset() -> dict:
     live_trader.clear()
     detail = await engine.account_detail()
     return with_disclaimer({"reset": True, "account": detail})
+
+
+# ----------------------------------------------------------------------
+# 并行模拟账本（同一份信号、不同处置参数，各记各的账）
+# ----------------------------------------------------------------------
+@router.get("/sim")
+def paper_sim() -> dict:
+    """各并行账本概览，以及因含选股侧参数被跳过的方案（附原因）。"""
+    settings = get_settings()
+    _, skipped = sim_specs(settings)
+    return with_disclaimer({
+        "enabled": bool(getattr(settings, "paper_sim_enabled", False)),
+        "profiles": str(getattr(settings, "paper_sim_profiles", "") or ""),
+        "accounts": ledger_overview(),
+        "skipped": skipped,
+    })
+
+
+@router.get("/sim/equity")
+def paper_sim_equity(limit: int = 250) -> dict:
+    """主账本 + 各并行账本的净值曲线（前端多策略对比用）。"""
+    live = db.list_paper_equity(limit=limit)
+    return with_disclaimer({
+        "live": [{"date": r["date"], "total_asset": r["total_asset"]} for r in live],
+        "series": ledger_equity(limit=limit),
+    })
+
+
+@router.get("/sim/trades")
+def paper_sim_trades(tag: str, limit: int = 100) -> dict:
+    """某个并行账本的成交流水（只读该账本，不碰线上模拟盘）。"""
+    acct = db.get_sim_account(tag)
+    if not acct:
+        raise HTTPException(status_code=404, detail=f"未知账本: {tag}")
+    with ledger_scope(int(acct["account_id"])):
+        trades = db.list_paper_trades(limit=limit)
+    return with_disclaimer({"tag": tag, "trades": trades})
+
+
+@router.post("/sim/reset")
+def paper_sim_reset(tag: str) -> dict:
+    """重置某个并行账本（只清它自己的持仓/批次/流水/净值）。"""
+    settings = get_settings()
+    acct = db.get_sim_account(tag)
+    if not acct:
+        raise HTTPException(status_code=404, detail=f"未知账本: {tag}")
+    cap = float(acct.get("initial_capital") or 0) or settings.paper_initial_capital
+    db.reset_sim_account(tag, cap)
+    logger.info("并行账本 %s 已重置（资金 %.0f）", tag, cap)
+    return with_disclaimer({"tag": tag, "reset": True})

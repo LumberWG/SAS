@@ -495,6 +495,52 @@ peak = max(历史峰值总资产, 当前总资产)；dd = 1 − 总资产 / peak
 
 ---
 
+## 5b. 并行模拟账本（`paper/ledger.py` + `data/cache.py` 账本作用域）
+
+**目标**：同一份信号、N 套处置参数同时记账，盘中对比，替代「改配置 → 跑 21 个交易日 → 再改」的串行试错。
+
+**路由**：`cache.ledger_scope(account_id)` 用 `ContextVar` 记录当前账本；`None` = 线上主账本（`paper_*` 表），
+非 `None` = 该账本的 `sim_*` 表。所有 `db.paper_*` / `list_paper_*` 在内部按作用域拼表名与 `account_id` 条件，
+因此 `PaperEngine` 的撮合规则仍是**一份代码**，不为账本分叉（漏改一处就会写脏主账本）。
+
+**参数注入**：`OverlaySettings(base, overrides)` 代理全局 settings，`__getattr__` 先查覆盖再回落；
+引擎里 `self.settings.paper_xxx` 的读取因此自动按账本生效，不需要改 20 余处调用。
+
+**方案映射**（`PROFILE_TO_PAPER`，回测参数 → 线上字段）：
+
+| 回测 key | paper 字段 |
+| --- | --- |
+| `stop_loss` | `paper_stop_loss` |
+| `take_profit` | `paper_take_profit` |
+| `max_positions` | `paper_max_positions` |
+| `max_total_exposure` | `paper_max_total_exposure` |
+| `single_position_ratio` | `paper_single_position_max` |
+| `weak_exposure` | `paper_weak_exposure` |
+| `regime_ma` | `paper_regime_ma` |
+| `breakeven_trigger` | `paper_breakeven_pct` |
+| `trail_pct` / `trail_arm` | `paper_trail_pct` / `paper_trail_arm` |
+| `stop_atr_mult` / `stop_atr_max` | `paper_atr_stop_mult` / `paper_atr_stop_max` |
+
+不在上表的键（`invert_score`、`scoring_mode`、`ml_*`、`strategies`、`factor_weights`、`buy_threshold`、
+`regime_tiers` 等）一律视为**不可并行复现**：`sim_specs()` 跳过整个方案并返回原因。
+理由：这些参数在**信号生成阶段**起作用，账本共享同一份信号；静默降级只会得到一条与方案名不符的曲线，
+比不跑更误导。这类差异请用影子账户（日频、重跑整段）验证。
+
+**队列**：每个账本有独立 `pending`（入队时 `dataclasses.replace` 复制）。主账本成交出队不影响账本继续重试；
+「持仓已满 / 总仓位已达上限 / 资金不足一手 / 取价失败 / 等待回踩」留在队列等下一 tick，
+其余（已持仓 / T+1 等）出队。买入同样受开盘窗口约束，与主账本同口径。
+
+**结算**：`settle(record_regime=False)` —— 择时快照是全局每日一行，各账本 `paper_regime_ma` 可能不同，
+写进去会覆盖主账本那行，因此账本结算不写。
+
+**表结构**：`sim_account(account_id PK, tag UNIQUE, profile, overrides JSON, initial_capital, cash, enabled, note)`；
+`sim_positions PK(account_id, code)`、`sim_lots(account_id, ...)`、`sim_trades(account_id, ...)`、
+`sim_equity PK(account_id, date)`。线上 `paper_*` 表结构不变。
+
+**重置**：`POST /api/paper/sim/reset?tag=` 只清该账本的持仓/批次/流水/净值，不影响主账本与其它账本。
+
+---
+
 ## 6. 关键可调参数清单
 
 > 本表是**文档口径**的参考值。要查「当前实际在跑什么」、或直接改，用 `/settings` 页

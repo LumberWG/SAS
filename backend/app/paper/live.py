@@ -20,16 +20,18 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 
 from app.config import get_settings
-from app.data.cache import db
+from app.data.cache import db, ledger_scope
 from app.market.clock import AM_OPEN, is_trading_day, is_trading_hours, next_open
 from app.paper.engine import PaperEngine
+from app.paper.ledger import OverlaySettings, sim_specs
 
 logger = logging.getLogger("sas.paper.live")
 
@@ -84,6 +86,21 @@ def _signal_score(rec) -> float:
         return 0.0
 
 
+@dataclass
+class SimRun:
+    """一个并行账本的运行时状态：独立引擎（参数被 Overlay 覆盖）+ 独立队列。
+
+    队列必须独立：主账本成交/出队后信号就从 ``_pending`` 消失了，若各账本
+    共用一条队列，满仓被拒的那个账本就永远等不到下一次机会（曲线会莫名其妙
+    比主账本差），所以入队时按账本复制一份，各自演化到成交或过期。
+    """
+
+    account_id: int
+    tag: str
+    engine: PaperEngine
+    pending: dict[str, PendingSignal]
+
+
 class LiveTrader:
     """实时撮合器（进程内单例，持仓与流水全部落 SQLite）。"""
 
@@ -103,6 +120,14 @@ class LiveTrader:
         self._queue_rejected: list[dict[str, Any]] = []
         #: 最近一批「被判定规则/切入点拒掉」的买入信号（五段式④⑤的证据）
         self._entry_rejected: list[dict[str, Any]] = []
+        #: 并行模拟账本：tag -> 独立队列 + 独立引擎（共享信号、各自处置参数）
+        self._sim: dict[str, SimRun] = {}
+        #: 上次同步账本时的配置指纹（方案串, 初始资金），变了才重建
+        self._sim_key: tuple[str, float] | None = None
+        #: 被跳过的方案说明（含选股侧参数，tick 级无法复现，需走影子账户）
+        self._sim_skipped: list[str] = []
+        #: 上一 tick 各账本成交笔数（状态接口展示用）
+        self._sim_last: dict[str, int] = {}
 
     # ------------------------------------------------------------------
     # 交易模式（自动 / 手动）
@@ -127,6 +152,8 @@ class LiveTrader:
         if not auto:
             self._pending.clear()
             self._backlog.clear()
+            for run in self._sim.values():
+                run.pending.clear()
         logger.info("模拟交易模式切换为 %s", "自动" if auto else "手动")
         return self.status()
 
@@ -157,7 +184,7 @@ class LiveTrader:
         def _enqueue(rec, action: str) -> None:
             nonlocal added
             code = str(getattr(rec, "code", "") or "")
-            self._pending[code] = PendingSignal(
+            signal = PendingSignal(
                 code=code,
                 name=str(getattr(rec, "name", "") or code),
                 action=action,
@@ -167,6 +194,11 @@ class LiveTrader:
                 price_at_signal=getattr(rec, "price", None),
                 score=_signal_score(rec),
             )
+            self._pending[code] = signal
+            # 并行账本各存一份：主账本成交后信号就出队了，而账本可能因自己的
+            # 名额/仓位被拒，仍要按自己的规则继续等（否则曲线无故比主账本差）
+            for run in self._sim.values():
+                run.pending[code] = replace(signal)
             added += 1
 
         buys = []
@@ -177,6 +209,8 @@ class LiveTrader:
                 continue
             if action == "hold":
                 # 最新建议转为观望 → 撤销尚未成交的旧信号（以最新建议为准）
+                for run in self._sim.values():
+                    run.pending.pop(code, None)
                 if self._pending.pop(code, None) is not None:
                     logger.info("建议转观望，撤销待执行信号 %s", code)
                 continue
@@ -256,7 +290,10 @@ class LiveTrader:
         pullback = float(getattr(self.settings, "paper_entry_pullback", 0.0) or 0.0)
         if pullback <= 0:
             return
-        for signal in [*self._pending.values(), *self._backlog.values()]:
+        targets = [*self._pending.values(), *self._backlog.values()]
+        for run in self._sim.values():
+            targets.extend(run.pending.values())
+        for signal in targets:
             if signal.action != "buy" or signal.armed or not signal.price_at_signal:
                 continue
             px = prices.get(signal.code)
@@ -294,6 +331,9 @@ class LiveTrader:
         self._last_error = ""
         self._queue_rejected.clear()
         self._entry_rejected.clear()
+        self._sim_last.clear()
+        for run in self._sim.values():
+            run.pending.clear()
 
     def _purge(self, now: datetime) -> None:
         """丢弃过期信号（价格已漂移，执行没有意义）。"""
@@ -302,6 +342,9 @@ class LiveTrader:
             logger.info("信号过期丢弃 %s %s（%s）", code, signal.name, signal.action)
         for code in [c for c, s in self._backlog.items() if s.expire_at <= now]:
             self._backlog.pop(code, None)
+        for run in self._sim.values():
+            for code in [c for c, s in run.pending.items() if s.expire_at <= now]:
+                run.pending.pop(code, None)
 
     def _defer_skips(self, results, now: datetime) -> set[str]:
         """把「名额/资金不足」的买入信号转入候补队列，返回被延后的代码集合。
@@ -341,6 +384,110 @@ class LiveTrader:
         return next_open(now) + timedelta(hours=5, minutes=30)
 
     # ------------------------------------------------------------------
+    # 并行模拟账本（同一份信号，各自处置参数）
+    # ------------------------------------------------------------------
+    def _ensure_sim(self) -> None:
+        """按配置同步并行账本（幂等：配置没变就用现有实例，不重建队列）。"""
+        if not bool(getattr(self.settings, "paper_sim_enabled", False)):
+            if self._sim:
+                self._sim.clear()
+                self._sim_last.clear()
+            self._sim_key = None
+            return
+        key = (
+            str(getattr(self.settings, "paper_sim_profiles", "") or ""),
+            float(getattr(self.settings, "paper_sim_capital", 0) or 0),
+        )
+        if key == self._sim_key and self._sim:
+            return
+        specs, skipped = sim_specs(self.settings)
+        self._sim_skipped = skipped
+        self._sim_key = key
+        if not specs:
+            self._sim.clear()
+            if skipped:
+                logger.warning("并行模拟账本没有可用方案：%s", "；".join(skipped))
+            return
+        by_tag = {s["tag"]: s for s in specs}
+        rebuilt: dict[str, SimRun] = {}
+        for acct in db.ensure_sim_accounts(specs):
+            tag = str(acct.get("tag") or "")
+            if tag not in by_tag or not int(acct.get("enabled") or 0):
+                continue
+            overrides = acct.get("overrides")
+            if isinstance(overrides, str):
+                try:
+                    overrides = json.loads(overrides or "{}")
+                except json.JSONDecodeError:
+                    overrides = {}
+            old = self._sim.get(tag)
+            rebuilt[tag] = SimRun(
+                account_id=int(acct["account_id"]),
+                tag=tag,
+                engine=PaperEngine(OverlaySettings(self.settings, dict(overrides or {}))),
+                # 首次建立时把主账本当前挂着的信号抄一份，避免当天新建账本错过已入队的票
+                pending=old.pending if old else {
+                    c: replace(s) for c, s in self._pending.items()
+                },
+            )
+        self._sim = rebuilt
+        logger.info(
+            "并行模拟账本 %d 个：%s%s",
+            len(self._sim), ", ".join(self._sim) or "（无）",
+            ("；跳过：" + "；".join(skipped)) if skipped else "",
+        )
+
+    async def _tick_sim(self, prices: dict[str, float], now: datetime) -> dict[str, int]:
+        """每个账本各自跑一遍：止盈止损 + 队列撮合（共用同一批实时价）。
+
+        与主账本的区别：这里不做候补队列，被「名额/资金不足」拒掉的买单一律留在
+        队列里等下一个 tick（队列本身就是候补），因此不会出现「账本比主账本少
+        吃一段行情」的偏差。
+        """
+        if not self._sim:
+            return {}
+        in_window = self._in_buy_window(now)
+        keep_reasons = (*_BACKLOG_REASONS, "取价失败", "等待回踩")
+        out: dict[str, int] = {}
+        for tag, run in self._sim.items():
+            try:
+                with ledger_scope(run.account_id):
+                    stops = await run.engine.check_stop_loss_target(prices)
+                    ordered = sorted(
+                        run.pending.values(),
+                        key=lambda s: (s.action != "sell", -s.score),
+                    )
+                    # 买入只在开盘窗口成交（与主账本、与回测的「次日开盘」同口径）
+                    if not in_window:
+                        ordered = [s for s in ordered if s.action != "buy"]
+                    recs = [
+                        SimpleNamespace(
+                            code=s.code, name=s.name, action=s.action, reason=s.reason,
+                            score=s.score, price=s.price_at_signal,
+                            entry_armed=s.armed,
+                        )
+                        for s in ordered
+                    ]
+                    results = (
+                        await run.engine.execute_recommendations(recs, prices=prices)
+                        if recs else []
+                    )
+                    for code in list(run.pending):
+                        if not in_window and run.pending[code].action == "buy":
+                            continue
+                        hit = next((r for r in results if r.code == code), None)
+                        if hit is None or hit.side != "skip":
+                            run.pending.pop(code, None)
+                        elif not any(k in hit.reason for k in keep_reasons):
+                            run.pending.pop(code, None)
+                out[tag] = len(stops) + len([r for r in results if r.side != "skip"])
+            except Exception as exc:  # noqa: BLE001 - 单个账本失败不能拖垮其它账本
+                logger.warning("并行账本 %s 撮合失败: %s", tag, exc)
+                out[tag] = -1
+        self._sim_last = out
+        return out
+
+    # ------------------------------------------------------------------
     # 撮合
     # ------------------------------------------------------------------
     async def tick(self) -> dict:
@@ -349,6 +496,7 @@ class LiveTrader:
         self._last_tick = now
         self._ticks += 1
         self._purge(now)
+        self._ensure_sim()
 
         if not self.settings.paper_live_enabled:
             return {"skipped": "实时引擎未启用"}
@@ -426,6 +574,9 @@ class LiveTrader:
 
         results = await self.engine.execute_recommendations(recs, prices=prices)
 
+        # 并行模拟账本：同一批信号、各自处置参数，各自记账（与主账本完全隔离）
+        sim = await self._tick_sim(prices, now)
+
         # 未成交出队策略：只有「取价失败」保留重试，其余（已持仓/已满/资金不足/
         # T+1）本轮确定无法成交，直接出队，避免每个 tick 反复尝试。
         # 「等待回踩」也保留重试：回踩确认是 tick 累积出来的，早晚可能满足
@@ -483,6 +634,7 @@ class LiveTrader:
             "trades": len(trades),
             "stop_loss": len(stop_trades),
             "pending": len(self._pending),
+            "sim": sim,
         }
 
     async def _fetch_prices(self, codes: set[str]) -> dict[str, float]:

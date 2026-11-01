@@ -497,6 +497,20 @@ schtasks /run /tn SASDbBackup                              # 立即触发计划�
 - 查看：`.venv\Scripts\python.exe scripts\shadow.py --start 2026-11-02 --tag live --report`
 - 注意：**起点写入后即冻结**，中途改起点会让曲线断裂、超额不可比（要换起点请换一个 `--tag`）
 
+### 8c. 并行模拟账本（同一信号、不同处置参数同时跑）
+
+影子账户解决的是「**选股侧**差异能不能复现」（日频、重跑整段）；但验证一组止损/仓位参数仍要串行等 21 个交易日。
+并行账本换个思路：**同一份实时信号，N 个账本各按自己的参数撮合**，各记各的账，盘中就能看出分化。
+
+- 启用：`backend/.env` 设 `PAPER_SIM_ENABLED=true`；`PAPER_SIM_PROFILES` 填方案名（逗号分隔，取自 `app/backtest/profiles.py`）；`PAPER_SIM_CAPITAL` 为各账本初始资金（0 = 跟随模拟盘本金）
+- 首批：`default,e30_a15,e30_a2,e30_a25,conc5,low_exp,reg30`（线上默认 + 三档 ATR 止损 + 少持仓 + 低敞口 + 弱市 30% 档）
+- 隔离：账本写独立表 `sim_account / sim_positions / sim_lots / sim_trades / sim_equity`（主键带 `account_id`），线上 `paper_*` 表只读不写；`db.paper_*` 由 `ledger_scope()` 路由，撮合规则**不分叉**
+- 能比：**处置侧**参数——止损/止盈/仓位上限/持仓只数/弱市档/移动止损/ATR 倍数
+- 不能比：**选股侧**参数——ML 打分（`default_ml`）、评分反转（`rev_inv`）、策略子集、买入阈值。信号是共享的，这些改不动；含这类参数的方案会被**跳过**并在接口里列出原因，不静默降级成同名曲线
+- 调度：跟随 `paper_tick`（默认 5s）撮合；收盘 15:40 与主账本一起结算，为每个账本各写一行净值
+- 查看：模拟交易页「账户与持仓」tab 的「并行账本对比」（累计收益率曲线 + 参数摘要）；接口 `GET /api/paper/sim`、`GET /api/paper/sim/equity`、`GET /api/paper/sim/trades?tag=`、`POST /api/paper/sim/reset?tag=`
+- 注意：账本从建立当天开始记账，不补算历史（要补历史用回测或影子账户）
+
 ### 7. 模拟交易（验证选股思路）
 
 用模拟盘把「分析建议」变成可复盘的账本，验证选股思路的准确性。

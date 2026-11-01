@@ -422,13 +422,17 @@ class MarketScheduler:
         if not is_trading_day():
             return {"skipped": "非交易日"}
         from app.paper.engine import PaperEngine
+        from app.paper.ledger import settle_ledgers
 
         try:
             detail = await PaperEngine().settle()
+            # 并行模拟账本各自结算：同一时点各记各的净值，单账本失败不影响主账本
+            sim = await settle_ledgers(self.settings, log=logger.warning)
             return {
                 "total_asset": detail["total_asset"],
                 "return_pct": detail["return_pct"],
                 "positions": detail["position_count"],
+                "sim": sim,
             }
         except Exception as exc:  # noqa: BLE001
             logger.exception("模拟盘结算失败")

@@ -110,6 +110,17 @@ class Settings(BaseSettings):
     # 逗号分隔的方案名；空 = 用 scripts/shadow.DEFAULT_PROFILES
     shadow_profiles: str = ""
 
+    # ---------- 并行模拟账本（同一份信号、不同处置参数各自记账） ----------
+    # 与影子账户的区别：影子账户是「日频、重跑整段、能复现选股侧差异」，
+    # 并行账本是「tick 级、共享信号、只能复现处置侧差异」，两者互补。
+    # 方案名取自 app/backtest/profiles.py 的 PROFILES，只接受能换算到 paper_*
+    # 的参数（止损/止盈/仓位/持仓数/弱市档）；含选股侧参数（ML 打分、评分反转、
+    # 策略子集）的方案会被跳过，原因在 /api/paper/sim 的 skipped 字段里。
+    paper_sim_enabled: bool = False
+    paper_sim_profiles: str = ""
+    # 每个账本的初始资金；0 = 跟随 paper_initial_capital
+    paper_sim_capital: float = 0.0
+
     # ---------- 智能建议 / 自动盯盘 ----------
     # 收盘自动选股后，将评分 Top N 的命中自动加入自选股
     auto_watch_enabled: bool = True
