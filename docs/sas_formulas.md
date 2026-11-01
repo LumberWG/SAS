@@ -701,6 +701,37 @@ t_*→paper_t_*
 2. 前端在确认框里列出「会变更的项：旧值 → 新值」，落盘后 `GET /backtest/defaults` 的基线随之刷新
    （止损/止盈/单票上限现在读 `Settings`，不再写死）。
 
+### 7.4b 回测结果落库（2026-11-01）
+
+「落盘」有两种含义，别混：§7.4 说的是**参数写入实盘配置**；这里是**回测结果本身入库**，
+每次回测跑完自动写，不需要任何操作，也不影响实盘。
+
+| 表 | 存什么 |
+| --- | --- |
+| `backtest_runs` | `params`（全量参数）、`metrics`、`equity_curve`（逐日 `equity/benchmark/cash/positions`，即过程数据）、`positions`（期末持仓）、`review`（归因 + 建议）、`job_id`（与 `backend.log` 对齐）、`elapsed` |
+| `backtest_trades` | 逐笔成交：`code/name/buy_date/sell_date/buy_price/sell_price/shares/amount/fee/pnl/pnl_pct/reason/score` |
+
+口径要点：
+- 逐笔**单独成表**而不是塞进 `backtest_runs` 的 JSON 列，是为了能直接做 SQL 聚合（见下）；
+  两表在同一事务内写入，不会出现「有 run 没明细」。
+- `GET /api/backtest/{run_id}` 返回含 `trades` 的完整结果；`GET /api/backtest` 只返回摘要
+  （刻意不取 `equity_curve/positions/review`，附带 `trade_count`）。
+- 本功能上线前的历史记录只有参数与曲线，`trades` 为空；`positions/review/job_id/elapsed`
+  由 `_migrate_backtest_extra` 给老库补列，历史值为 NULL，读取侧按空值降级、不回填。
+- 内存任务表 `_JOBS` 仍只保留 **1 小时**（`_JOB_TTL`），过期后只能按 `run_id` 查库。
+
+常用查询：
+
+```sql
+-- 按卖出原因统计：一眼看出「是否几乎全是止损/止盈」
+SELECT reason, COUNT(*), ROUND(AVG(pnl_pct), 2) AS avg_pct
+FROM backtest_trades WHERE run_id = ? GROUP BY reason ORDER BY COUNT(*) DESC;
+
+-- 同一只票在多次回测里的表现（参数对比用）
+SELECT run_id, sell_date, reason, pnl_pct FROM backtest_trades
+WHERE code = '600519' ORDER BY run_id DESC;
+```
+
 ---
 
 ### 7.5 实盘对账口径（`scripts/live_review.py`，2026-10-30）

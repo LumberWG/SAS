@@ -39,7 +39,7 @@ npm ci
 
 ```powershell
 cd backend
-.venv\Scripts\python.exe -m pytest      # 当前 324 例，约 35 秒，全部离线
+.venv\Scripts\python.exe -m pytest      # 当前 329 例，约 35 秒，全部离线
 .venv\Scripts\python.exe -m ruff check .   # 配置在 backend/pyproject.toml
 ```
 
@@ -113,7 +113,7 @@ CI（`.github/workflows/ci.yml`）跑的就是这两件事：
 - 「美化净值」类改动（取价失败按 0 计市值、回测里剔除亏损样本等）；
 - 没有回测支撑却上调仓位 / 放宽闸门 / 打开做T；
 - 为了让测试变绿而改断言、放宽 `param_specs` 校验、或 `# noqa` 掉 `E9/F82`；
-- 引入需要联网才能跑的单测（现有 324 例全部离线，请保持）。
+- 引入需要联网才能跑的单测（现有 329 例全部离线，请保持）。
 
 ## 10. 安全
 

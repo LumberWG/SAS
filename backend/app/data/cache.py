@@ -257,11 +257,36 @@ CREATE TABLE IF NOT EXISTS backtest_runs (
     strategy     TEXT NOT NULL,
     start_date   TEXT,
     end_date     TEXT,
-    params       TEXT,   -- JSON：初始资金/持仓数/手续费等
+    params       TEXT,   -- JSON：本次回测的全部参数（默认值 + 覆盖项）
     metrics      TEXT,   -- JSON：收益率/胜率/最大回撤/夏普等
-    equity_curve TEXT,   -- JSON：[{date, equity}, ...]
+    equity_curve TEXT,   -- JSON：[{date, equity, benchmark, cash, positions}] 逐日过程数据
+    positions    TEXT,   -- JSON：期末持仓快照
+    review       TEXT,   -- JSON：亏损归因 + 调参建议
+    job_id       TEXT,   -- 产出该记录的后台任务 id（与 backend.log 对齐）
+    elapsed      REAL,   -- 回测耗时（秒）
     created_at   TEXT NOT NULL
 );
+-- 逐笔成交明细：单独成表而不是塞进 backtest_runs 的 JSON 列，是为了能直接做
+-- 「按卖出原因 / 按股票 / 按建仓评分」的 SQL 聚合（复盘与参数对比都靠它）。
+CREATE TABLE IF NOT EXISTS backtest_trades (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id     INTEGER NOT NULL,
+    code       TEXT NOT NULL,
+    name       TEXT,
+    buy_date   TEXT,
+    sell_date  TEXT,
+    buy_price  REAL,
+    sell_price REAL,
+    shares     INTEGER,
+    amount     REAL,
+    fee        REAL,
+    pnl        REAL,
+    pnl_pct    REAL,
+    reason     TEXT,
+    score      REAL
+);
+CREATE INDEX IF NOT EXISTS idx_bt_trades_run ON backtest_trades(run_id);
+CREATE INDEX IF NOT EXISTS idx_bt_trades_code ON backtest_trades(code);
 -- 运行时状态（交易模式等少量键值，重启后保留）
 CREATE TABLE IF NOT EXISTS app_state (
     key        TEXT PRIMARY KEY,
@@ -315,7 +340,26 @@ class Database:
             self._migrate_position_peak(conn)
             self._migrate_position_lots(conn)
             self._migrate_lots_tag(conn)
+            self._migrate_backtest_extra(conn)
             self._dedupe_signals(conn)
+
+    @staticmethod
+    def _migrate_backtest_extra(conn: sqlite3.Connection) -> None:
+        """老库给 backtest_runs 补列：期末持仓 / 归因 / 任务 id / 耗时。
+
+        ``_SCHEMA_SQL`` 里的 ``CREATE TABLE IF NOT EXISTS`` 只对新建库生效，
+        已有历史记录的库必须靠 ALTER 补。历史记录这几列为 NULL，
+        读取侧按空值降级，不回填——它们是「当时没存」，不是「存了空」。
+        """
+        cols = {row["name"] for row in conn.execute("PRAGMA table_info(backtest_runs)")}
+        for name, ddl in (
+            ("positions", "ALTER TABLE backtest_runs ADD COLUMN positions TEXT"),
+            ("review", "ALTER TABLE backtest_runs ADD COLUMN review TEXT"),
+            ("job_id", "ALTER TABLE backtest_runs ADD COLUMN job_id TEXT"),
+            ("elapsed", "ALTER TABLE backtest_runs ADD COLUMN elapsed REAL"),
+        ):
+            if name not in cols:
+                conn.execute(ddl)
 
     @staticmethod
     def _dedupe_signals(conn: sqlite3.Connection) -> None:
@@ -1059,41 +1103,105 @@ class Database:
 
     # ---------------- 回测记录 ----------------
 
+    #: 逐笔成交表的列（写入与读取共用一份，避免两处各写一遍字段名）
+    _BT_TRADE_COLS: tuple[str, ...] = (
+        "code", "name", "buy_date", "sell_date", "buy_price", "sell_price",
+        "shares", "amount", "fee", "pnl", "pnl_pct", "reason", "score",
+    )
+
     def save_backtest(self, run: dict[str, Any]) -> int:
-        """保存一次回测结果，返回自增 id。"""
+        """保存一次回测结果（参数 + 过程数据 + 结果），返回自增 id。
+
+        落库范围：
+        - ``backtest_runs``：参数全量、metrics、逐日权益曲线（过程数据）、
+          期末持仓、亏损归因与建议、任务 id 与耗时；
+        - ``backtest_trades``：逐笔成交明细，单独成表以便直接做
+          「按卖出原因 / 按股票 / 按建仓评分」的 SQL 聚合。
+
+        两者在**同一事务**内写入（同一次 ``with conn``），不会出现
+        「有 run 没明细」或「有明细没 run」的半截记录。
+        """
+        trades = list(run.get("trades") or [])
         with self._lock, self._connect() as conn:
             cur = conn.execute(
                 "INSERT INTO backtest_runs(strategy, start_date, end_date, params,"
-                " metrics, equity_curve, created_at) VALUES(?,?,?,?,?,?,?)",
+                " metrics, equity_curve, positions, review, job_id, elapsed, created_at)"
+                " VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     run["strategy"], run.get("start_date"), run.get("end_date"),
                     json.dumps(run.get("params", {}), ensure_ascii=False),
                     json.dumps(run.get("metrics", {}), ensure_ascii=False),
                     json.dumps(run.get("equity_curve", []), ensure_ascii=False),
+                    json.dumps(run.get("positions", {}), ensure_ascii=False),
+                    json.dumps(run.get("review", {}), ensure_ascii=False),
+                    run.get("job_id"),
+                    run.get("elapsed"),
                     _now(),
                 ),
             )
-            return int(cur.lastrowid or 0)
+            run_id = int(cur.lastrowid or 0)
+            if trades:
+                conn.executemany(
+                    "INSERT INTO backtest_trades(run_id, code, name, buy_date,"
+                    " sell_date, buy_price, sell_price, shares, amount, fee, pnl,"
+                    " pnl_pct, reason, score) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                    [
+                        (run_id, *[t.get(col) for col in self._BT_TRADE_COLS])
+                        for t in trades
+                    ],
+                )
+            return run_id
 
     def get_backtest(self, run_id: int) -> dict[str, Any] | None:
+        """取单条回测记录（含逐笔成交、期末持仓与归因）。"""
         with self._lock, self._connect() as conn:
             row = conn.execute(
                 "SELECT * FROM backtest_runs WHERE id=?", (run_id,)
             ).fetchone()
+            trade_rows = conn.execute(
+                "SELECT * FROM backtest_trades WHERE run_id=? ORDER BY id", (run_id,)
+            ).fetchall()
         if row is None:
             return None
         result = dict(row)
-        result["params"] = json.loads(result["params"] or "{}")
-        result["metrics"] = json.loads(result["metrics"] or "{}")
-        result["equity_curve"] = json.loads(result["equity_curve"] or "[]")
+        result["params"] = json.loads(result.get("params") or "{}")
+        result["metrics"] = json.loads(result.get("metrics") or "{}")
+        result["equity_curve"] = json.loads(result.get("equity_curve") or "[]")
+        result["positions"] = json.loads(result.get("positions") or "{}")
+        result["review"] = json.loads(result.get("review") or "{}")
+        # 明细来自 backtest_trades；本功能上线前的历史记录没有明细 → 空列表
+        result["trades"] = [
+            {col: r[col] for col in self._BT_TRADE_COLS} for r in trade_rows
+        ]
         return result
 
     def list_backtests(self, limit: int = 50) -> list[dict[str, Any]]:
+        """历史回测列表（摘要）。
+
+        故意**不**取 ``equity_curve`` / ``positions`` / ``review``：50 条 × 上万字符
+        会让列表接口凭空多出几百 KB，而列表只需要「什么时候跑的、什么参数、
+        结果如何」。逐日曲线与逐笔明细走 :meth:`get_backtest` 单条查。
+        """
         with self._lock, self._connect() as conn:
             rows = conn.execute(
-                "SELECT * FROM backtest_runs ORDER BY id DESC LIMIT ?", (limit,)
+                "SELECT id, strategy, start_date, end_date, params, metrics,"
+                " job_id, elapsed, created_at FROM backtest_runs"
+                " ORDER BY id DESC LIMIT ?", (limit,)
             ).fetchall()
-        return [dict(r) for r in rows]
+            counts = {
+                r[0]: r[1]
+                for r in conn.execute(
+                    "SELECT run_id, COUNT(*) FROM backtest_trades GROUP BY run_id"
+                )
+            }
+        out: list[dict[str, Any]] = []
+        for row in rows:
+            item = dict(row)
+            item["params"] = json.loads(item.get("params") or "{}")
+            item["metrics"] = json.loads(item.get("metrics") or "{}")
+            item["trade_count"] = counts.get(item["id"], 0)
+            out.append(item)
+        return out
 
 
 # 全局单例

@@ -19,7 +19,7 @@
 
 ## 验证
 
-- [ ] `cd backend && .venv\Scripts\python.exe -m pytest` 全绿（当前 324 例）
+- [ ] `cd backend && .venv\Scripts\python.exe -m pytest` 全绿（当前 329 例）
 - [ ] `.venv\Scripts\python.exe -m ruff check .` 通过
 - [ ] 新行为有测试；修 bug 的用例在修复前是红的
 - [ ] 手工验证过的路径 / 接口（写出具体命令或页面）：

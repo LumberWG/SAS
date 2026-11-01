@@ -118,6 +118,12 @@ npm run dev                                        # → http://localhost:5173
 - 改参数 + 「开始回测」——只影响**本次回测**，不碰实盘；
 - 「将规则落盘保存到数据库」——把这套规则写进配置库（`app_state` 覆盖层），立即对**选股 + 模拟盘交易**生效，重启保留，并成为新的默认值。只同步实盘有落点的子集（止损/止盈/单票上限/仓位/买入阈值/评分档/择时/买入切入点/做T 等，共 30 项），其余（板块组合、调仓周期、分位门槛、反转选股、分段止盈、时间止损、分钟级切入点）逐条列出「未同步」原因。落盘前有确认框展示「会变更哪几项：旧值 → 新值」。接口 `GET /api/backtest/persist-map`、`POST /api/backtest/persist`；映射表见 `app/backtest/apply.py`。
 
+**回测结果自动落库（2026-11-01）**：每次回测跑完即写库，不需要任何操作，便于事后分析：
+- `backtest_runs`：`params`（本次全量参数）、`metrics`（收益/基准/回撤/夏普/胜率…）、`equity_curve`（**过程数据**：逐日 `equity / benchmark / cash / positions`）、`positions`（期末持仓）、`review`（亏损归因 + 调参建议）、`job_id`（与 `backend.log` 对齐，日志里的任务 id 能直接定位到这条记录）、`elapsed`
+- `backtest_trades`：逐笔成交单独成表（代码/名称/买入日/卖出日/买入价/卖出价/股数/金额/费用/盈亏/收益率/卖出原因/建仓评分），可以直接 SQL 聚合「按卖出原因」「按股票」「按评分档」
+- `GET /api/backtest/{run_id}` 返回含 `trades` 的完整结果；`GET /api/backtest` 只返回摘要（不带曲线与明细，附带 `trade_count`），避免 50 条 × 上万字符把列表接口撑爆
+- 该功能上线前的历史记录只有参数与曲线，`trades` 为空（不是丢失，是当时没存）
+
 并内置三组「一键预设」：
 
 - **创业板超卖半仓（心得）**：只创业板 + 半仓 + 超卖不追高 + 大盘择时 + 2×ATR 保本移动。2025~2026 回测 **-4.22%**，同期买入持有基准 **-59.97%**（跑赢约 55 个点），最大回撤 **-13.6%**。（完整条件、run id 与复跑方式见 `BACKTEST_LOG` 记录 #48；单窗口结论，未走验收协议，仅供存档）
@@ -581,7 +587,7 @@ cd backend
 .venv\Scripts\python.exe -m pytest tests/ -q
 ```
 
-**324 个单元测试**，覆盖：指标公式正确性、各策略命中/不命中场景、策略参数注入与
+**329 个单元测试**，覆盖：指标公式正确性、各策略命中/不命中场景、策略参数注入与
 自定义策略全链路（注册/持久化/启动加载）、回测止盈/止损/绩效指标、市场情绪
 分级（阈值边界/权重/快照计算/逆环境降级）、交易时段判断、异动检测与去重、
 通知管道、快照存储（TTL/SWR/并发去重/失败冷却）、智能建议（评分分级/情绪降级/批次持久化）、
@@ -610,7 +616,7 @@ SAS/
 │   │   ├── llm/               # OpenAI 兼容客户端 + 决策仪表盘
 │   │   ├── monitor/           # APScheduler 调度器
 │   │   └── notify/            # 通知管道（控制台/Webhook/邮件预留）
-│   ├── tests/                 # 324 个单元测试（全部离线，无网络依赖）
+│   ├── tests/                 # 329 个单元测试（全部离线，无网络依赖）
 │   ├── requirements.txt       # 依赖下限（日常开发）
 │   ├── requirements.lock.txt  # 锁定版本（CI / 复现历史回测结论）
 │   └── pyproject.toml         # requires-python + ruff + pytest 配置（不是打包清单）
@@ -630,7 +636,7 @@ SAS/
 │   ├── flow.md                # 全链路流程图（选股→打分→队列→下单），含参数总表与 skip 原因速查
 │   ├── sas_formulas.md        # 公式与实现口径备查
 │   └── images/                # README 示意图（架构 / 时间轴 / 下单链路）
-├── .github/workflows/ci.yml   # CI：ruff + 324 例单测
+├── .github/workflows/ci.yml   # CI：ruff + 329 例单测
 ├── serve_frontend.py          # 前端静态服务 + /api 反代（nssm 服务 SAS-frontend 的入口）
 ├── deploy.ps1                 # 部署：构建前端 + 重启服务 + 健康检查（计划任务 SASDeploy 的入口）
 ├── restart-backend.ps1        # 只重启后端（计划任务 SASRestart 的入口）

@@ -61,7 +61,7 @@ git -c user.name=LumberWG -c user.email=663589316@qq.com commit -m "..."
 
 ```powershell
 cd e:\Study\SAS\backend
-.\.venv\Scripts\python.exe -m pytest tests -q          # 全量单测（当前 324 passed，全离线，约 35s）
+.\.venv\Scripts\python.exe -m pytest tests -q          # 全量单测（当前 329 passed，全离线，约 35s）
 .\.venv\Scripts\python.exe -m ruff check .             # 代码检查（配置在 backend\pyproject.toml）
 .\.venv\Scripts\python.exe scripts\weekly_review.py --md   # 周度复盘（零成交归因）
 .\.venv\Scripts\python.exe scripts\live_review.py --md     # 实盘 vs 等权基准超额对账

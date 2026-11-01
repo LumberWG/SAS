@@ -174,12 +174,13 @@ async def _execute(job_id: str, params: PipelineParams) -> None:
     job = _JOBS[job_id]
     try:
         result = await run_pipeline(params)
+        elapsed = round(time.time() - job["created"], 1)
+        # job_id / elapsed 一并写进结果再落库：事后拿日志里的 job_id 能直接定位到
+        # 这条记录，不用靠时间戳猜；elapsed 也是「过程数据」的一部分。
+        result["job_id"] = job_id
+        result["elapsed"] = elapsed
         result["run_id"] = await asyncio.to_thread(db.save_backtest, result)
-        job.update(
-            status="done",
-            result=result,
-            elapsed=round(time.time() - job["created"], 1),
-        )
+        job.update(status="done", result=result, elapsed=elapsed)
         logger.info(
             "流水线回测完成 %s（%s~%s）：%d 笔交易，耗时 %.1fs",
             job_id, params.start_date, params.end_date,
