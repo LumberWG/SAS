@@ -593,7 +593,7 @@ peak = max(历史峰值总资产, 当前总资产)；dd = 1 − 总资产 / peak
 | `paper_buy_open_window_minutes` | 5 | 开盘买入窗口（分钟，0=不限） | live |
 | `paper_signal_ttl_minutes` | 30 | 信号有效期 | live |
 | `scan_auto_watch_limit` | 10 | **二选**：从股票池按技术面评分取前 N 加自选（一选=signals 全量） | scanner |
-| `paper_entry_max_chase` | 0.015 | **⑤ 不追高**：现价高于信号价超此比例不买 | engine |
+| `paper_entry_max_chase` | **0（关闭）** | **⑤ 不追高**：现价高于信号价超此比例不买。2026-11-01 由 0.015 改为 0，依据 BACKTEST_LOG #89（6 段配对三条线全不过，且是买差不是少买） | engine |
 | `paper_entry_pullback` | 0.0 | **⑤ 回踩**：要求现价低于信号价此比例才买（0=不限） | engine |
 | `paper_entry_timeout_minutes` | 0 | **⑤ 超时**：买单信号超时放弃（0=沿用 `paper_signal_ttl_minutes`） | live |
 | `paper_scan_autotrade / _top_n / _overnight` | True / 10 / True | 选股联动自动交易 | scanner |
@@ -890,7 +890,7 @@ scoring_mode = factors   14 因子启发式（基线，即 #72 的 default）
 | ② 二选 | ✅ 已分离：`_auto_watch_hits` 从池内按技术面评分取 Top`scan_auto_watch_limit`(**10**) 加自选 | 池 → 自选两级收口已完成 |
 | ③ 三选 | 14 因子对**全部自选**打分 → 买卖建议 → `live_trader.submit` 入队；**2026-10-29 已补 topM 收口**：买入按总分降序只留前 `paper_trade_queue_top_m`(5) 条，超额记 `queue_rejected`；`paper_scan_autotrade_top_n`(10) 只限制「扫描后立即分析」的只数 | 自选仍可能一次全部分析（属计算成本，不入队），队列层已收敛 |
 | ④ 进池 | ✅ 已统一：`entry_gate()`（择时/已持仓/`_buy_allowed`/名额）+ `entry_price_ok()`（价格/切入点）+ `entry_check()` 组合入口；评分分档与预算在分档阶段 | 规则仍分两段（取价前/取价后），但已有单一入口与统一 skip 原因 |
-| ⑤ 成交 | ✅ 已补切入点：`paper_entry_max_chase`(1.5%) 不追高、`paper_entry_pullback`(0=不限) 回踩、`paper_entry_timeout_minutes`(0=沿用 TTL) 超时；配合开盘窗口 + TTL | 无分时强度/回踩确认；日线粒度下「切入点」只有价格带这一层 |
+| ⑤ 成交 | ✅ 已补切入点：`paper_entry_max_chase`(0=关闭，原 1.5%，#89 证否)、`paper_entry_pullback`(0=不限) 回踩、`paper_entry_timeout_minutes`(0=沿用 TTL) 超时；配合开盘窗口 + TTL | 无分时强度/回踩确认；日线粒度下「切入点」只有价格带这一层 |
 
 ### 8.3 改造建议（按最小改动排序）
 
@@ -898,7 +898,7 @@ scoring_mode = factors   14 因子启发式（基线，即 #72 的 default）
 | --- | --- | --- | --- |
 | 1 | **队列收敛 topM** ✅ 已实现（2026-10-29）：每次分析后，买入建议按 14 因子总分降序只取前 M 入队，其余记 `queue_rejected`，前端 ④ 页展示「未入队 + 分值」 | `paper_trade_queue_top_m`（默认 5，0=不限）；卖出不受限；同股更新不重复占位 | 已上线，`LiveTrader.submit` 单点收口（开盘/盘中/选股联动三处调用全覆盖） |
 | 2 | **交易池判定统一** ✅ 已实现：`entry_gate()` 前置闸 + `entry_price_ok()` 切入点 + `entry_check()` 组合入口；被拒原因经 `_entry_rejected` 暴露 | 无新参数，纯重构，237 项回归测试保证行为不变 | `engine` / `live` / ④ 页「切入点判定」卡片 |
-| 3 | **切入点** ✅ 已实现：不追高 / 回踩 / 超时 | `paper_entry_max_chase`(0.015)、`paper_entry_pullback`(0)、`paper_entry_timeout_minutes`(0=沿用 TTL)；回测侧同名参数 `entry_max_chase/entry_pullback`（None=不启用） | 线上 `entry_price_ok` + 回测买入执行 |
+| 3 | **切入点** ✅ 已实现：不追高 / 回踩 / 超时 | `paper_entry_max_chase`(0=关闭，原 0.015，#89 证否)、`paper_entry_pullback`(0)、`paper_entry_timeout_minutes`(0=沿用 TTL)；回测侧同名参数 `entry_max_chase/entry_pullback`（None=不启用） | 线上 `entry_price_ok` + 回测买入执行 |
 | 4 | **一选/二选分离** ✅ 已实现：一选只落 `signals`，二选从池内取 Top`scan_auto_watch_limit`(**50→10**) 加自选 | 复用现有参数，仅改默认值与语义注释 | `scanner` |
 
 > 回测结论见 `BACKTEST_LOG` 记录 #52：**三条切入点规则在样本外无稳定增益，不作为收益来源**；

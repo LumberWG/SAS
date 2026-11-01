@@ -39,6 +39,8 @@ PROFILE_TO_PAPER: dict[str, str] = {
     "trail_arm": "paper_trail_arm",
     "stop_atr_mult": "paper_atr_stop_mult",
     "stop_atr_max": "paper_atr_stop_max",
+    # 买入切入点是否追高：线上已按记录 #89 关闭，账本用它做回测-实盘对照
+    "entry_max_chase": "paper_entry_max_chase",
 }
 
 #: 明确不支持并行复现的参数名 -> 为什么（写进 API/日志，避免有人以为它在生效）

@@ -562,7 +562,7 @@ schtasks /run /tn SASDbBackup                              # 立即触发计划�
     再逐项单开对照——三项同时开会互相掩盖，也说不清是谁的贡献。
 - **交易队列容量**：待执行**买单**最多同时挂 5 只（`paper_trade_queue_top_m`，按 14 因子总分择优），超出不入队并在「④ 交易池 · 持仓」页的交易池 tab 标注「未入队」原因；卖出不受限
 - **大盘股过滤**（「③ 三选 · 交易队列」页顶部开关）：**默认开启**，**总市值 > 100 亿**（可改阈值）的票不进队列，银行/石油这类巨无霸也不会出现在候选池里；关掉开关才放开（此时旧的 `GIANT_CODES` 黑名单同时失效）。设置写进 `app_state`，重启保留。回测侧无法建模（`klines` 没有市值字段），对照时需注意实盘可选集合比回测窄
-- **切入点**（进队≠成交）：现价高于信号价 1.5% 不追（`paper_entry_max_chase`）、可要求回踩（`paper_entry_pullback`，默认 0=不限）、信号超时放弃（`paper_entry_timeout_minutes`，0=沿用 30 分钟 TTL）；被拒原因同样在「④ 交易池 · 持仓」页的交易池 tab 展示。**注意**：这组规则经回测无稳定增益（BACKTEST_LOG #52），属于防追高的工程保护，不是收益来源
+- **切入点**（进队≠成交）：**不追高已关闭**（`paper_entry_max_chase` 于 2026-11-01 由 1.5% 改为 0；依据 BACKTEST_LOG #89：6 段配对中位 −4.54pp / 正占比 33% / 最差段 −22.46pp 三条线全不过，且成交笔数没减少——是「买差」不是「少买」）、可要求回踩（`paper_entry_pullback`，默认 0=不限）、信号超时放弃（`paper_entry_timeout_minutes`，0=沿用 30 分钟 TTL）；被拒原因同样在「④ 交易池 · 持仓」页的交易池 tab 展示。**注意**：这组规则整体经回测无稳定增益（BACKTEST_LOG #52、#89），属于工程保护，不是收益来源
 - **关闭自动执行**：环境变量 `PAPER_AUTO_TRADE=false`（仅记录信号不成交）
 - **周度复盘**：`cd backend && .venv\Scripts\python.exe scripts\weekly_review.py [--days 14] [--md]` —— 只读汇总区间内的净值/收益/最大回撤、成交笔数与费用、每日弱市拦截次数，最后给一句诊断（**零成交时区分「被弱市闸门拦住」和「本来就没信号」**，不用再翻日志）。数据来自 `paper_equity` / `paper_trades` / `app_state` 的 `paper_regime_paused:日期` 键（引擎每 60 次 tick 落库一次，重启不丢；2026-10-30 之前的日子没有该键）；按日表另有两列「收盘仓位」「弱势」，来自收盘结算写入的 `paper_regime_state:日期`（见下条）
 - **涨跌家数广度（观测用，不参与交易）**：`cd backend && .venv\Scripts\python.exe -m app.data.breadth [--since 2024-01-01]` —— 遍历本地 5734 只**前复权**日线回算每日 `up/down/flat/up_ratio`，落 `data\breadth_daily.parquet`（全市场约 **10 秒**），每交易日 16:00 K线预热后自动刷新一次。用途是复盘时回答「那天是普跌还是结构性下跌」。**不进任何交易判定**：曾想用它区分 shock / 自由落体，但 4 年非重叠样本只有 5 个、方向还不稳定，见 `BACKTEST_LOG` #86

@@ -615,6 +615,14 @@ PROFILES: dict[str, dict] = {
         "ml_model": "lightgbm",
         "ml_require_ic": 0.0,
     },
+    # ---- 买入时点口径：验证线上正在跑、但回测从未开过的「不追高」（记录 #89）----
+    # 线上 paper_entry_max_chase=0.015 一直是生效的，而回测 entry_max_chase=None
+    # （不拦），profiles 里也从未有方案设过它 → 两边口径不一致，这道过滤的实际
+    # 影响从来没被量出来。记录 #4 只测过 2% / 4% 两档（且 E2 判不采纳）。
+    # 三档用来量出「线上真实规则」相对「回测默认」的净影响。
+    "chase15": {"entry_max_chase": 0.015},
+    "chase30": {"entry_max_chase": 0.03},
+    "chase50": {"entry_max_chase": 0.05},
 }
 
 # ---- E48：成交价随机扰动（稳健性检验，BACKTEST_LOG #67 §8）----
