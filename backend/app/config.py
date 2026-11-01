@@ -249,8 +249,11 @@ class Settings(BaseSettings):
     # ---------- 线上 ML 打分（default_ml 实时版） ----------
     # True 时 recommender 用 LightGBM 截面分位(0~100) 替换 14 因子分做排序与仓位定价；
     # 买入触发仍保留 14 因子信号作安全网（ML 只能降权/跳过，不能凭空制造买入）。
-    # 2026-10-31 起线上保持 False：该用法至今没有一次 effective=true 的回测（#79
-    # pred_pairs=0），且首轮构建 109s、每轮分析 K 线请求翻倍，见 docs/sas_formulas.md §7.6。
+    # 2026-11-01 起线上 True（`.env` + app_state 覆盖层双写）。
+    # 此前关闭依据的两条都站不住：① #79 的 `pred_pairs=0` 是**12 个交易日的短区间回测**
+    # ——截面太少估不出 rank-IC，属 #76 设计内的纪律性回退，不是实盘路径；② 实测 152 只
+    # 自选股 20.7s 全量出分，且按 as_of 缓存、一天只训练一次，见 BACKTEST_LOG #88。
+    # 直接证据是 #82：`ml_lgb` 18 段配对中位 +4.55pp（>3.5pp 线）、最差段 −11.44%→−5.07%。
     # 设置页改这一项**立即生效**（就地改 Settings 单例），不需要重启。
     live_ml_scoring: bool = False
     paper_t_up_sell: float = 0.05          # 开盘涨幅超此先卖锁利

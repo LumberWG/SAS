@@ -201,6 +201,17 @@ class Recommender:
             except Exception as exc:  # noqa: BLE001
                 logger.warning("线上 ML 打分构建失败，本批回退 14 因子: %s", exc)
                 ml_scores = {}
+            # 「这一轮到底跑没跑 ML」必须在日志里留痕：开关为 True 但无信号时
+            # 行为与 14 因子基线完全一致，事后从结果分不出来（#79 的教训）。
+            if ml_scores:
+                logger.info(
+                    "线上 ML 打分生效: %d/%d 只拿到截面分位，其余回退 14 因子",
+                    len(ml_scores), len(watchlist),
+                )
+            else:
+                logger.warning(
+                    "线上 ML 打分未生效：本轮回退 14 因子（详见 sas.live_ml 日志的 OOS IC）"
+                )
 
         semaphore = asyncio.Semaphore(self.settings.scan_concurrency)
 
