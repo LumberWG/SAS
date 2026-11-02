@@ -1006,7 +1006,7 @@ onUnmounted(() => {
               :key="t.id"
               class="border-b border-base-600/30 transition-colors hover:bg-primary/10"
             >
-              <td class="font-num px-3 py-2.5 text-content-muted">{{ t.trade_date }}</td>
+              <td class="font-num px-3 py-2.5 text-content-muted">{{ (t.created_at || t.trade_date).slice(0, 16) }}</td>
               <td class="px-3 py-2.5">
                 <span
                   class="inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[12.5px] font-medium"
