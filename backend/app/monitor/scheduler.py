@@ -137,6 +137,14 @@ class MarketScheduler:
             CronTrigger(day_of_week="mon-fri", hour=16, minute=0, timezone=tz),
             id="kline_warmup", replace_existing=True,
         )
+        # 8b) 收盘后完整回填当日 bar：16:00 预热时数据源当日完整日线尚未落库，
+        #     写入的是盘中快照（实证 301313 收盘 59.21 vs 真实 62.49）；
+        #     20:30 数据源已收盘，全量重拉（增量已回看 N 天）覆盖当日快照。
+        self.scheduler.add_job(
+            self.warmup_klines,
+            CronTrigger(day_of_week="mon-fri", hour=20, minute=30, timezone=tz),
+            id="kline_refill", replace_existing=True,
+        )
 
         # 10) 影子账户（交易日 16:45，冻结参数逐日重跑；未配置起点则不注册）
         if self.settings.shadow_start:

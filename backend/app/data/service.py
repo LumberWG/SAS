@@ -213,8 +213,11 @@ def get_kline_cached(
         last = str(cached["date"].iloc[-1])
         since = time.time() - _last_net_fetch.get(code, 0.0)
         if last >= _latest_trading_day():
-            # 已到最近交易日：非交易时段一律不回源；交易时段最多每 60s 一次（当日 bar 会变）
-            if not _in_trading_hours() or since > _NET_MIN_INTERVAL:
+            # 已到最近交易日：交易时段最多每 60s 回源一次（当日 bar 会变）；
+            # 非交易时段原本一律不回源，但这会让当日 bar 盘中写成快照、收盘后才完整
+            # 的数据永远停在快照（复盘/回测读到的当日收盘都是错的）。改为统一按
+            # _NET_MIN_INTERVAL 节流允许回源：距上次回源超过间隔才回源，否则返回缓存。
+            if since <= _NET_MIN_INTERVAL:
                 return cached if days is None else cached.tail(days)
         elif since < _STALE_RETRY_INTERVAL:
             # 落后于最近交易日、且刚试过：说明数据源此刻还没有新 bar（如盘前/停牌），
@@ -226,7 +229,12 @@ def get_kline_cached(
             df = source.get_daily_kline(code, adjust=adjust, timeout=timeout, retries=retries)
         else:
             last = kline_cache.last_date(code)
-            new_df = source.get_daily_kline(code, adjust=adjust, start_date=last,
+            # 增量回看 N 天：当日 bar 盘中会被写入快照，收盘后数据源才完整；
+            # 若 start_date 直接取 last（==今天），增量要么返回空、要么降级拿到
+            # 盘中旧值，导致当日 bar 一旦写入就永不重拉覆盖。回看保证每次增量
+            # 都重拉最近 N 天（含今天），用收盘完整值覆盖当日快照。
+            lb = (datetime.strptime(last, "%Y-%m-%d") - timedelta(days=6)).strftime("%Y-%m-%d")
+            new_df = source.get_daily_kline(code, adjust=adjust, start_date=lb,
                                             timeout=timeout, retries=retries)
             if new_df.empty:
                 df = cached
