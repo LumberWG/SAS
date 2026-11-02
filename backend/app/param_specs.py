@@ -939,7 +939,8 @@ def settings_overview() -> dict:
         "groups": ordered,
         "total": total,
         "runtime_overrides": runtime_count,
-        "hint": "当前值 = app_state 覆盖 > 环境变量/.env > 默认值。"
-                "改动即时生效并落库（重启保留）。"
-                "路径/列表类（DB 文件、K 线目录、CORS 等）不进本页，请改 .env 后重启。",
+        # 这行要**尽量排成一行**（前端给了 ~860px 宽度）：超过就换行，所以文案控制在
+        # 60 个汉字以内，别往里加新句子，长说明放 tooltip 或文档。
+        "hint": "当前值 = app_state 覆盖 > .env > 默认值；改动即时落库生效（重启保留）；"
+                "路径/列表类（DB/K线/CORS）需改 .env 后重启。",
     }

@@ -331,7 +331,9 @@ onMounted(load)
               保存后即时生效
             </span>
           </div>
-          <p class="mt-1 max-w-[780px] text-[12.5px] leading-relaxed text-content-faint">
+          <!-- 口径说明尽量单行：给到 860px（文案长度由后端 param_specs.hint 控制），
+               只有窗口更窄时才换行 -->
+          <p class="mt-1 max-w-[860px] text-[12.5px] leading-relaxed text-content-faint">
             {{ data?.hint ?? '加载中…' }}
           </p>
         </div>
