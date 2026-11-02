@@ -33,8 +33,8 @@ def buy_recommendations() -> dict:
 
 @router.get("/sell")
 def sell_recommendations() -> dict:
-    """建议卖出列表（今日最新批次，附带当前行情）。"""
-    items = _latest_by_action(("intraday", "premarket"), "sell")
+    """建议卖出列表（仅含实际持仓的票；没持仓的卖出信号不展示）。"""
+    items = _sell_items()
     return with_disclaimer({
         "items": with_realtime(_with_detail(items)),
         "batch": _batch_of(items),
@@ -62,8 +62,7 @@ def advisory_summary() -> dict:
     settings = get_settings()
     buy = db.list_recommendations("intraday", "buy") or \
         db.list_recommendations("premarket", "buy")
-    sell = db.list_recommendations("intraday", "sell") or \
-        db.list_recommendations("premarket", "sell")
+    sell = _sell_items()
     focus = db.list_recommendations("focus", "focus")
     return with_disclaimer({
         "buy_count": len(buy),
@@ -115,3 +114,23 @@ def _batch_of(items: list[dict]) -> str | None:
 
 def _latest_time(items: list[dict]) -> str | None:
     return items[0]["created_at"] if items else None
+
+
+def _held_codes() -> set[str]:
+    """当前持仓代码集合（建议卖出只展示持仓股）。"""
+    try:
+        return {str(p["code"]) for p in db.list_paper_positions()}
+    except Exception:
+        return set()
+
+
+def _sell_items() -> list[dict]:
+    """今日建议卖出中、实际持仓的票（没持仓的卖出信号不展示）。
+
+    自选股里没持仓的票若因子转空也会产出卖出建议，但那只是偏空警示、
+    没法真卖；展示层只保留持仓股，避免「建议卖出」出现不能卖的票。
+    （非持仓的弱势票已由 scheduler._route_sell_signals 自动移出自选。）
+    """
+    items = _latest_by_action(("intraday", "premarket"), "sell")
+    held = _held_codes()
+    return [it for it in items if str(it.get("code")) in held]
