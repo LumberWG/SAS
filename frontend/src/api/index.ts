@@ -483,7 +483,10 @@ interface BacktestJob {
 
 /** 轮询间隔（毫秒）与最长等待（毫秒） */
 const BACKTEST_POLL_MS = 1500
-const BACKTEST_TIMEOUT_MS = 15 * 60 * 1000
+// 旧的 15 分钟上限偏短：实测「2025-01~2026-10、成交额前 300」约 15.5 分钟才跑完，
+// 刚好越过 900s 被判超时。放宽到 40 分钟覆盖长区间/更大股票池；后端任务不受此前端
+// 上限影响，即使前端放弃也会继续跑完并落库（可按 run_id 查历史）。
+const BACKTEST_TIMEOUT_MS = 40 * 60 * 1000
 
 /**
  * 提交回测并轮询结果。
@@ -507,7 +510,7 @@ export async function runBacktest(req: BacktestRequest): Promise<BacktestResult>
     if (res.data.status === 'done' && res.data.result) return res.data.result
     if (res.data.status === 'error') throw new Error(res.data.error || '回测失败')
   }
-  throw new Error('回测超时（15 分钟），请缩小股票池或时间区间后重试')
+  throw new Error('回测超时（已等待 40 分钟）。任务可能仍在后台运行并会落库，可稍后查询回测记录，或缩小股票池/时间区间后重试')
 }
 
 export function getBacktest(runId: number): Promise<BacktestResult> {

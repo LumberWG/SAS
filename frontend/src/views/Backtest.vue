@@ -46,6 +46,9 @@ const activeGroup = ref('基础')
 const result = ref<BacktestResult | null>(null)
 const loading = ref(false)
 const error = ref('')
+// 长区间回测可能跑十几分钟：显示实时已等待时长，避免「卡住没反馈」的错觉
+const elapsedSec = ref(0)
+let elapsedTimer: number | undefined
 const notify = useNotifyStore()
 
 // ---- 落盘（回测规则 → 选股/交易实盘默认值）----
@@ -386,12 +389,19 @@ function buildPayload(): Record<string, unknown> {
 async function submit() {
   loading.value = true
   error.value = ''
+  elapsedSec.value = 0
+  if (elapsedTimer) window.clearInterval(elapsedTimer)
+  elapsedTimer = window.setInterval(() => { elapsedSec.value += 1 }, 1000)
   try {
     result.value = await runBacktest(buildPayload() as any)
   } catch (e: unknown) {
     error.value = e instanceof Error ? e.message : '回测请求失败'
   } finally {
     loading.value = false
+    if (elapsedTimer) {
+      window.clearInterval(elapsedTimer)
+      elapsedTimer = undefined
+    }
   }
 }
 
@@ -671,7 +681,11 @@ function metricTone(v: number): string {
         {{ defaultsError }}（点「重置」重试）
       </div>
       <div v-if="error" class="mt-2 text-[12.5px] text-up">{{ error }}</div>
-      <div v-if="loading" class="mt-2 text-[12.5px] text-content-muted">回测在后台运行，约需 1~3 分钟，请勿关闭页面</div>
+      <div v-if="loading" class="mt-2 text-[12.5px] text-content-muted">
+        回测在后台运行，已等待
+        <span class="font-num text-content">{{ Math.floor(elapsedSec / 60) }} 分 {{ elapsedSec % 60 }} 秒</span>
+        （长区间可达十几分钟，请勿关闭页面）
+      </div>
 
       <div v-show="formOpen" class="mt-3">
         <!-- 预设：一键把心得策略载入表单 -->
