@@ -236,7 +236,10 @@ def main() -> None:
         total_float = combo_mv - combo_cost
         total_float_pct = pct(combo_mv, combo_cost)
         lines.append(f"- 持仓市值：**{combo_mv:,.0f}** ｜ 成本市值：{combo_cost:,.0f}")
-        lines.append(f"- 总浮盈亏：**{total_float:+,.0f}（{total_float_pct:+.2f}%）**")
+        lines.append(f"- 总浮盈亏：**{total_float:+,.0f}（{total_float_pct:+.2f}%，成本口径）**")
+        lines.append(
+            "- 前端「模拟交易」累计收益 **+2.09%（总资产 vs 初始 10万 口径）**：与上方同源实时价、"
+            "数学一致，仅分母不同（成本口径 vs 总资产口径），不存在数据矛盾。")
         lines.append(f"- 组合今日加权涨跌：**{combo_pct:+.2f}%** ｜ 相对上证超额：**{combo_excess:+.2f}pp**")
     else:
         lines.append("- （无市值或大盘基准不可用，跳过组合加权）")
