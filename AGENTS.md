@@ -5,7 +5,7 @@
 **对外贡献规则**（含从第 4 节提升为硬约束的口径红线）见 `CONTRIBUTING.md`；
 本仓库以 [MIT](LICENSE) 授权。
 
-最后更新：2026-10-31
+最后更新：2026-11-02
 
 ## 0. 根目录脚本不要随便搬
 
@@ -48,20 +48,33 @@ git -c user.name=LumberWG -c user.email=663589316@qq.com commit -m "..."
   重要的关/开要**两处都写**（覆盖层 + `.env`），否则一次「还原」就回到旧值。
 - **`param_specs._FIELD_RE` 要求行尾注释前 ≥2 个空格**（`\s{2,}#`）。只打 1 个空格会让设置页
   tooltip 变空，`tests/test_settings.py` 直接挂。
-- **线上与回测同口径才有意义**：线上 `paper_pool_top_n=300`，回测 `universe_size` 默认跟随它，
-  不要写死 500 再互相比较。
+- **线上与回测同口径才有意义**：线上 `paper_pool_top_n=300`，`/api/backtest/defaults` 会把
+  `universe_size` 设成 `paper_pool_top_n or 300`，不要写死 500 再互相比较。
+  **但 `BacktestParams.universe_size` 数据类默认仍是 500**：直接调 pipeline 或跑 `scripts\*.py`
+  时必须显式传 `--universe 300`，否则跑的是「Top500 里的策略」，与线上和 `#76` 都不是同一实验。
 - **ML 打分看 `effective`**：`effective=false` 说明整段回退 14 因子，此时结果与基线一模一样，
   不能当作「ML 有效」的证据。
 - **测试会读到 `.env` 的 `API_TOKEN`**：`tests/conftest.py` 已在会话级把它置空（就地改单例，
   不清 lru 缓存）。删掉这个夹具，接口用例会成片 401，看着像功能坏了。
 - **备份 WAL 库不能用 `Copy-Item`**：服务在写主库时 `-wal` 里还有未合并的提交，直接复制会丢
   最近几笔成交。用 `scripts/backup_db.py`（SQLite 在线 backup API）。
+- **轮动卖出前必须先确认换入票能买进**：`_pick_rotation_target` 用与买入同一套闸门
+  （`entry_gate(ignore_slots=True)` + `entry_price_ok` + `≥ half_score`），还要校验「卖出所得够买一手」。
+  只按评分就卖＝只卖不买、仓位凭空降一档，还会和弱市降仓混在一起无法归因（`BACKTEST_LOG` #91）。
+  轮动候选还要把 `live` 的候补队列一起传进去，否则那些高分票永远进不了轮动视野。
+- **`paper_max_positions` 是上限不是门槛**：不满仓也能轮动，一次可连换多只（`#93`）。
+  任何"必须满 X 只才做某事"的写法都是回退到旧口径。`paper_max_total_exposure`(80%) 同理
+  ——它是**收盘目标**，盘中买入上限是 100%（现金约束），收盘前 10 分钟由 `eod_trim` 压回；
+  改回盘中也卡 80% 会让「钱满票不满」的僵局重现（`#93` 的起因）。
+- **本机 `.env` 把 `PAPER_BUY_OPEN_WINDOW_MINUTES` 设成了 0**（2026-11-02 起，窗口关闭）。
+  于是 `test_exec_rules.py` 有 **2 例会挂**（`test_in_buy_window` / `test_buy_expiry_survives_to_next_open`），
+  这是环境口径不是回归；clean checkout 下全绿。
 
 ## 5. 常用命令
 
 ```powershell
 cd e:\Study\SAS\backend
-.\.venv\Scripts\python.exe -m pytest tests -q          # 全量单测（当前 329 passed，全离线，约 35s）
+.\.venv\Scripts\python.exe -m pytest tests -q          # 全量单测（当前 343 例，全离线，约 35s）
 .\.venv\Scripts\python.exe -m ruff check .             # 代码检查（配置在 backend\pyproject.toml）
 .\.venv\Scripts\python.exe scripts\weekly_review.py --md   # 周度复盘（零成交归因）
 .\.venv\Scripts\python.exe scripts\live_review.py --md     # 实盘 vs 等权基准超额对账
@@ -69,10 +82,8 @@ schtasks /run /tn SASRestart                            # 重启后端（无需 
 Get-Content e:\Study\SAS\backend\logs\backend.log -Tail 50  # 应用日志（业务判定在这）
 .\.venv\Scripts\python.exe scripts\backup_db.py         # 手动备份库（SQLite 在线 backup API）
 schtasks /run /tn SASDbBackup                           # 每日 15:50 的备份计划任务，立即触发
-.\.venv\Scripts\python.exe scripts
-un_minutes_all.py   # 分钟线补到最近交易日（只补增量）
-.\.venv\Scripts\python.exe scripts
-un_minutes_all.py --end 20261030  # 只补某一天
+.\.venv\Scripts\python.exe scripts\run_minutes_all.py            # 分钟线补到最近交易日（只补增量）
+.\.venv\Scripts\python.exe scripts\run_minutes_all.py --end 20261030  # 只补某一天
 schtasks /run /tn SASMinutesFsdb                        # 每交易日 17:30 的分钟线导出，立即触发
 ```
 
@@ -85,14 +96,17 @@ schtasks /run /tn SASMinutesFsdb                        # 每交易日 17:30 的
 Invoke-RestMethod -Headers @{'X-API-Token'='<令牌>'} http://127.0.0.1:8000/api/settings
 ```
 
-## 6. 当前状态（2026-10-31 收盘后）
+## 6. 当前状态（2026-11-02 收盘后）
 
 | 项 | 值 | 说明 |
 | --- | --- | --- |
-| `paper_t_active` | **true**（2026-11-02 开） | 用户决策强制开启（覆盖 #66 待满足条件）；`.env` 与 `app_state` 覆盖层均为 true，还原不回退；监控见 README「做T引擎」 |
+| `paper_t_active` | **true**（2026-11-02 开） | 用户决策强制开启（覆盖 #66 待满足条件）；`config.py` 默认、`.env`、`app_state` 覆盖层**三处一致**，还原不回退；监控见 README「做T引擎」 |
 | `live_ml_scoring` | **true**（2026-11-01 重开） | `#82` 配对 +4.55pp 超 3.5pp 线；实测 152 只 20.7s、当日 `as_of` 缓存只训练一次，见 `docs` §7.6 |
 | `paper_weak_exposure` | 0.3 | 弱市只降仓不全停（`#63`）；0 会让弱市零成交 |
 | `paper_dynamic_exposure` / `paper_policy_floor_enabled` / `paper_circuit_breaker_enabled` | 全 false | 机制层（`#84`/`#85`）已落地但**均未经配对回测**，需单开满 21 个交易日再判读 |
+| `paper_buy_open_window_minutes` | **0**（2026-11-02 起） | 线上把开盘窗口关了 → 交易时段全时段可买，**与回测「次日开盘价」口径不一致**；也是本机 `test_exec_rules` 2 例失败的来源 |
+| `paper_rotation_enabled` 等 4 项 | **true** / 40 / 20 / **10** | 2026-11-02 起默认开（`#92`）。**口径已改（`#93`）**：`max_positions` 是上限不是门槛，不满仓也能换，可连换多只；`max_per_day` 现在是「每日轮动**只数**」（10 ≈ 不限）。判读先看有没有「轮动替换」成交 |
+| `paper_max_total_exposure` / `paper_eod_trim_*` | 0.80 / true / 10 | **80% 是收盘目标**（`#93`）：盘中允许满仓（只受现金+单票 20%），收盘前 10 分钟按最弱优先压回 80%，今仓 T+1 卖不掉就跳过 |
 | 影子策略 | 11-02 起每交易日 16:45 | `default` vs `default_ml` 落 `data/logs/shadow_live.json`，是「ML 能不能开」的证据来源 |
 | `API_TOKEN` | 已启用（2026-10-31） | 值只在 `backend\.env`；前端 401 时弹框输入，`/api/health` 豁免 |
 | `SASDbBackup` | 每日 15:50 | SQLite 在线 backup API → `D:\Backup\SAS\backups\`，保留 30 份 |

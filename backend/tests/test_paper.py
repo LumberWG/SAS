@@ -393,8 +393,11 @@ class TestExecute:
         assert "仅记录" in results[0].reason
         assert db.get_paper_account()["cash"] == 100000.0
 
-    def test_total_exposure_cap(self, engine, monkeypatch):
-        """总仓位不超过 80%：6 只等权候选只能花掉 8 万。"""
+    def test_intraday_no_exposure_cap(self, engine, monkeypatch):
+        """盘中不设 80% 硬上限（80% 是收盘目标，由 eod_trim 压回）：
+
+        6 只等权候选会把现金打到近乎为 0，但单票仍受 20% 限制 → 5 只 × 2 万。
+        """
         eng, db, _ = engine
 
         async def fake_price(code, quotes=None):
@@ -407,9 +410,12 @@ class TestExecute:
         results = asyncio.run(eng.execute_recommendations(
             [FakeRec(c, f"股票{c}", "buy", 45.0, "突破") for c in codes]))
 
-        invested = sum(r.amount for r in results if r.side == "buy")
-        assert 75000 <= invested <= 80000 + 1e-6
-        assert db.get_paper_account()["cash"] >= 19000
+        bought = [r for r in results if r.side == "buy"]
+        invested = sum(r.amount for r in bought)
+        assert len(bought) == 6                      # 不再被 80% 拦住，钱能打满
+        assert 98000 <= invested <= 100000
+        assert all(r.amount <= 20000 + 1e-6 for r in bought)   # 单票 20% 仍生效
+        assert db.get_paper_account()["cash"] < 2000
 
     def test_pool_split_only_among_available_slots(self, engine, monkeypatch):
         """候选多于剩余名额时，预算只在高分候选中分配（不被买不到的摊薄）。"""
@@ -428,11 +434,14 @@ class TestExecute:
         bought = [r for r in results if r.side == "buy"]
         assert len(bought) == 3
         invested = sum(r.amount for r in bought)
-        # 80% 预算在三只间均分 → 每只 ≈26666 但受单票 20% 上限 → 3×20000
+        # 可用现金（盘中上限=现金）在三只间均分 ≈33333，但受单票 20% 上限 → 3×20000
         assert invested == pytest.approx(60000, abs=1)
 
     def test_higher_score_gets_bigger_position(self, engine, monkeypatch):
-        """评分加权：45 分的仓位明显大于 30 分（半额档）。"""
+        """评分加权：45 分的仓位明显大于 30 分（半额档）。
+
+        单票上限放到 50%，否则 20% 的上限会把两组都顶到同一个金额，看不出加权。
+        """
         eng, db, _ = engine
 
         async def fake_price(code, quotes=None):
@@ -440,6 +449,7 @@ class TestExecute:
 
         monkeypatch.setattr(eng, "_latest_price", fake_price)
         eng.settings.paper_max_positions = 10
+        monkeypatch.setattr(eng.settings, "paper_single_position_max", 0.5, raising=False)
         eng.ensure_account()
         recs = [
             FakeRec("600010", "高分", "buy", 45.0, "突破"),
@@ -750,7 +760,8 @@ class TestRotation:
 
     @pytest.fixture(autouse=True)
     def _enable_rotation(self, monkeypatch):
-        """线上默认已关闭轮动（Top300 池下几乎不触发），本类用例显式打开。"""
+        """轮动默认已开（2026-11-02），这里仍显式置 True：本类用例断言的是「开着时的规则」，
+        不随默认值漂移。"""
         from app.config import get_settings
 
         monkeypatch.setattr(
@@ -759,6 +770,16 @@ class TestRotation:
     def _seed(self, db, code="600004", score=30.0, buy_date="2026-10-20", shares=1000):
         db.upsert_paper_position(code, code, shares, 10.0, buy_date, "test", score=score)
         db.update_paper_cash(90000.0)
+
+    def test_rotation_default_on(self):
+        """默认开（2026-11-02 使用者决策：模拟盘默认开轮动）。
+
+        断言的是 **Settings 字段默认值**，不是运行时 `eng.settings`（后者会被
+        `app_state` 覆盖层与 `.env` 改掉，拿它断言会随运行时配置漂移）。
+        """
+        from app.config import Settings
+
+        assert Settings.model_fields["paper_rotation_enabled"].default is True
 
     def test_rotation_swaps_weakest(self, engine):
         eng, db, _ = engine
@@ -802,11 +823,12 @@ class TestRotation:
         assert results[0].side == "skip"
         assert "持仓已满" in results[0].reason
 
-    def test_rotation_daily_limit(self, engine):
+    def test_rotation_daily_limit(self, engine, monkeypatch):
         from datetime import datetime
 
         eng, db, _ = engine
         eng.settings.paper_max_positions = 1
+        monkeypatch.setattr(eng.settings, "paper_rotation_max_per_day", 1, raising=False)
         eng.ensure_account()
         self._seed(db)
         today = datetime.now().strftime("%Y-%m-%d")
@@ -911,6 +933,115 @@ class TestRotation:
         assert results[0].code == "600001"      # 换掉底仓，今仓不动
         assert db.get_paper_position("600004") is not None
         assert db.get_paper_position("600001") is None
+
+    def test_rotation_without_full_positions(self, engine):
+        """`max_positions` 是上限不是门槛：只有 1 只持仓也能换（2026-11-02 口径）。"""
+        eng, db, _ = engine
+        eng.settings.paper_max_positions = 10
+        eng.ensure_account()
+        self._seed(db)                       # 1 只、30 分
+
+        results = asyncio.run(eng.execute_recommendations(
+            [FakeRec("600001", "新强", "buy", 60.0, "突破")]))
+
+        assert [r.side for r in results] == ["sell", "buy"]
+        assert db.get_paper_position("600004") is None
+        assert db.get_paper_position("600001") is not None
+
+    def test_rotation_swaps_multiple(self, engine):
+        """一次调用里可以连换多只（不必等下一个 tick，也不要求满仓）。"""
+        eng, db, prices = engine
+        eng.settings.paper_max_positions = 10
+        eng.ensure_account()
+        db.upsert_paper_position("600004", "弱A", 1000, 10.0, "2026-10-20", "test", score=10.0)
+        db.upsert_paper_position("600001", "弱B", 1000, 50.0, "2026-10-20", "test", score=20.0)
+        db.update_paper_cash(40000.0)
+        prices["600002"] = 100.0
+        prices["600003"] = 30.0
+
+        results = asyncio.run(eng.execute_recommendations([
+            FakeRec("600002", "强票甲", "buy", 70.0, "突破"),
+            FakeRec("600003", "强票乙", "buy", 55.0, "突破"),
+        ]))
+
+        assert [r.code for r in results if r.side == "sell"] == ["600004", "600001"]
+        assert db.get_paper_position("600004") is None
+        assert db.get_paper_position("600001") is None
+
+
+class TestLotAttrs:
+    """做T加仓/买回走同一个 `add_paper_lot`，但**不得覆盖底仓的建仓属性**（2026-11-02）。"""
+
+    def test_add_lot_keeps_open_attrs(self, tmp_path, monkeypatch):
+        from app.data.cache import Database
+
+        from app.paper import engine as engine_module
+
+        d = Database(tmp_path / "lot.db")
+        monkeypatch.setattr(engine_module, "db", d)
+        monkeypatch.setattr("app.data.cache.db", d, raising=False)
+        d.add_paper_lot(
+            "600004", "底仓", 1000, 10.0, "2026-10-20", "综合评分 +88",
+            score=88.0, stop_price=9.2, peak_price=12.0, today="2026-10-20",
+        )
+        # 做T加仓：score 默认 0、stop_price/peak_price 为 None
+        d.add_paper_lot(
+            "600004", "做T加仓", 100, 10.5, "2026-11-02", "做T加仓",
+            today="2026-11-02", tag="t_add",
+        )
+
+        pos = d.get_paper_position("600004")
+        assert pos["shares"] == 1100                       # 股数照常摊薄
+        assert pos["score"] == 88.0                        # 建仓评分不能被写成 0
+        assert pos["stop_price"] == 9.2                    # 建仓时定死的止损线
+        assert pos["peak_price"] == 12.0                   # 移动止损的高水位不能重置
+
+
+class TestEodTrim:
+    """80% 是**收盘目标**：收盘前 N 分钟把超出部分压回，今仓卖不掉不强求。"""
+
+    def test_trims_inside_window(self, engine):
+        from datetime import datetime
+
+        eng, db, _ = engine
+        eng.ensure_account()
+        # 市值 20000 + 现金 0 → 仓位 100%；目标 80% → 需减 4000（400 股）
+        db.upsert_paper_position("600004", "全仓", 2000, 10.0, "2026-10-20", "test", score=30.0)
+        db.update_paper_cash(0.0)
+        now = datetime.now().replace(hour=14, minute=55, second=0, microsecond=0)
+
+        trades = asyncio.run(eng.eod_trim(now=now))
+
+        assert len(trades) == 1
+        assert trades[0].shares == 400
+        assert "收盘减仓" in trades[0].reason
+        assert db.get_paper_position("600004")["shares"] == 1600
+
+    def test_no_trim_outside_window(self, engine):
+        from datetime import datetime
+
+        eng, db, _ = engine
+        eng.ensure_account()
+        db.upsert_paper_position("600004", "全仓", 2000, 10.0, "2026-10-20", "test", score=30.0)
+        db.update_paper_cash(0.0)
+        now = datetime.now().replace(hour=10, minute=0, second=0, microsecond=0)
+
+        assert asyncio.run(eng.eod_trim(now=now)) == []
+        assert db.get_paper_position("600004")["shares"] == 2000
+
+    def test_skip_today_buy(self, engine):
+        """今仓 T+1 不可卖：全部是今仓时减不动，也不报错（不强求）。"""
+        from datetime import datetime
+
+        eng, db, _ = engine
+        eng.ensure_account()
+        today = datetime.now().strftime("%Y-%m-%d")
+        db.upsert_paper_position("600004", "今仓", 2000, 10.0, today, "test", score=30.0)
+        db.update_paper_cash(0.0)
+        now = datetime.now().replace(hour=14, minute=55, second=0, microsecond=0)
+
+        assert asyncio.run(eng.eod_trim(now=now)) == []
+        assert db.get_paper_position("600004")["shares"] == 2000
 
 
 class TestBacklog:

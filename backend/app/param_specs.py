@@ -165,7 +165,7 @@ _LAYOUT: tuple[tuple[str, str, tuple[tuple[str, str, tuple[str, ...]], ...]], ..
             ("仓位评分", "评分与仓位权重的对应关系", ("paper_full_score", "paper_half_score")),
             (
                 "轮动替换",
-                "用更高分且真能买进的票替换最弱持仓",
+                "不满仓也换：有更明显的强票就把最弱持仓换掉（可换多只）",
                 (
                     "paper_rotation_enabled",
                     "paper_rotation_min_score",
@@ -174,6 +174,11 @@ _LAYOUT: tuple[tuple[str, str, tuple[tuple[str, str, tuple[str, ...]], ...]], ..
                 ),
             ),
             ("候补队列", "满仓时把高分票先存着", ("paper_backlog_enabled", "paper_backlog_max")),
+            (
+                "收盘减仓",
+                "80% 是收盘目标（盘中允许满仓），收盘前把超出部分按最弱优先卖掉",
+                ("paper_eod_trim_enabled", "paper_eod_trim_minutes"),
+            ),
         ),
     ),
     (
@@ -497,6 +502,8 @@ _SHORT_LABELS: dict[str, str] = {
     "paper_circuit_breaker_target": "熔断后仓位",
     # ---- 轮动 / 候补 ----
     "paper_rotation_enabled": "轮动替换",
+    "paper_eod_trim_enabled": "收盘减仓",
+    "paper_eod_trim_minutes": "收盘减仓窗口(分钟)",
     "paper_rotation_min_score": "轮动评分下限",
     "paper_rotation_gap": "轮动评分差",
     "paper_rotation_max_per_day": "每日轮动上限",
@@ -571,15 +578,22 @@ _DESC_OVERRIDES: dict[str, str] = {
     "paper_half_score": "评分介于半额线与全额线之间时，仓位权重打 5 折",
     "paper_scan_autotrade_top_n": "扫描命中后最多自动送多少只进交易队列",
     "paper_rotation_enabled": (
-        "满仓时用更高分的新票替换最弱持仓；默认关闭（Top300 池下几乎不触发，只增换手摩擦）"
+        "满仓时用更高分且真能买进的新票替换最弱持仓；默认开启（模拟盘先把规则跑全），"
+        "Top300 池下几乎不触发，出现无谓换手可关掉"
     ),
     "paper_rotation_min_score": "换入票的最低评分（同时要求 ≥ 半额分），低于此分不因轮动卖出任何持仓",
     "paper_rotation_gap": "新票评分需高出最弱持仓的建仓评分多少分才触发轮动",
-    "paper_rotation_max_per_day": "每日最多轮动次数（一次 = 卖弱 + 买强；0 = 当日不轮动）",
+    "paper_rotation_max_per_day": (
+        "每日最多轮动**只数**（一次 = 卖一只弱票换一只强票；默认 10 等于不限，0 = 当日不轮动）"
+    ),
+    "paper_eod_trim_enabled": (
+        "收盘前把总仓位压回「收盘目标」（总仓位上限）；今仓 T+1 卖不掉就跳过，不强求"
+    ),
+    "paper_eod_trim_minutes": "收盘减仓窗口：收盘前多少分钟内执行（默认 10，即 14:50 起）",
     "paper_backlog_max": "候补队列最多存多少只高分票（有名额时按评分优先买入）",
     "paper_large_cap_yi": "总市值超过该值（亿元）视为大盘股，默认不进买入队列",
     "paper_atr_stop_max": "ATR 止损放宽的上限（0.20 = 最多放宽到 20%）",
-    "paper_t_active": "做T引擎总开关；关闭后下面各项做T参数不生效",
+    "paper_t_active": "做T引擎总开关（默认开启）；关闭后下面各项做T参数不生效",
     "llm_base_url": "OpenAI 兼容接口地址（如 https://api.openai.com/v1）",
     "llm_api_key": "接口密钥；未配置时自动降级为纯技术面结论",
     "llm_model": "模型名，如 gpt-4o-mini / qwen-plus",

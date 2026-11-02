@@ -599,6 +599,11 @@ class LiveTrader:
         results = await self.engine.execute_recommendations(
             recs, prices=prices, rotation_candidates=rotation_candidates)
 
+        # 收盘前减仓：80% 是**收盘目标**（盘中允许满仓），把超出部分按最弱优先卖掉。
+        # 不并进 results：results 参与「未成交出队 / 候补入队」判定，塞进卖出会误伤同码买单；
+        # 成交记录直接走 DB 与 trades 输出（与止盈止损、做T 同一处理方式）。
+        trim_trades = await self.engine.eod_trim(prices, now=now)
+
         # 并行模拟账本：同一批信号、各自处置参数，各自记账（与主账本完全隔离）
         sim = await self._tick_sim(prices, now)
 
@@ -646,7 +651,7 @@ class LiveTrader:
         if pending_changed:
             self._persist_pending()
 
-        self._executed += len(executed) + len(stop_trades) + len(t_trades)
+        self._executed += len(executed) + len(stop_trades) + len(t_trades) + len(trim_trades)
         trades = [
             {
                 "code": t.code, "name": t.name, "side": t.side,
@@ -654,7 +659,7 @@ class LiveTrader:
                 "fee": t.fee, "reason": t.reason,
                 "time": now.strftime("%H:%M:%S"),
             }
-            for t in [*stop_trades, *t_trades, *executed]
+            for t in [*stop_trades, *t_trades, *executed, *trim_trades]
         ]
         if trades:
             self._last_trades = (trades + self._last_trades)[:_MAX_RECENT_TRADES]

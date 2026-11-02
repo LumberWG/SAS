@@ -77,9 +77,9 @@ npm run dev                                        # → http://localhost:5173
 
 ## 系统设置
 
-`/settings` 页把散在四处的配置拉成一张表：`.env`/`config.py`（103 项）、`app_state` 运行时覆盖、页面上各业务开关、以及少量硬编码常量（可交易板块前缀、巨无霸黑名单、回测默认止损止盈、整手股数）。
+`/settings` 页把散在四处的配置拉成一张表：`.env`/`config.py`（107 项）、`app_state` 运行时覆盖、页面上各业务开关、以及少量硬编码常量（可交易板块前缀、巨无霸黑名单、回测默认止损止盈、整手股数）。
 
-页面上**只列可编辑的 93 项**。以下 10 项都**完全不显示**（`READONLY_KEYS`）：`api_token`（访问令牌，回显等于把钥匙挂在门上）、`db_path`、`kline_dir`、`cors_origins`、`data_no_proxy_domains`、`auto_scan_strategies` 与 `app_name`（只在启动时用于 `FastAPI(title=)`，改它连前端标题都不变）、`debug`（全仓库无人读取的历史字段）、`disclaimer`（接口 JSON 统一注入的文案常量，不是配置）、`notify_email`（`EmailNotifier` 目前只打日志并返回 False，开了反而多记一条渠道失败），以及剩余硬编码常量（`LOT_SIZE`、板块前缀、巨无霸名单、回测默认止盈止损）。理由一致：改不了或改了没效果，展示了只会让人以为能调。
+页面上**只列可编辑的 97 项**。以下 10 项都**完全不显示**（`READONLY_KEYS`）：`api_token`（访问令牌，回显等于把钥匙挂在门上）、`db_path`、`kline_dir`、`cors_origins`、`data_no_proxy_domains`、`auto_scan_strategies` 与 `app_name`（只在启动时用于 `FastAPI(title=)`，改它连前端标题都不变）、`debug`（全仓库无人读取的历史字段）、`disclaimer`（接口 JSON 统一注入的文案常量，不是配置）、`notify_email`（`EmailNotifier` 目前只打日志并返回 False，开了反而多记一条渠道失败），以及剩余硬编码常量（`LOT_SIZE`、板块前缀、巨无霸名单、回测默认止盈止损）。理由一致：改不了或改了没效果，展示了只会让人以为能调。
 
 > 评分阈值（`factor_buy_threshold` / `factor_sell_threshold`）与四项费率（`trade_fee_*`）**已从硬编码挪进配置**：前者决定 buy/sell 判级，后者被回测与实盘共用。整手股数（`LOT_SIZE=100`）仍固定——改了会下出非法委托。
 
@@ -89,7 +89,7 @@ npm run dev                                        # → http://localhost:5173
   `llm_enabled` 关着时，接口地址/密钥/模型/超时都不显示）。关系在 `param_specs._DEPENDS_ON` 里声明，
   父项为开关则「开=显示」、为文本则「非空=显示」，支持套娃；前端按**草稿值**实时显隐
   （打开做T 开关的那一下，下面参数立刻出现，不用等保存），分组标题会标「随开关隐藏 N」
-- **两级布局（均衡分组）**：左侧竖排导航 8 个分组——连接与扫描 9 / 选股与自选 12 / 账户与费率 7 / 交易执行 21 / 仓位与轮动 8 / 风控与止损 11 / 做T 与择时 17 / 调度与 LLM 8，每项标该组总数与已覆盖数。之所以不做平铺 tab：按 `paper_` 前缀天然会变成「一组 50 项、另一组 1 项」。布局由 `param_specs._LAYOUT` 按业务语义声明（分组 → 组内小节 → 键），新增字段没收录时按前缀兜底进对应组的「其他」小节
+- **两级布局（均衡分组）**：左侧竖排导航 8 个分组——连接与扫描 20 / 选股与自选 30 / 账户与费率 14 / 交易执行 42 / 仓位与轮动 16 / 风控与止损 22 / 做T 与择时 34 / 调度与 LLM 16（合计 97），每项标该组总数与已覆盖数。之所以不做平铺 tab：按 `paper_` 前缀天然会变成「一组 50 项、另一组 1 项」。布局由 `param_specs._LAYOUT` 按业务语义声明（分组 → 组内小节 → 键），新增字段没收录时按前缀兜底进对应组的「其他」小节
 - **组内小节**：每个分组再切成 2~5 个语义小节（如「风控与止损」= 买点切入 / 固定止损止盈 / ATR 与移动保护），小节标题右侧带一句说明；搜索时跨全部分组按小节分段展示命中结果
 - **可编辑**：开关项点一下、数字项直接输，改完点顶栏的「保存 (N)」（改动后页面底部也会浮出「有 N 项未保存 · 保存并生效 / 放弃」条，往下翻几屏也能保存）；每行是「固定列宽（104px）右对齐的短标签 + 紧挨着的控件 + 靠右的来源胶囊」，标签与输入框之间不再撑出一大段空白；完整 key / 说明 / 当前值都在行 tooltip 里，**来源**（`运行时` = app_state 覆盖 > `.env` > `默认`）以胶囊标记，改动行高亮，可单行撤销、整组「本组还原」或全局「还原」为 `.env` 值
 - **短标签 + tooltip**：卡片里只放标准短名（`固定止损`、`买单队列上限`、`ATR 止损倍数`，见 `param_specs._SHORT_LABELS`，最长 10 字），`config.py` 里那整句注释作为 `desc` 放进行悬停提示，连同完整 key、当前值、待保存值一起显示；有跨页补充说明的行在标签右侧带一个黄色提示点
@@ -106,17 +106,17 @@ npm run dev                                        # → http://localhost:5173
 
 ## 回测参数可调与做T引擎（心得策略）
 
-回测中心（`/backtest`）已支持把 `PipelineParams` 的全套风控参数在 UI 上逐项调整（共 9 组，见下一段的分组说明）。
+回测中心（`/backtest`）已支持把 `PipelineParams` 的全套风控参数在 UI 上逐项调整（共 8 组，见下一段的分组说明）。
 
 参数框里显示的是**具体默认值**（后端 `GET /api/backtest/defaults` 统一算出线上配置，前端不再显示「默认」占位），并且按改动方向着色：**比默认大 = 红、比默认小 = 绿、等于默认 = 常态色**；鼠标悬停可看默认值。「关闭/不限」类参数默认就是 `0`，提交时值为 `0` 即略过该字段（等价于 `None`）。顶部有「重置」一键回到默认。
 
-参数面板按 9 个 tab 分组（基础 / 选股买入 / 五段式切入 / 止损止盈 / 移动保本 / 大盘择时 / 仓位评分轮动 / 做T），每个参数一张卡片（标签一行、输入框占满一行），不再把标签和 60px 输入框挤在同一行。
+参数面板按 8 个分组（基础 / 选股买入 / 五段式（队列与切入点）/ 止损止盈 / 移动保本 / 大盘择时 / 仓位评分轮动 / 做T引擎）折叠展示，每个参数一张卡片（标签一行、输入框占满一行），不再把标签和 60px 输入框挤在同一行。
 
 **打分层（2026-10-31 新增，`BACKTEST_LOG` #79）**：「选股/买入」组顶部有 `打分层` 下拉——`14因子` / `ML分位` / `ML+因子融合`，**默认跟随实盘开关**（`live_ml_scoring` 开则为 ML），避免「回测跑 ML、实盘还在 14 因子」的口径漂移。同组可调 `ML模型`（LightGBM，缺依赖自动回退 Ridge）、`ML标签前瞻`、`融合权重`、`ML行业中性化`。**结果里的 `ml_diagnostics` 必须看**：`effective=false` 表示 OOS rank-IC ≤ 0 已**整段回退 14 因子**，这次跑的其实不是 ML（与基线数字完全相同）。短区间（十几个交易日）只有十几个截面、IC 估不出来，几乎必然回退——要看 ML 请跑 **≥ 半年**，或直接用 `scripts/random_dist.py` 那套 18 段 × 21 天（`#76`）。落盘时只有 `打分层` 能同步到实盘 `live_ml_scoring`，模型/前瞻/融合比例/中性化都是回测专属。**股票池默认 300**（跟随线上 `paper_pool_top_n`；2026-10-31 由写死的 500 改回），与 `#76` 验收口径一致——填 500 跑出来的是「Top500 里的 ML」，与线上和 `#76` 都不是同一实验。
 
 **两套参数必须分清**（面板顶部有常驻说明）：
 - 改参数 + 「开始回测」——只影响**本次回测**，不碰实盘；
-- 「将规则落盘保存到数据库」——把这套规则写进配置库（`app_state` 覆盖层），立即对**选股 + 模拟盘交易**生效，重启保留，并成为新的默认值。只同步实盘有落点的子集（止损/止盈/单票上限/仓位/买入阈值/评分档/择时/买入切入点/做T 等，共 30 项），其余（板块组合、调仓周期、分位门槛、反转选股、分段止盈、时间止损、分钟级切入点）逐条列出「未同步」原因。落盘前有确认框展示「会变更哪几项：旧值 → 新值」。接口 `GET /api/backtest/persist-map`、`POST /api/backtest/persist`；映射表见 `app/backtest/apply.py`。
+- 「将规则落盘保存到数据库」——把这套规则写进配置库（`app_state` 覆盖层），立即对**选股 + 模拟盘交易**生效，重启保留，并成为新的默认值。只同步实盘有落点的子集（止损/止盈/单票上限/仓位/买入阈值/评分档/择时/买入切入点/做T 等，共 31 项），其余（板块组合、调仓周期、分位门槛、反转选股、分段止盈、时间止损、分钟级切入点）逐条列出「未同步」原因。落盘前有确认框展示「会变更哪几项：旧值 → 新值」。接口 `GET /api/backtest/persist-map`、`POST /api/backtest/persist`；映射表见 `app/backtest/apply.py`。
 
 **回测结果自动落库（2026-11-01）**：每次回测跑完即写库，不需要任何操作，便于事后分析：
 - `backtest_runs`：`params`（本次全量参数）、`metrics`（收益/基准/回撤/夏普/胜率…）、`equity_curve`（**过程数据**：逐日 `equity / benchmark / cash / positions`）、`positions`（期末持仓）、`review`（亏损归因 + 调参建议）、`job_id`（与 `backend.log` 对齐，日志里的任务 id 能直接定位到这条记录）、`elapsed`
@@ -131,7 +131,11 @@ npm run dev                                        # → http://localhost:5173
 
 ### 做T引擎（参数化主动交易）
 
-对应「次日开盘→收盘做T / 分级网格」的实战心得，字段均以 `t_` 前缀暴露，`t_active=None` 时完全关闭、沿用被动持有：
+对应「次日开盘→收盘做T / 分级网格」的实战心得，字段均以 `t_` 前缀暴露，回测里 `t_active=None` 时完全不参与。
+
+**线上默认开启**（`paper_t_active = True`，2026-11-02 使用者决策：模拟盘先跑机制，见 `BACKTEST_LOG` #92）；
+证据边界不变——#65/#66 证明做T 对滑点极敏感（每 0.1% ≈ −0.93pp，≥0.10% 收益即归零），
+开着会让成交笔数翻倍并与基础策略混在一起，归因时先看「有没有做T成交」再谈收益：
 
 | 参数 | 含义 | 心得映射 |
 | --- | --- | --- |
@@ -144,6 +148,12 @@ npm run dev                                        # → http://localhost:5173
 | `t_rebound_sell` | 反弹至跌幅小于此减仓 | 反弹 <2% 减仓 |
 | `t_limit_sell_half` | 涨停弱封板卖 1/2 | 涨停开板前卖半 |
 | `t_crash_guard` | 大盘当日跌幅超此暂停 | 大盘极速下跌不操作 |
+
+> 上表「心得映射」是策略主张值，**不是配置默认**：config 默认 `t_down_add` / `t_down_full` 都是
+> **0.20（≈关闭下跌加仓）**、`t_up_sell` 0.05、`t_up_buyback` 0.03、`t_crash_guard` 0.02；
+> 本机 `.env` 现为 `t_size 0.25 / t_up_sell 0.03 / t_up_buyback 0.02 / t_down_add 0.03 /
+> t_down_full 0.06 / t_rebound_sell 0.02 / t_crash_guard 0.03`，`paper_t_active=true`。
+> 要确认线上到底在跑什么，看 `/settings` 的 `source` 字段，别照这张表读。
 
 **A 股 T+1 约束**：做T 只动用**底仓**做「先卖后买」倒T（当日卖底仓可卖、买回次日可卖）；下跌加仓为隔夜行为（当日买、之后反弹时卖）。
 
@@ -525,8 +535,8 @@ schtasks /run /tn SASDbBackup                              # 立即触发计划�
   8% 的组合回撤熔断会当场误触发（状态落库、跨重启保留）
 - **交易规则（对齐 A 股）**：**只做多，不做空/融券**——「卖出」只用于平掉已有的多头批次，无持仓的卖出信号直接跳过（`无持仓可卖`），持仓股数由批次表汇总、不会减成负数；回测同口径。T+1（当日买入次日可卖）、佣金万 2.5（最低 5 元）+ 卖出印花税千 1 + 双边过户费万 0.1；四项费率都在设置里（`trade_fee_commission_rate` / `_commission_min` / `_stamp_rate` / `_transfer_rate`），**回测与实盘共用同一份**，佣金谈下来只改一处
 - **成交价**：卖出 / 止盈止损 = 执行时刻最新价（快照优先，失败退化 K 线收盘价）；**买入只在开盘后
-  `paper_buy_open_window_minutes`（默认 5）分钟内成交**（与回测「次日开盘价」口径对齐），窗口外的买单留在
-  队列等下一个开盘，有效期顺延。2026-10-30 用 `intraday_entry` 回测验证过「放开到全时段」：
+  `paper_buy_open_window_minutes`（config 默认 5，`0` = 不限）分钟内成交**（与回测「次日开盘价」口径对齐），窗口外的买单留在
+  队列等下一个开盘，有效期顺延。**本机线上 2026-11-02 起该值为 `0`（窗口关闭、交易时段全时段可买）**，属使用者拍板的实盘取舍，与回测口径不一致，判读对账时要记住（`WORKLOG` 2026-11-02）。2026-10-30 用 `intraday_entry` 回测验证过「放开到全时段」：
   配对中位 −1.18pp、正占比 33%，**不采纳**（`BACKTEST_LOG` 记录 #58）
 - **止盈止损**：默认止损 -8%（`paper_stop_loss`）/ 止盈 +20%（`paper_take_profit`），每 tick（默认 5 秒）用最新价检查；收盘 15:40 结算并记净值。三项风控参数可在设置页改，也可由回测中心「落盘」写入
 - **自动执行链路**：开盘 9:20、盘中每 `intraday_analysis_interval`（默认 1 分钟）分析产生的买卖建议自动送入模拟盘队列，由 `paper_tick`（默认 5 秒）撮合——**卖出与止盈止损全天生效，买入受上面的开盘窗口约束**；盘中信号若在窗口外产生，顺延到下一个交易日的开盘窗口；盘后 15:40 结算并记录净值。注：2026-10-30 起「大盘择时弱市闸门」（`paper_regime_weak_pause`，指数在 MA60 下方）会让**全部自动买入**返回 skip，这是当天零成交的直接原因（同日弱市日志 1999 条）——注意那时的
@@ -566,7 +576,8 @@ schtasks /run /tn SASDbBackup                              # 立即触发计划�
 - **交易队列容量**：待执行**买单**最多同时挂 5 只（`paper_trade_queue_top_m`，按 14 因子总分择优），超出不入队并在「④ 交易池 · 持仓」页的交易池 tab 标注「未入队」原因；卖出不受限
 - **大盘股过滤**（「③ 三选 · 交易队列」页顶部开关）：**默认开启**，**总市值 > 100 亿**（可改阈值）的票不进队列，银行/石油这类巨无霸也不会出现在候选池里；关掉开关才放开（此时旧的 `GIANT_CODES` 黑名单同时失效）。设置写进 `app_state`，重启保留。回测侧无法建模（`klines` 没有市值字段），对照时需注意实盘可选集合比回测窄
 - **切入点**（进队≠成交）：**不追高已关闭**（`paper_entry_max_chase` 于 2026-11-01 由 1.5% 改为 0；依据 BACKTEST_LOG #89：6 段配对中位 −4.54pp / 正占比 33% / 最差段 −22.46pp 三条线全不过，且成交笔数没减少——是「买差」不是「少买」）、可要求回踩（`paper_entry_pullback`，默认 0=不限）、信号超时放弃（`paper_entry_timeout_minutes`，0=沿用 30 分钟 TTL）；被拒原因同样在「④ 交易池 · 持仓」页的交易池 tab 展示。**注意**：这组规则整体经回测无稳定增益（BACKTEST_LOG #52、#89），属于工程保护，不是收益来源
-- **满仓轮动**（`paper_rotation_*`，**默认关闭**）：满仓时若有显著更高分的新票，卖出最弱持仓换入。换入票必须**真能买进**才卖——与买入同一套闸门（板块/北交所/大市值/名称/成交额池 + 不追高/回踩）、评分 ≥ 半额分、且**卖出所得够买一手**，否则宁可不换（避免「只卖不买」把仓位凭空降下来）；**手动建仓**与**当日买入（T+1）**的持仓不参与选弱；每日次数上限 `paper_rotation_max_per_day`（0=当日不轮动）。候选来源除本轮买入建议外，还包含**候补队列**里未持仓的买单——满仓时它们本来进不了撮合队列，不这样传就永远轮不到。默认关闭的依据是 `BACKTEST_LOG` #30：Top300 池下几乎不触发，关掉只降摩擦不改收益
+- **轮动替换**（`paper_rotation_*`，**默认开启**，2026-11-02 起）：**不满仓也能换**——`paper_max_positions` 是上限不是门槛，持仓可以少于 10 只；只要出现「明显更好」的票（评分 ≥ `paper_rotation_min_score`(40)、比当前最弱可卖持仓的建仓分高出 `paper_rotation_gap`(20)、且 ≥ 半额分），就把最弱的那只换掉，**一次可连换多只、可把持仓全换掉**，不必等止损/止盈。换入票必须**真能买进**才卖：与买入同一套闸门（板块/北交所/大市值/名称/成交额池 + 不追高/回踩）、且**卖出所得够买一手**，否则宁可不换（避免「只卖不买」把仓位凭空降下来）；**手动建仓**与**当日买入（T+1）**的持仓不参与选弱。上限 `paper_rotation_max_per_day` 是**每日轮动只数**（默认 10 ≈ 不限，0=当日不轮动）。候选来源除本轮买入建议外，还包含**候补队列**里未持仓的买单。**默认开启是「模拟盘把规则跑全」的决策（`BACKTEST_LOG` #92/#93），不是被证明有效的 alpha**；出现连续无谓换手就改回 `false`
+- **收盘减仓**（`paper_eod_trim_*`，**默认开启**）：`paper_max_total_exposure`(80%) 是**收盘目标而非盘中硬上限**——盘中允许满仓（只受现金与单票 20% 约束），收盘前 `paper_eod_trim_minutes`(默认 10 分钟，即 14:50 起) 按「建仓评分最低优先」把超出 80% 的部分卖掉，留现金给次日做 T。**今仓 T+1 卖不掉就跳过，不强求**（收盘仍超 80% 不算违规）
 - **关闭自动执行**：环境变量 `PAPER_AUTO_TRADE=false`（仅记录信号不成交）
 - **周度复盘**：`cd backend && .venv\Scripts\python.exe scripts\weekly_review.py [--days 14] [--md]` —— 只读汇总区间内的净值/收益/最大回撤、成交笔数与费用、每日弱市拦截次数，最后给一句诊断（**零成交时区分「被弱市闸门拦住」和「本来就没信号」**，不用再翻日志）。数据来自 `paper_equity` / `paper_trades` / `app_state` 的 `paper_regime_paused:日期` 键（引擎每 60 次 tick 落库一次，重启不丢；2026-10-30 之前的日子没有该键）；按日表另有两列「收盘仓位」「弱势」，来自收盘结算写入的 `paper_regime_state:日期`（见下条）
 - **涨跌家数广度（观测用，不参与交易）**：`cd backend && .venv\Scripts\python.exe -m app.data.breadth [--since 2024-01-01]` —— 遍历本地 5734 只**前复权**日线回算每日 `up/down/flat/up_ratio`，落 `data\breadth_daily.parquet`（全市场约 **10 秒**），每交易日 16:00 K线预热后自动刷新一次。用途是复盘时回答「那天是普跌还是结构性下跌」。**不进任何交易判定**：曾想用它区分 shock / 自由落体，但 4 年非重叠样本只有 5 个、方向还不稳定，见 `BACKTEST_LOG` #86
@@ -629,7 +640,7 @@ cd backend
 .venv\Scripts\python.exe -m pytest tests/ -q
 ```
 
-**329 个单元测试**，覆盖：指标公式正确性、各策略命中/不命中场景、策略参数注入与
+**343 个单元测试**，覆盖：指标公式正确性、各策略命中/不命中场景、策略参数注入与
 自定义策略全链路（注册/持久化/启动加载）、回测止盈/止损/绩效指标、市场情绪
 分级（阈值边界/权重/快照计算/逆环境降级）、交易时段判断、异动检测与去重、
 通知管道、快照存储（TTL/SWR/并发去重/失败冷却）、智能建议（评分分级/情绪降级/批次持久化）、
@@ -647,25 +658,25 @@ SAS/
 │   ├── app/
 │   │   ├── main.py            # FastAPI 入口、lifespan（预热+自定义策略加载+调度器）
 │   │   ├── config.py          # Pydantic 配置（.env 可覆盖）
-│   │   ├── api/               # market/screening/backtest/analysis/watchlist/monitor/strategies
+│   │   ├── api/               # market/screening/backtest/analysis/watchlist/monitor/strategies/paper/settings/scope/advisory
 │   │   ├── data/              # 数据源抽象、akshare 实现、降级链、缓存、涨跌家数广度
 │   │   ├── indicators/        # 自研技术指标（含公式注释）
 │   │   ├── strategies/        # 基类(参数化)/注册表/内置策略/自定义策略加载
 │   │   ├── market/            # 市场情绪分级（5 档 + 权重）
-│   │   ├── analysis/          # 技术面评分 + 智能建议引擎 + 机制层(regime/policy_floor)
+│   │   ├── analysis/          # 14 因子(factors)/技术面评分/智能建议引擎 + 机制层(regime/policy_floor) + 线上 ML(live_ml)
 │   │   ├── screener/          # 全市场并发扫描器（含扫描范围）
 │   │   ├── backtest/          # 向量化回测引擎
 │   │   ├── llm/               # OpenAI 兼容客户端 + 决策仪表盘
 │   │   ├── monitor/           # APScheduler 调度器
 │   │   └── notify/            # 通知管道（控制台/Webhook/邮件预留）
-│   ├── tests/                 # 329 个单元测试（全部离线，无网络依赖）
+│   ├── tests/                 # 343 个单元测试（全部离线，无网络依赖）
 │   ├── requirements.txt       # 依赖下限（日常开发）
 │   ├── requirements.lock.txt  # 锁定版本（CI / 复现历史回测结论）
 │   └── pyproject.toml         # requires-python + ruff + pytest 配置（不是打包清单）
 ├── frontend/
 │   ├── src/
-│   │   ├── views/             # Dashboard/Screening/Signals/Advisory/PaperTrading/Backtest/StockDetail
-│   │   ├── components/        # KLineChart/MetricCard/ConclusionBadge/StrategyPanel/StrategyEditor/ScanResultTable
+│   │   ├── views/             # Dashboard/Screening/Signals/Advisory/PaperTrading/Backtest/StockDetail/Settings
+│   │   ├── components/        # KLineChart/IntradayChart/MetricCard/ConclusionBadge/StrategyPanel/StrategyEditor/ScanResultTable/ThemeSelect/TokenGate 等 12 个
 │   │   ├── api/               # 接口封装
 │   │   ├── layouts/           # 侧边导航 + 顶栏布局
 │   │   ├── stores/            # Pinia 全局状态
@@ -678,7 +689,7 @@ SAS/
 │   ├── flow.md                # 全链路流程图（选股→打分→队列→下单），含参数总表与 skip 原因速查
 │   ├── sas_formulas.md        # 公式与实现口径备查
 │   └── images/                # README 示意图（架构 / 时间轴 / 下单链路）
-├── .github/workflows/ci.yml   # CI：ruff + 329 例单测
+├── .github/workflows/ci.yml   # CI：ruff + 343 例单测
 ├── serve_frontend.py          # 前端静态服务 + /api 反代（nssm 服务 SAS-frontend 的入口）
 ├── deploy.ps1                 # 部署：构建前端 + 重启服务 + 健康检查（计划任务 SASDeploy 的入口）
 ├── restart-backend.ps1        # 只重启后端（计划任务 SASRestart 的入口）

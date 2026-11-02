@@ -39,7 +39,7 @@ npm ci
 
 ```powershell
 cd backend
-.venv\Scripts\python.exe -m pytest      # 当前 329 例，约 35 秒，全部离线
+.venv\Scripts\python.exe -m pytest      # 当前 343 例，约 35 秒，全部离线
 .venv\Scripts\python.exe -m ruff check .   # 配置在 backend/pyproject.toml
 ```
 
@@ -62,8 +62,9 @@ CI（`.github/workflows/ci.yml`）跑的就是这两件事：
 2. **运行时开关有两层**：`app_state` 的 `cfg:<key>` 覆盖层优先级**高于** `.env` 与 `config.py`
    默认值。判断是否真的生效看 `GET /api/settings` 的 `source` 字段，别只看 `.env`。
    重要的开/关要**两处都写**（覆盖层 + `.env`），否则一次「还原」就回到旧值。
-3. **线上与回测同口径才有意义**：线上 `paper_pool_top_n=300`，回测 `universe_size` 默认跟随它。
-   不要写死 500 再互相比较——那是两个实验。
+3. **线上与回测同口径才有意义**：线上 `paper_pool_top_n=300`，`/api/backtest/defaults` 会让
+   `universe_size` 跟随它。但 **`BacktestParams.universe_size` 的数据类默认仍是 500**——直接调
+   pipeline 或跑 `scripts\*.py` 要显式传 `--universe 300`，否则那是「Top500 里的策略」，另一个实验。
 4. **ML 打分看 `effective`**：`effective=false` 表示整段回退 14 因子，此时结果与基线**完全相同**，
    不能当作「ML 有效」的证据。
 5. **`param_specs._FIELD_RE` 要求行尾注释前 ≥2 个空格**（`\s{2,}#`）。只打 1 个空格会让设置页
@@ -113,7 +114,7 @@ CI（`.github/workflows/ci.yml`）跑的就是这两件事：
 - 「美化净值」类改动（取价失败按 0 计市值、回测里剔除亏损样本等）；
 - 没有回测支撑却上调仓位 / 放宽闸门 / 打开做T；
 - 为了让测试变绿而改断言、放宽 `param_specs` 校验、或 `# noqa` 掉 `E9/F82`；
-- 引入需要联网才能跑的单测（现有 329 例全部离线，请保持）。
+- 引入需要联网才能跑的单测（现有 343 例全部离线，请保持）。
 
 ## 10. 安全
 

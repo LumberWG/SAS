@@ -142,10 +142,15 @@ class Settings(BaseSettings):
     # ---------- 模拟交易（验证选股思路） ----------
     # 初始模拟资金
     paper_initial_capital: float = 100000.0
-    # 最大持仓只数（仓位按评分加权分配）
+    # 最大持仓**只数上限**（不是门槛）：可以少于这个数，不能超过
     paper_max_positions: int = 10
-    # 总仓位上限：持仓市值不超过总资产的比例（1.0=允许满仓，0.8=始终留 20% 现金）
+    # **收盘目标**总仓位：收盘前尽量压到这个比例（留 20% 现金给次日做T）。
+    # 盘中不设硬上限——盘中允许满仓（受现金与单票上限约束），由 eod_trim 在收盘前
+    # paper_eod_trim_minutes 分钟内按「最弱优先」卖出超出部分，卖不掉不强求。
     paper_max_total_exposure: float = 0.80
+    # 收盘减仓：开启后收盘前 N 分钟把超出收盘目标的仓位卖掉（今仓 T+1 卖不掉就跳过）
+    paper_eod_trim_enabled: bool = True
+    paper_eod_trim_minutes: int = 10
     # 评分分档：>= 全额分 给足权重；介于半额分与全额分之间权重打 5 折；
     # 低于半额分只记录建议、不下单（避免刚过买入线就占用资金）
     paper_full_score: float = 40.0
@@ -170,16 +175,20 @@ class Settings(BaseSettings):
 
     # ---------- 满仓后的处理：轮动替换 + 候补队列 ----------
     # 轮动替换：满仓时若出现更高分的新票，卖出最弱持仓换入。
-    # **默认关闭**：回测（BACKTEST_LOG #30）在 Top300 成交额池下几乎不触发，关掉只降摩擦
-    # 不改收益；打开属于「换手/摩擦」方向的实验，改池子规模后必须重跑 #30 再判断。
+    # **默认开启**（2026-11-02 使用者决策：这是模拟盘，先把机制跑起来；见 BACKTEST_LOG #92）。
+    # 证据边界：回测（#30）显示 Top300 成交额池下几乎不触发，所以开着的**预期影响很小**——
+    # 它不是被证明有效的 alpha，而是「模拟盘把规则跑全、用真实成交数据观察」的选择。
+    # 换池子规模（Top300 → 200/500）时必须重跑 #30；若实盘出现连续无谓换手/摩擦侵蚀，把
+    # 它改回 False 即可（一处配置，不需要改代码）。
     # 换入票必须**真能买进**（交易池闸门 + 切入点闸门 + 卖出所得够一手），否则不卖，
     # 避免「只卖不买」把仓位凭空降下来；手动建仓与当日买入的持仓不参与选弱（T+1）。
-    paper_rotation_enabled: bool = False
+    paper_rotation_enabled: bool = True
     # 触发条件：新票评分 >= min_score（且 >= half_score），且比「最弱持仓的建仓评分」高出 gap 分
     paper_rotation_min_score: float = 40.0
     paper_rotation_gap: float = 20.0
-    # 每日最多轮动次数（一次 = 卖弱 + 买强）；0 = 当日不轮动
-    paper_rotation_max_per_day: int = 1
+    # 每日最多轮动**只数**（一次 = 卖一只弱票换一只强票）；0 = 当日不轮动。
+    # 默认 10 = 与持仓上限同阶，即「只要明显更好就可以一直换」，包括把持仓全换掉。
+    paper_rotation_max_per_day: int = 10
     # 候补队列：因满仓/资金不足没买成的高分票先存着，有名额时按评分优先买入
     paper_backlog_enabled: bool = True
     paper_backlog_max: int = 30
@@ -264,8 +273,12 @@ class Settings(BaseSettings):
     paper_circuit_breaker_dd: float = 0.08        # 触发阈值：回撤 ≥8% 锁仓
     paper_circuit_breaker_release: float = 0.04   # 解除阈值：回撤回落到 ≤4% 才恢复
     paper_circuit_breaker_target: float = 0.0     # 触发后目标总仓位（0=清到空仓/只留现金）
-    # ---- 做T引擎（真实 tick：严格 T+1 多批次；默认全部关闭） ----
-    paper_t_active: bool = False
+    # ---- 做T引擎（真实 tick：严格 T+1 多批次） ----
+    # **默认开启**（2026-11-02 使用者决策：模拟盘先把机制跑起来；见 BACKTEST_LOG #92）。
+    # 证据边界：#65/#66 已证明做T 对滑点极度敏感（每 0.1% ≈ −0.93pp，≥0.10% 收益即归零），
+    # 开着的代价是成交笔数翻倍、与基础策略混在一起难以归因；关掉只改这一处配置。
+    # 下面的数值参数默认偏保守（t_down_add/down_full=0.20 ≈ 关闭下跌加仓）。
+    paper_t_active: bool = True
     paper_t_size: float = 0.25             # 单次做T比例（相对总仓）
 
     # ---------- 线上 ML 打分（default_ml 实时版） ----------

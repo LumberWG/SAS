@@ -32,7 +32,7 @@ import json
 import logging
 import time
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pandas as pd
 
@@ -746,6 +746,7 @@ class PaperEngine:
         prices: dict[str, float] | None,
         budget: float,
         weak_score: float,
+        exclude: set[str] | None = None,
     ) -> tuple[object, float, float] | None:
         """挑出「真能买进」的替换标的，挑不到就返回 ``None``（此时不卖）。
 
@@ -765,9 +766,11 @@ class PaperEngine:
         half_score = float(self.settings.paper_half_score)
         pool: list[tuple[float, object]] = []
         seen: set[str] = set()
+        skip = set(exclude or ())
         for rec in candidates:
             code = str(getattr(rec, "code", "") or "")
-            if not code or code in positions or code in seen:
+            # exclude：本次已轮动卖出的票不能再被选回来（否则「换出去又买回来」白付两次摩擦）
+            if not code or code in positions or code in seen or code in skip:
                 continue
             seen.add(code)
             score = _rec_score(rec)
@@ -934,69 +937,72 @@ class PaperEngine:
                         weak_exposure * 100, self._regime_paused,
                     )
 
-        # ---- 轮动替换：满仓时用「真能买进」的更高分新票换掉最弱持仓 ----
-        # 触发条件（全部满足）：开关开启 + 非全暂停 + 持仓已满 + 当日次数未达上限 +
-        #   最弱持仓可被自动卖出（非手动、非当日买入）+ 存在未持仓候选满足
-        #   评分 >= rotation_min_score、>= half_score、比最弱持仓建仓分高出 rotation_gap、
-        #   且通过交易池闸门与切入点闸门 + 卖出所得够买该票一手。
+        # ---- 轮动替换：不用满仓，有更明显的强票就换；一次可换多只 ----
+        # 语义（2026-11-02 使用者口径）：`paper_max_positions` 是**上限**不是门槛，
+        #   「明显更好的票」就该把差的换掉，不必等止损/止盈；持仓可以少于上限。
+        # 触发只需：开关开 + 非全暂停 + 有未持仓候选（评分 >= rotation_min_score 且
+        #   >= half_score、比「当前最弱可卖持仓」的建仓分高出 rotation_gap、过交易池与
+        #   切入点闸门）+ 该持仓卖得掉（非手动、非今仓 T+1）+ 卖出所得够买该票一手。
+        #   每换一只消耗一次配额，上限 paper_rotation_max_per_day 只（默认 10，等于不限）。
         # 为什么要求「真能买进」：早期版本只看评分就卖，换入票随后被交易池（大市值/
         #   北交所/不在成交额池）、切入点（追高/待回踩）或评分分档拒掉 → 白付一次卖出
         #   摩擦、名额空着等下一轮，等于凭空降仓。见 BACKTEST_LOG 记录 #91。
-        if (
-            self.settings.paper_rotation_enabled
-            and not weak_pause_all
-            and len(positions) >= self.settings.paper_max_positions
-        ):
+        # 为什么循环：一次 API 调用里可以连换多只（含全换），不必等下一个 tick；
+        #   每轮重新取「当前最弱」，被换掉的票即退出候选池（sold_codes 防回转买入）。
+        if self.settings.paper_rotation_enabled and not weak_pause_all:
             used = db.count_paper_trades("轮动替换", today, side="sell")
-            weak_code, weak_pos, weak_score = self._weakest_rotatable(positions, today)
-            can_rotate = (
-                weak_code is not None
-                and weak_pos is not None
-                and used < int(self.settings.paper_rotation_max_per_day)
-            )
-            if can_rotate:
+            max_rot = int(self.settings.paper_rotation_max_per_day)
+            rot_pool = [*buy_candidates, *(rotation_candidates or [])]
+            sold_codes: set[str] = set()
+            while used < max_rot:
+                weak_code, weak_pos, weak_score = self._weakest_rotatable(positions, today)
+                if weak_code is None or weak_pos is None:
+                    break
                 weak_price = await self._latest_price(weak_code, prices)
+                if not weak_price or weak_price <= 0:
+                    break
                 # 换入预算 = 卖出所得扣费后的金额。不够买一手就不换，
                 # 否则「卖得掉、买不进」，仓位被凭空降下来（与弱市降仓混在一起无法归因）。
-                proceeds = 0.0
-                if weak_price and weak_price > 0:
-                    proceeds = weak_price * int(weak_pos["shares"])
-                    proceeds -= self.calc_fee("sell", proceeds)
+                proceeds = weak_price * int(weak_pos["shares"])
+                proceeds -= self.calc_fee("sell", proceeds)
                 target = await self._pick_rotation_target(
-                    [*buy_candidates, *(rotation_candidates or [])],
+                    rot_pool,
                     positions=positions,
                     prices=prices,
                     budget=proceeds,
                     weak_score=weak_score,
+                    exclude=sold_codes,
                 )
-                if target is not None and weak_price and weak_price > 0:
-                    target_rec, target_score, _target_price = target
-                    # 严格 T+1：只卖可卖批次，今仓留到次日
-                    sold = db.reduce_paper_sellable(weak_code, int(weak_pos["shares"]), today)
-                    if sold > 0:
-                        amount = weak_price * sold
-                        fee = self.calc_fee("sell", amount)
-                        cash += amount - fee
-                        reason = (
-                            f"轮动替换(建仓{weak_score:.0f}分→新票{target_score:.0f}分)"
-                        )
-                        db.insert_paper_trade(
-                            weak_code, weak_pos.get("name", ""), "sell", weak_price,
-                            sold, amount, fee, reason, today,
-                        )
-                        positions.pop(weak_code, None)
-                        results.append(TradeResult(
-                            weak_code, weak_pos.get("name", ""), "sell", sold,
-                            weak_price, amount, fee, reason,
-                        ))
-                        # 换入标的必须在同一次调用里真的买到：候补队列里的票不在本轮
-                        # buy_candidates 里，不补进去就只剩「卖出」这一半。
-                        if all(r.code != target_rec.code for r in buy_candidates):
-                            buy_candidates.append(target_rec)
-                        logger.info(
-                            "轮动替换：卖出 %s（建仓 %.0f 分），换入 %s（%.0f 分）",
-                            weak_code, weak_score, target_rec.code, target_score,
-                        )
+                if target is None:
+                    break
+                target_rec, target_score, _target_price = target
+                # 严格 T+1：只卖可卖批次，今仓留到次日
+                sold = db.reduce_paper_sellable(weak_code, int(weak_pos["shares"]), today)
+                if sold <= 0:
+                    break
+                amount = weak_price * sold
+                fee = self.calc_fee("sell", amount)
+                cash += amount - fee
+                reason = f"轮动替换(建仓{weak_score:.0f}分→新票{target_score:.0f}分)"
+                db.insert_paper_trade(
+                    weak_code, weak_pos.get("name", ""), "sell", weak_price,
+                    sold, amount, fee, reason, today,
+                )
+                positions.pop(weak_code, None)
+                sold_codes.add(weak_code)
+                used += 1
+                results.append(TradeResult(
+                    weak_code, weak_pos.get("name", ""), "sell", sold,
+                    weak_price, amount, fee, reason,
+                ))
+                # 换入标的必须在同一次调用里真的买到：候补队列里的票不在本轮
+                # buy_candidates 里，不补进去就只剩「卖出」这一半。
+                if all(r.code != target_rec.code for r in buy_candidates):
+                    buy_candidates.append(target_rec)
+                logger.info(
+                    "轮动替换：卖出 %s（建仓 %.0f 分），换入 %s（%.0f 分），今日第 %d 只",
+                    weak_code, weak_score, target_rec.code, target_score, used,
+                )
 
         # ---- 买入（第 3 次排序：评分加权仓位 + 评分分档 + 总仓位上限） ----
         # 规则：
@@ -1007,8 +1013,10 @@ class PaperEngine:
         max_positions = self.settings.paper_max_positions
         full_score = self.settings.paper_full_score
         half_score = self.settings.paper_half_score
-        # 现有持仓市值 = 总资产 - 现金；总仓位上限扣掉已有仓位后才是本轮可投预算
-        effective_exposure = float(self.settings.paper_max_total_exposure)
+        # 盘中不设「收盘目标」硬上限：`paper_max_total_exposure`(80%) 是**收盘目标**，
+        # 由 eod_trim 在收盘前压回；盘中允许满仓，只受现金（等价 100%）与单票上限约束。
+        # 熔断 / 动态机制 / 弱市三档仍按各自上限**硬压**（那些是风控，不是目标）。
+        effective_exposure = 1.0
         if cb_tripped:
             # 熔断最高优先级：总仓位压到 target（只降不升），凌驾于机制层与弱市档
             effective_exposure = min(effective_exposure, cb_target)
@@ -1077,7 +1085,7 @@ class PaperEngine:
             if available_budget < price * LOT_SIZE:
                 results.append(TradeResult(
                     rec.code, getattr(rec, "name", ""), "skip", 0, price, 0.0, 0.0,
-                    f"总仓位已达上限({effective_exposure:.0%})"))
+                    f"可用资金不足一手({available_budget:.0f}元)"))
                 continue
             # 目标金额 = 本轮可投预算 × 加权占比，再受单票上限与剩余现金约束
             share_of_pool = weight / weight_total if weight_total > 0 else 1.0
@@ -1482,6 +1490,93 @@ class PaperEngine:
 
         db.update_paper_cash(round(cash, 2))
         return trades
+
+    # ------------------------------------------------------------------
+    # 收盘减仓（80% 是收盘目标，不是盘中硬上限）
+    # ------------------------------------------------------------------
+    def _in_eod_window(self, now: datetime) -> bool:
+        """是否处于收盘前的减仓窗口（15:00 前 N 分钟）。N<=0 视为关闭。"""
+        minutes = int(getattr(self.settings, "paper_eod_trim_minutes", 0) or 0)
+        if minutes <= 0:
+            return False
+        close = now.replace(hour=15, minute=0, second=0, microsecond=0)
+        return close - timedelta(minutes=minutes) <= now < close
+
+    async def eod_trim(
+        self, prices: dict[str, float] | None = None, *, now: datetime | None = None
+    ) -> list[TradeResult]:
+        """收盘前把总仓位压回 ``paper_max_total_exposure``（默认 80%），卖不掉不强求。
+
+        口径（2026-11-02 使用者）：80% 是**收盘目标**而不是盘中硬上限——盘中允许满仓，
+        留 20% 现金是为了次日做T 有子弹。因此只在收盘前 ``paper_eod_trim_minutes`` 分钟内
+        动作：按「建仓评分最低优先」卖出超出目标的那部分金额（整手），
+        当日买入的今仓（T+1 不可卖）直接跳过；全都卖不动就只记日志，不强求。
+
+        为什么不做部分减仓的精确优化：目标是「收盘前尽量」，多卖一手的误差远小于
+        为了精确到分而反复下单带来的摩擦与日志噪声。
+        """
+        if not bool(getattr(self.settings, "paper_eod_trim_enabled", False)):
+            return []
+        now = now or datetime.now()
+        if not self._in_eod_window(now):
+            return []
+        positions = db.list_paper_positions()
+        if not positions:
+            return []
+        total = await self.total_asset(prices)
+        if total <= 0:
+            return []
+        acct = db.get_paper_account() or {}
+        cash = float(acct.get("cash") or 0.0)
+        target_ratio = min(1.0, float(self.settings.paper_max_total_exposure))
+        need = max(0.0, total - cash) - total * target_ratio
+        if need <= 0:
+            return []
+        today = now.strftime("%Y-%m-%d")
+        queue = sorted(
+            (
+                p for p in positions
+                if "手动" not in str(p.get("strategy") or "")
+                and str(p.get("buy_date") or "") < today
+            ),
+            key=lambda p: float(p.get("score") or 0.0),
+        )
+        if not queue:
+            logger.info(
+                "收盘减仓：仓位超目标 %.0f 元，但没有可卖持仓（今仓 T+1 全部不可卖），不强求",
+                need,
+            )
+            return []
+        results: list[TradeResult] = []
+        for pos in queue:
+            if need <= 0:
+                break
+            code = pos["code"]
+            price = await self._latest_price(code, prices)
+            if not price or price <= 0:
+                continue
+            shares = int(pos["shares"])
+            # 差一点也按一手减：否则「超一点点但一手就超」会永远减不动
+            qty = min(shares, max(LOT_SIZE, int(need / price / LOT_SIZE) * LOT_SIZE))
+            sold = db.reduce_paper_sellable(code, qty, today)
+            if sold <= 0:
+                continue
+            amount = price * sold
+            fee = self.calc_fee("sell", amount)
+            cash += amount - fee
+            need -= amount
+            reason = f"收盘减仓(仓位→{target_ratio:.0%})"
+            db.insert_paper_trade(
+                code, pos.get("name", ""), "sell", price, sold, amount, fee, reason, today,
+            )
+            results.append(TradeResult(
+                code, pos.get("name", ""), "sell", sold, price, amount, fee, reason))
+            logger.info("收盘减仓：卖出 %s %d 股（建仓 %.0f 分）@ %.2f",
+                        code, sold, float(pos.get("score") or 0.0), price)
+        if results:
+            db.update_paper_cash(round(cash, 2))
+            logger.info("收盘减仓完成：%d 笔，剩余超出 %.0f 元", len(results), max(0.0, need))
+        return results
 
     # ------------------------------------------------------------------
     # 账户查询与结算

@@ -1706,32 +1706,38 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
         #     再记一笔「轮动」只是空动作，却会吃掉当日唯一一次配额；
         #   - 换入票必须未持仓、评分 >= half_score（低于半额分的票买入阶段本来就会丢，
         #     线上同样不允许为这种票卖持仓）。
-        if (
-            rotation_on
-            and rotation_max_per_day > 0
-            and len(positions) >= max_positions
-            and buys and rotation_used < rotation_max_per_day
-        ):
-            pool = [b for b in buys if b["code"] not in positions]
-            if pool:
-                best = max(pool, key=lambda x: x["score"])
+        # 2026-11-02 口径：`max_positions` 是上限不是门槛 —— 不满仓也能换，
+        # 一次可换多只（含全换），上限 `rotation_max_per_day` 只（默认 10）。
+        if rotation_on and rotation_max_per_day > 0 and buys:
+            pool = sorted(
+                (b for b in buys if b["code"] not in positions),
+                key=lambda x: -x["score"],
+            )
+            taken: set[str] = set()
+            while rotation_used < rotation_max_per_day:
+                best = next((b for b in pool if b["code"] not in taken), None)
+                if best is None:
+                    break
                 weak_code, weak_score = None, 0.0
                 for code, p in positions.items():
                     if p["buy_date"] >= date or code in pending_sells:
                         continue
                     if weak_code is None or p["score"] < weak_score:
                         weak_code, weak_score = code, p["score"]
-                if (
-                    weak_code
-                    and best["score"] >= rotation_min_score
+                if weak_code is None:
+                    break
+                if not (
+                    best["score"] >= rotation_min_score
                     and best["score"] >= half_score
                     and best["score"] - weak_score >= rotation_gap
                 ):
-                    pending_sells[weak_code] = (
-                        f"轮动替换(建仓{weak_score:.0f}→新票{best['score']:.0f})"
-                    )
-                    rotation_used += 1
-                    rotation_total += 1
+                    break
+                pending_sells[weak_code] = (
+                    f"轮动替换(建仓{weak_score:.0f}→新票{best['score']:.0f})"
+                )
+                taken.add(best["code"])
+                rotation_used += 1
+                rotation_total += 1
 
         # 买入委托（次日开盘按分档/加权执行；止损止盈在成交后按成本价生成）
         pending_buys = [

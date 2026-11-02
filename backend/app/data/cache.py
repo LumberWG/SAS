@@ -1038,10 +1038,20 @@ class Database:
                     led.args(code, name, shares, round(cost_price, 4), buy_date,
                              strategy, score, stop_price, peak_price, 0, _now()),
                 )
+            # **加仓不得覆盖底仓的建仓属性**（2026-11-02）：
+            # 做T加仓/买回走同一个 add_paper_lot，但它们的 score 默认 0、stop_price/peak_price 为 None。
+            # 无脑覆盖会把「建仓评分 100 的票」写成 0 分（轮动时被当成最弱换掉）、清空建仓时定死的
+            # 止损线、并把移动止损的高水位重置 —— 三处都静默失效。
+            # 规则：传了有效值才覆盖（score>0 / strategy 非空 / 价格非 None），否则保留原值。
             conn.execute(
-                f"UPDATE {led.t('paper_positions')} SET name=?, strategy=?, score=?, "
-                f"stop_price=?, peak_price=?{led.where('code=?')}",
-                (name, strategy, score, stop_price, peak_price, *led.args(code)),
+                f"UPDATE {led.t('paper_positions')} SET name=?, "
+                f"score=CASE WHEN ? > 0 THEN ? ELSE score END, "
+                f"strategy=CASE WHEN ? <> '' THEN ? ELSE strategy END, "
+                f"stop_price=COALESCE(?, stop_price), "
+                f"peak_price=COALESCE(?, peak_price)"
+                f"{led.where('code=?')}",
+                (name, score, score, strategy, strategy, stop_price, peak_price,
+                 *led.args(code)),
             )
             self._refresh_paper_sellable(conn, code, today)
 

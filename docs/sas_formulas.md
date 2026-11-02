@@ -172,8 +172,10 @@ action = buy   若 total ≥ +15
 
 ### 4.2 仓位（评分加权，第 3 次排序）
 ```
-可投预算 available_budget = max(0, 总仓位上限 - max(0, 总资产 - 现金))
-         总仓位上限 = 总资产 × paper_max_total_exposure (默认 0.80)
+盘中可投预算 available_budget = max(0, 盘中上限 - max(0, 总资产 - 现金))
+         盘中上限 = 总资产 × min(1.0, 熔断/动态/弱市 各自的硬上限)
+         # ↑ 2026-11-02 起 `paper_max_total_exposure`(0.80) 是**收盘目标**，不是盘中硬上限：
+         #   盘中允许满仓（等价 1.0，实际只受现金约束），由 §4.4b 收盘减仓压回 80%
 目标金额 budget = min( available_budget × 加权占比, 总资产 × paper_single_position_max(0.20), 现金, available_budget )
 股数     shares = floor(budget / price / 100) × 100      # 整手
 加权占比 = (max(score,1) × 档位系数) / Σ权重
@@ -181,6 +183,11 @@ action = buy   若 total ≥ +15
 ```
 候选多于剩余名额时只取名额内的高分股参与分钱（避免预算被买不到的摊薄）。
 若「成交额 + 费用 > 现金」，逐手回退（每次 −100 股）直到买得起。
+
+> **`paper_max_positions`(10) 是上限不是门槛**：持仓可以少于 10 只，只是不允许超过。
+> 轮动（§4.4）不要求先填满名额——原来「必须满 10 只才轮动」的门槛已删除（记录 #93）。
+> 注意 20% 单票上限 × 10 只 = 200% 与 80% 收盘目标在资金上不兼容：实际能否到 10 只
+> 取决于当时现金与候选数量，**不要把它当成「应该持有 10 只」的预期**。
 
 > **总资产口径 `total_asset()`**：`现金 + Σ(股数 × 最新价)`。某只票取价失败（实时快照与 K 线
 > 同时取不到，如停牌、数据源熔断）时**按成本价计入**并打 warning，与 `account_detail()` 同口径。
@@ -198,7 +205,11 @@ action = buy   若 total ≥ +15
 - `paper_half_score(默认25) ~ full` → 系数 0.5；
 - `score < half(25)` → 只记录不下单。
 
-### 4.4 轮动替换（满仓时，**默认关闭**）
+### 4.4 轮动替换（**不需要满仓**，默认开启，2026-11-02 起）
+
+**语义（2026-11-02 使用者口径，记录 #93）**：`paper_max_positions(10)` 是**上限不是门槛**——
+持仓可以少于 10 只；只要出现「明显更好」的票就把最弱的那只换掉，**不必等止损/止盈**；
+一次调用可连换多只，**可以把持仓全换掉**。原来的「必须满 10 只才轮动」门槛已删除。
 
 **选弱** `_weakest_rotatable(positions, today)`：按建仓 `score` 取最低，但排除两类持仓：
 
@@ -216,28 +227,57 @@ action = buy   若 total ≥ +15
    买入阶段本来就会被丢，为它卖持仓没有意义）；
 3. 比最弱持仓建仓 `score` 高 `paper_rotation_gap(20)`；
 4. 交易池闸门 `entry_gate(..., ignore_slots=True)`：板块范围 / 北交所 / 大市值 / 名称 / 成交额池。
-   `ignore_slots` 只为轮动而设——此刻**必然满仓**，名额检查会把所有候选一律拒成「持仓已满」，
-   导致「换入票是否买得进」永远无法预判；
+   `ignore_slots` 只为轮动而设——轮动时刻可能正好满仓，名额检查会把所有候选一律拒成
+   「持仓已满」（而轮动卖出本身就会腾出名额），导致「换入票买不买得进」永远无法预判；
 5. 切入点闸门 `entry_price_ok`（取实时价）：不追高 / 待回踩；
-6. 卖出所得（扣费后）≥ 换入票一手 `price × 100`。
+6. 卖出所得（扣费后）≥ 换入票一手 `price × 100`；
+7. 不在本轮已卖出的代码集合里（`exclude`：否则「换出去又买回来」，白付两次摩擦）。
 
 **候选来源** = 本轮买入建议 ∪ `rotation_candidates`（实盘 `live.tick` 传入**候补队列**中未持仓的
 买单，且只在开盘窗口内传）。满仓时 backlog 不会进 `recommendations`（只在有剩余名额时补位），
 不单独传进来，「今天没买到、分还很高」的票就永远进不了轮动视野；窗口外传则会「立刻卖 + 立刻买」，
 偏离「次日开盘价」口径（记录 #19）。
 
-**执行**：卖出最弱持仓（严格 T+1，`reduce_paper_sellable` 只卖可卖批次）→ 把换入票补进本轮
-`buy_candidates`（候补来源的票不在其中，不补就只剩「卖」这一半）→ 买入阶段按评分优先与仓位规则建仓。
-每日次数上限用 `count_paper_trades("轮动替换", today, side="sell")` 计数，
-`paper_rotation_max_per_day=0` 等价于当日不轮动。
+**执行（循环）**：`while 当日已轮动只数 < paper_rotation_max_per_day` →
+取当前最弱可卖持仓（被换掉的即退出 `positions`）→ 找「真能买进」的替换标的 →
+卖出（严格 T+1，`reduce_paper_sellable` 只卖可卖批次）→ 把换入票补进本轮 `buy_candidates`
+（候补来源的票不在其中，不补就只剩「卖」这一半）→ 买入阶段按评分优先与仓位规则建仓；
+循环内每一轮重新取最弱，`exclude` 防止把刚卖出的票又买回来。
 
-**回测同口径**（`backtest/pipeline.py`）：条件同 1~3，且当日买入（`buy_date >= date`）与**已在
-卖出队列**里的票都不参与选弱（后者只是空动作，却会吃掉当日唯一一次配额）；限次用参数
-`rotation_max_per_day`（`None` = 沿用 `settings.paper_rotation_max_per_day`），
+计次用 `count_paper_trades("轮动替换", today, side="sell")`，语义是**每日轮动只数**
+（默认 10 ≈ 不限；0 = 当日不轮动）。回测侧同名参数 `rotation_max_per_day`（`None` = 沿用 settings），
 `metadata` 落 `rotation_count` / `rotation_max_per_day`，便于区分「压根没触发」与「触发但没用」。
 
-> 默认 `paper_rotation_enabled=False`：回测实测轮动在 Top300 池下几乎不触发，却是强制卖出与
-> 换手（月换手约 2.2 个资本）的主要来源，故线上关闭。
+**回测同口径**（`backtest/pipeline.py`）：同样不再要求满仓、按 `while` 连换多只；当日买入
+（`buy_date >= date`）与**已在卖出队列**里的票不参与选弱（后者只是空动作，却会吃掉一次配额）；
+条件 1~3 一致。
+
+> **默认 `paper_rotation_enabled=True`**（2026-11-02 使用者决策，记录 #92）。证据边界没变：回测实测
+> 轮动在 Top300 池下**几乎不触发**，而它一旦触发就是强制卖出与换手（月换手约 2.2 个资本）的来源，
+> 所以开着**不是**「被证明有效的 alpha」，而是「模拟盘把规则跑全、用真实成交观察」的选择。
+> 判读方式：先看日志/`paper_trade` 里 `轮动替换` 是否真的出现——不出现则本轮开启对收益无影响；
+> 若出现且伴随摩擦侵蚀，把开关改回 `false` 即可（一处配置）。
+> 回测侧对应参数 `rotation_max_per_day=0` 可作「关轮动」对照组（§7.2）。
+
+### 4.4b 收盘减仓 `eod_trim()`（80% 是收盘目标，不是盘中硬上限）
+
+```
+触发窗口：收盘(15:00) 前 paper_eod_trim_minutes(默认10) 分钟，且 paper_eod_trim_enabled=True
+需减金额 need = (总资产 - 现金) - 总资产 × paper_max_total_exposure(0.80)
+执行顺序：按建仓 score 从低到高，跳过「手动」与当日买入(T+1)，逐只卖出
+每只股数：qty = min(该只持股, max(100, floor(need / price / 100) × 100))
+退出条件：need ≤ 0（减够了）或没有可卖持仓（卖不动）
+```
+
+- **只减不买**：收盘减仓不会反向加仓，纯粹把仓位压回目标、给次日做T 留现金。
+- **不强求**：全部是今仓（T+1 不可卖）就只记日志（`收盘减仓：…没有可卖持仓`），
+  收盘仍超 80% 不算违规——这不是硬风控，是「尽量保持」。
+- **与轮动/止损的关系**：止损止损优先（先跑 `check_stop_loss_target`），轮动与买入在同一轮
+  之后执行，收盘减仓最后跑；同一只票若先被轮动卖出，减仓时已不在持仓里。
+- **回测差异（已知）**：回测按日线在**次日开盘**成交，`max_total_exposure(0.80)` 仍直接作为
+  买入上限，且**没有实现收盘减仓**。等价于「收盘 80%」的近似：回测里开盘买入即 ≤80%，
+  持仓只在上涨时被动超配；线上盘中可到 100%，收盘再压回 80%。两者长期持仓分布接近，
+  但线上午盘多出的 20% 额度会让收益/回撤略偏放大，跨口径对比时应记住这一层（记录 #93）。
 
 ### 4.5 买入准入 `_buy_allowed()`（五道闸，任一不满足即 skip）
 1. **北交所**：`paper_exclude_bj` 且代码属北交所（920/43/83/87/4/8）→ `北交所股票已排除`；
@@ -360,15 +400,19 @@ paper_position_lots(code, shares, cost_price, buy_date, tag)
   要等下一个 tick 才恢复（轮动分支一直是对的，卖出分支此前漏了）；
 - 卖出/止损/做T 都必须走 `reduce_paper_sellable`，不能直接改 `shares`；
 - `ensure_lots_migrated()` 启动时把历史持仓（无批次）补建为一个批次（沿用原 `buy_date`），幂等。
+- **加仓不覆盖建仓属性**（2026-11-02）：做T加仓/买回走同一个 `add_paper_lot`，但它们的
+  `score` 默认 0、`stop_price`/`peak_price` 为 `None`。旧实现无条件覆盖汇总行，把「建仓 88 分」的
+  票写成 0 分（轮动会把它当最弱换掉）、清空建仓时定死的止损线、重置移动止损高水位。
+  现在只在**传了有效值**时覆盖（`score>0` / `strategy` 非空 / 价格非 `None`），否则保留原值。
 
-### 4.9 做T引擎 `t_tick()`（真实 tick；`paper_t_active` 实盘 2026-11-02 起开启）
-总开关 `paper_t_active`（`config.py` 默认 False，但 `.env` 与 `app_state` 覆盖层 2026-11-02 均置 true，故实盘已开），
-仓位比例 `paper_t_size`（默认 0.25）。
+### 4.9 做T引擎 `t_tick()`（真实 tick；`paper_t_active` 默认开启，2026-11-02 起）
+总开关 `paper_t_active`（`config.py` 默认**已改为 True**；`.env` 与 `app_state` 覆盖层同为 true，三处一致
+—— 2026-11-02 使用者决策：模拟盘先跑机制，记录 #92），仓位比例 `paper_t_size`（默认 0.25）。
 
 **口径提醒（沿用 #1065）**：判定开关是否生效要看 `/settings` 的 `source` 字段，不能只看 `.env` 或 `config.py` 默认值——
 `cfg:` 覆盖层优先级高于它们，会静默压过。2026-10-31 曾纠正一次误覆盖（改回 false）；2026-11-02 用户决策强制开启，
-把覆盖层置 true 并与 `.env` 一致。重开条件（已覆盖，留存备查）见 README §「做T引擎」：先有实测滑点，再用
-`t_minute_path=True` 重跑配对实验。
+把覆盖层、`.env`、`config.py` 默认值三处统一为 true（记录 #92）。重开条件（已覆盖，留存备查）见 README §「做T引擎」：
+先有实测滑点，再用 `t_minute_path=True` 重跑配对实验。
 每个 tick 按持仓逐只判断，**每只票每个 tick 只做一个动作**（命中分支后 `continue`）：
 
 ```
@@ -430,7 +474,8 @@ day_open = 首根 5m 的开盘（缺失用首根收盘）
 - **采样周期 `t_minute_period`（"5"/"1"）**：1 分钟线每天 240 个价格点（5m 为 48）。同一套逻辑与参数下，
   5m → 1m 使配对均值 −0.54pp、**t 2.16 → 1.41**、胜段 66.7% → 55.6%（记录 #66）。
   结论**随采样变细单调下降**，且边际交易为负贡献（笔数 +6%、收益 −0.54pp）——
-  做T 这一族据此关闭，线上 `paper_t_active` 保持 False。
+  做T 这一族据此不建议**调细采样**；线上 `paper_t_active` 自 2026-11-02 起默认开（记录 #92，
+  属模拟盘取舍），因此归因时要把「做T 成交」与「基础策略成交」分开看。
 
 ### 4.10 机制层：动态降暴露 / 政策托底 / 硬性熔断（默认全关，记录 #84、#85）
 
@@ -596,15 +641,16 @@ peak = max(历史峰值总资产, 当前总资产)；dd = 1 − 总资产 / peak
 | `paper_initial_capital` | 100000 | 模拟账户初始资金 | engine |
 | `paper_auto_trade` | True | 模拟交易总开关 | engine/live |
 | `paper_live_enabled` | True | 实时撮合引擎开关 | live |
-| `paper_max_positions` | 10 | 最大持仓只数 | engine |
-| `paper_max_total_exposure` | 0.80 | 总仓位上限（留 20% 现金） | engine |
+| `paper_max_positions` | 10 | 同时持仓**上限**（不是门槛：可以少于 10 只，不能超过） | engine |
+| `paper_max_total_exposure` | 0.80 | **收盘目标**总仓位（盘中允许满仓，收盘前由 `eod_trim` 压回，留 20% 现金给次日做T） | engine |
+| `paper_eod_trim_enabled / minutes` | True / 10 | 收盘减仓开关与窗口（收盘前 N 分钟内，14:50 起） | engine |
 | `paper_stop_loss` | 0.08 | **固定止损**（相对含费成本；回测 `stop_loss` 同口径，可落盘） | engine |
 | `paper_take_profit` | 0.20 | **固定止盈**（相对含费成本；回测 `take_profit` 同口径，可落盘） | engine |
 | `paper_single_position_max` | 0.20 | **单票上限**（占总资产；回测 `single_position_ratio` 同口径，可落盘） | engine |
 | `paper_full_score` | 40 | 评分全额系数阈值 | engine |
 | `paper_half_score` | 25 | 评分半额系数阈值（低于只记录） | engine |
-| `paper_rotation_enabled` | **False** | 满仓轮动替换开关 | engine |
-| `paper_rotation_min_score / gap / max_per_day` | 40 / 20 / 1 | 轮动门槛、分差、每日次数（0=当日不轮动） | engine |
+| `paper_rotation_enabled` | **True**（2026-11-02 起） | 满仓轮动替换开关；开着预期影响小（Top300 下几乎不触发），判读先看是否真出现「轮动替换」成交 | engine |
+| `paper_rotation_min_score / gap / max_per_day` | 40 / 20 / **10** | 轮动门槛、分差、每日轮动**只数**（默认 10 ≈ 不限，0=当日不轮动） | engine |
 | `paper_backlog_enabled / max` | True / 30 | 候补队列开关/上限（满仓时同时作为轮动候选） | live |
 | `paper_trade_queue_top_m` | 5 | 交易队列**买入**容量 topM（0=不限，卖出不受限） | live |
 | `paper_exclude_bj` | True | 排除北交所 | engine |
@@ -617,7 +663,7 @@ peak = max(历史峰值总资产, 当前总资产)；dd = 1 − 总资产 / peak
 | `paper_trail_arm` | 0.00 | 移动止损启用门槛（浮盈达此比例后跟踪） | engine |
 | `paper_regime_ma` | 60 | 大盘择时 MA 周期（<=0 关闭） | engine |
 | `paper_regime_weak_pause` | True | 弱市（指数在 MA 下）暂停自动买入 | engine |
-| `paper_t_active` | False（config 默认）/ **实盘已开**（2026-11-02 覆盖层+`.env` 均 true） | 做T引擎总开关 | engine |
+| `paper_t_active` | **True**（2026-11-02 起，config/`.env`/覆盖层三处一致） | 做T引擎总开关；对滑点极敏感，归因要与基础策略分开看（#66/#92） | engine |
 | `paper_t_size` | 0.25 | 单次做T比例（相对总持仓） | engine |
 | `paper_t_up_sell` | 0.05 | 开盘涨且盘中触此幅度 → 卖出 t_size | engine |
 | `paper_t_up_buyback` | 0.03 | 回调买回线（相对 max(开盘, 昨收)） | engine |
@@ -626,7 +672,7 @@ peak = max(历史峰值总资产, 当前总资产)；dd = 1 − 总资产 / peak
 | `paper_t_limit_sell_half` | True | 涨停（弱封板）卖 1/2 | engine |
 | `paper_t_crash_guard` | 0.02 | 大盘当日跌幅超此暂停做T | engine |
 | `paper_tick_interval` | 5 | 撮合周期（秒） | live |
-| `paper_buy_open_window_minutes` | 5 | 开盘买入窗口（分钟，0=不限） | live |
+| `paper_buy_open_window_minutes` | 5（**本机线上 0**） | 开盘买入窗口（分钟，0=不限）。线上 2026-11-02 起置 0 → 交易时段全时段可买，与回测「次日开盘」口径不一致 | live |
 | `paper_signal_ttl_minutes` | 30 | 信号有效期 | live |
 | `scan_auto_watch_limit` | 10 | **二选**：从股票池按技术面评分取前 N 加自选（一选=signals 全量） | scanner |
 | `paper_entry_max_chase` | **0（关闭）** | **⑤ 不追高**：现价高于信号价超此比例不买。2026-11-01 由 0.015 改为 0，依据 BACKTEST_LOG #89（6 段配对三条线全不过，且是买差不是少买） | engine |
@@ -646,7 +692,9 @@ peak = max(历史峰值总资产, 当前总资产)；dd = 1 − 总资产 / peak
 ## 7. 与回测（`backtest/`）口径对齐的设计要点
 
 ### 7.1 已对齐
-- **成交时点**：实盘买入收敛到开盘窗口（默认 09:30 起 5 分钟内），与回测"次日开盘价成交"对齐。
+- **成交时点**：实盘买入收敛到开盘窗口（`paper_buy_open_window_minutes`，config 默认 09:30 起 5 分钟内），与回测"次日开盘价成交"对齐。
+  **例外**：本机线上 2026-11-02 起该值为 `0`（窗口关闭、交易时段全时段可买），属使用者拍板的实盘取舍——
+  此时「成交时点」已不对齐，对账/归因时要按这个前提读（`WORKLOG` 2026-11-02）。
 - **股票池**：实盘买入准入强制"当日成交额 TopN 池"（`paper_pool_top_n=300`），与回测每日成交额 TopN 同一口径。
 - **范围过滤**：实盘 `_buy_allowed` 与回测 `board_prefixes` / `scope.is_tradable` 同源，回测选不到的票实盘也买不到。
 - **大盘股过滤是实盘独有（回测无法建模）**：`total_mv` 只存在实时快照里，`data/klines/` 没有市值字段，
@@ -668,6 +716,7 @@ peak = max(历史峰值总资产, 当前总资产)；dd = 1 − 总资产 / peak
 | `fill_noise_seed` | 0 | 扰动种子（同种子完全可复现） |
 | `dd_pause_at` | None | 组合级回撤断路器：收盘净值相对峰值回撤 ≥ 该比例 → 次日起暂停新开仓（`buys=[]`，轮动同停；卖出/止损/止盈照常）。**记录 #69：18 段中位差 +0.00、胜段 2/18、最差段未改善，不采纳** |
 | `dd_pause_days` | 10 | 暂停买入的交易日数 |
+| `rotation_enabled / rotation_gap / rotation_min_score / rotation_max_per_day` | None / None / None / None | 满仓轮动：None = 沿用线上 `paper_rotation_*`；`rotation_max_per_day=0` = 当日不轮动（可作「关轮动」对照组）。回测口径见 §4.4：选弱排除当日买入与已在卖出队列的票，换入票需 ≥ `half_score`（记录 #91） |
 | `partial_tp_at / partial_tp_ratio` | None / 0.5 | 分段止盈：首次达到该涨幅卖出一部分 |
 | `queue_top_m` | None | ③ 队列容量：每日买单笔数上限（按评分截断） |
 | `entry_max_chase` | None | ⑤ 不追高：次日开盘相对信号日收盘的涨幅上限 |
