@@ -46,7 +46,13 @@ const toastMsg = ref('')
 let toastTimer: number | undefined
 let loaded = false
 
-const programItems = computed(() => watchlist.value.filter((i) => i.source === 'auto'))
+// 程序自选：按加入时间倒序（最后加入的排最上面，先加入的往后排）
+const programItems = computed(() =>
+  watchlist.value
+    .filter((i) => i.source === 'auto')
+    .slice()
+    .sort((a, b) => (a.created_at < b.created_at ? 1 : a.created_at > b.created_at ? -1 : 0))
+)
 const manualItems = computed(() => watchlist.value.filter((i) => i.source === 'manual'))
 const visibleItems = computed(() =>
   tab.value === 'auto' ? programItems.value : manualItems.value
