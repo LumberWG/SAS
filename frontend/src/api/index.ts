@@ -430,6 +430,20 @@ export interface BacktestResult {
   review?: BacktestReview
 }
 
+/** 回测历史列表项（`/backtest` 列表：不含逐日曲线与逐笔明细，节省带宽） */
+export interface BacktestRunSummary {
+  id: number
+  strategy: string
+  start_date: string | null
+  end_date: string | null
+  params: Record<string, unknown>
+  metrics: Partial<BacktestResult['metrics']>
+  job_id?: string | null
+  elapsed?: number | null
+  created_at: string
+  trade_count: number
+}
+
 /** 归因分组统计（卖出原因 / 评分档 / 持有天数） */
 export interface BacktestGroup {
   name: string
@@ -515,6 +529,11 @@ export async function runBacktest(req: BacktestRequest): Promise<BacktestResult>
 
 export function getBacktest(runId: number): Promise<BacktestResult> {
   return http.get(`/backtest/${runId}`).then((r) => r.data)
+}
+
+/** 历史回测记录列表（按 id 倒序，最多 200 条）。 */
+export function listBacktests(limit = 30): Promise<{ runs: BacktestRunSummary[] }> {
+  return http.get('/backtest', { params: { limit } }).then((r) => r.data)
 }
 
 /** 系统设置总览：一项参数的当前生效值 + 来源 + 生效方式。 */

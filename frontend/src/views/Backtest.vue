@@ -3,7 +3,7 @@
  * 回测中心：参数表单 → 提交回测 → 净值曲线 + 绩效指标 + 交易明细。
  */
 import { computed, onMounted, reactive, ref } from 'vue'
-import { Play, ChevronDown, RotateCcw, DatabaseZap } from 'lucide-vue-next'
+import { Play, ChevronDown, RotateCcw, DatabaseZap, History } from 'lucide-vue-next'
 import VChart from 'vue-echarts'
 import { use } from 'echarts/core'
 import { CanvasRenderer } from 'echarts/renderers'
@@ -14,13 +14,16 @@ import ConfirmDialog from '../components/ConfirmDialog.vue'
 import { chartTheme, tooltipStyle } from '../lib/chartTheme'
 import { useNotifyStore } from '../stores/notify'
 import {
+  getBacktest,
   getBacktestDefaults,
   getBacktestPersistMap,
+  listBacktests,
   persistBacktestRules,
   runBacktest,
   type BacktestPersistMap,
   type BacktestPersistResult,
   type BacktestResult,
+  type BacktestRunSummary,
 } from '../api'
 
 use([CanvasRenderer, LineChart, GridComponent, TooltipComponent])
@@ -50,6 +53,13 @@ const error = ref('')
 const elapsedSec = ref(0)
 let elapsedTimer: number | undefined
 const notify = useNotifyStore()
+
+// ---- 回测历史（/backtest 列表 + /backtest/{id} 详情）----
+const history = ref<BacktestRunSummary[]>([])
+const historyOpen = ref(true)
+const historyLoading = ref(false)
+const historyError = ref('')
+const loadingHistoryId = ref<number | null>(null)
 
 // ---- 落盘（回测规则 → 选股/交易实盘默认值）----
 const persistMap = ref<BacktestPersistMap | null>(null)
@@ -394,6 +404,7 @@ async function submit() {
   elapsedTimer = window.setInterval(() => { elapsedSec.value += 1 }, 1000)
   try {
     result.value = await runBacktest(buildPayload() as any)
+    void loadHistory()  // 新回测已落库，刷新历史列表
   } catch (e: unknown) {
     error.value = e instanceof Error ? e.message : '回测请求失败'
   } finally {
@@ -402,6 +413,33 @@ async function submit() {
       window.clearInterval(elapsedTimer)
       elapsedTimer = undefined
     }
+  }
+}
+
+/** 拉取历史回测列表（新回测跑完也会刷新）。 */
+async function loadHistory() {
+  historyLoading.value = true
+  historyError.value = ''
+  try {
+    const d = await listBacktests(30)
+    history.value = d.runs
+  } catch (e: unknown) {
+    historyError.value = e instanceof Error ? e.message : '历史加载失败'
+  } finally {
+    historyLoading.value = false
+  }
+}
+
+/** 点历史条目：载入该次回测的完整结果到下方结果区。 */
+async function openRun(id: number) {
+  loadingHistoryId.value = id
+  error.value = ''
+  try {
+    result.value = await getBacktest(id)
+  } catch (e: unknown) {
+    error.value = e instanceof Error ? e.message : '载入历史回测失败'
+  } finally {
+    loadingHistoryId.value = null
   }
 }
 
@@ -506,6 +544,7 @@ function applyPreset(p: { name: string; params: Record<string, unknown> }) {
 
 onMounted(async () => {
   await loadDefaults()
+  void loadHistory()
   // 落盘映射只用于提示与按钮，取不到不影响回测本身
   try {
     persistMap.value = await getBacktestPersistMap()
@@ -685,6 +724,56 @@ function metricTone(v: number): string {
         回测在后台运行，已等待
         <span class="font-num text-content">{{ Math.floor(elapsedSec / 60) }} 分 {{ elapsedSec % 60 }} 秒</span>
         （长区间可达十几分钟，请勿关闭页面）
+      </div>
+
+      <!-- 回测历史：列表接口已就绪，点条目载入该次完整结果 -->
+      <div class="mt-3 rounded-lg border border-base-600/50 bg-base-700/20">
+        <div class="flex items-center gap-2 px-3 py-2">
+          <button
+            type="button"
+            class="flex min-w-0 flex-1 items-center gap-2 text-left"
+            @click="historyOpen = !historyOpen"
+          >
+            <History class="h-3.5 w-3.5 shrink-0 text-content-muted" />
+            <span class="text-[13.5px] font-medium text-content">回测历史</span>
+            <span class="rounded-full bg-base-700/60 px-1.5 text-[11.5px] text-content-faint">{{ history.length }}</span>
+            <ChevronDown class="h-3.5 w-3.5 shrink-0 text-content-faint transition-transform" :class="historyOpen ? 'rotate-180' : ''" />
+          </button>
+          <button
+            type="button"
+            class="text-[12.5px] text-content-muted transition-colors hover:text-primary disabled:opacity-50"
+            :disabled="historyLoading"
+            @click="loadHistory"
+          >{{ historyLoading ? '加载中…' : '刷新' }}</button>
+        </div>
+        <div v-if="historyOpen" class="border-t border-base-600/40 px-2 py-2">
+          <div v-if="historyError" class="px-1 py-1 text-[12.5px] text-up">{{ historyError }}</div>
+          <div v-else-if="!history.length" class="px-1 py-1 text-[12.5px] text-content-faint">暂无历史回测记录</div>
+          <div v-else class="max-h-[320px] space-y-0.5 overflow-y-auto">
+            <button
+              v-for="h in history"
+              :key="h.id"
+              type="button"
+              class="flex w-full flex-wrap items-center gap-x-3 gap-y-1 rounded px-2 py-1.5 text-left text-[12.5px] transition-colors hover:bg-base-700/50 disabled:opacity-60"
+              :class="result?.run_id === h.id ? 'bg-primary/10 ring-1 ring-primary/30' : ''"
+              :disabled="loadingHistoryId === h.id"
+              @click="openRun(h.id)"
+            >
+              <span class="font-num text-content-faint">#{{ h.id }}</span>
+              <span class="text-content-muted">{{ h.created_at }}</span>
+              <span class="font-num text-content-muted">{{ h.start_date }} ~ {{ h.end_date }}</span>
+              <span class="text-[11.5px] text-content-faint">池{{ h.params?.universe_size ?? '-' }}</span>
+              <span class="flex-1"></span>
+              <span v-if="h.elapsed != null" class="font-num text-content-faint">{{ (h.elapsed / 60).toFixed(1) }}分</span>
+              <span class="font-num" :class="metricTone(h.metrics?.total_return ?? 0)">
+                {{ (h.metrics?.total_return ?? 0) > 0 ? '+' : '' }}{{ (h.metrics?.total_return ?? 0).toFixed(2) }}%
+              </span>
+              <span class="font-num text-down">回撤 {{ (h.metrics?.max_drawdown ?? 0).toFixed(1) }}%</span>
+              <span class="text-content-faint">{{ h.trade_count }}笔</span>
+              <span v-if="loadingHistoryId === h.id" class="text-content-faint">载入中…</span>
+            </button>
+          </div>
+        </div>
       </div>
 
       <div v-show="formOpen" class="mt-3">
