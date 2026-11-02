@@ -202,10 +202,12 @@ def _defaults_payload() -> dict:
         # 基础
         "initial_capital": float(s.paper_initial_capital),
         "max_positions": int(s.paper_max_positions),
-        # 跟随线上池（paper_pool_top_n=300），不再写死 500：
-        # 回测用 Top500、实盘只买 Top300，两边池子不同，超额基准与被选中的票都不是一回事，
-        # 结论无法互相解释（#71 已记录这处不一致，#76 的 +4.55pp 也是 Top300 口径）。
-        "universe_size": int(getattr(s, "paper_pool_top_n", 300) or 500),
+        # 跟随线上池（paper_pool_top_n）：实盘 0=不限制全市场，回测必需要有具体池，
+        # 故 0 时回退 300（与 AGENTS 口径一致），否则用线上实际值。
+        # 回测用 Top500、实盘只买 TopN，两边池子不同会无法互相解释（#71/#76）。
+        "universe_size": (
+            int(getattr(s, "paper_pool_top_n", 0) or 0) or 300
+        ),
         "board_prefixes": [],
         "watch_cap": 60,
         "add_per_day": 50,
@@ -219,7 +221,7 @@ def _defaults_payload() -> dict:
         "min_turnover_rate": 0.0,
         "invert_score": False,
         # 五段式③⑤（0 = 不启用）
-        "queue_top_m": 0,
+        "queue_top_m": int(s.paper_trade_queue_top_m),
         "entry_max_chase": 0.0,
         "entry_pullback": 0.0,
         "entry_window_minutes": 0,
@@ -227,16 +229,16 @@ def _defaults_payload() -> dict:
         "stop_loss": float(s.paper_stop_loss),
         "take_profit": float(s.paper_take_profit),
         "max_hold_days": 0,
-        "stop_atr_mult": 0.0,
+        "stop_atr_mult": float(s.paper_atr_stop_mult),
         "stop_atr_min": 0.03,
-        "stop_atr_max": 0.15,
+        "stop_atr_max": float(s.paper_atr_stop_max),
         "stop_confirm_close": False,
         "partial_tp_at": 0.0,
         "partial_tp_ratio": 0.5,
-        # 移动 / 保本
-        "breakeven_trigger": 0.0,
-        "trail_pct": 0.0,
-        "trail_arm": 0.0,
+        # 移动 / 保本（跟随实盘 paper_*，不再硬编码 0）
+        "breakeven_trigger": float(s.paper_breakeven_pct),
+        "trail_pct": float(s.paper_trail_pct),
+        "trail_arm": float(s.paper_trail_arm),
         # 大盘择时：跟随线上闸门。线上是 paper_regime_weak_pause=True + ma=60 + weak_exposure=0.3，
         # 这里写死 0 会让「默认回测」变成一套完全不做择时、始终顶到 80% 仓位的策略——
         # 与实盘跑的根本不是同一套规则，用户拿它判断实盘会得出反向结论（#79 §7）。
@@ -255,20 +257,20 @@ def _defaults_payload() -> dict:
         "rotation_enabled": bool(s.paper_rotation_enabled),
         "rotation_gap": float(s.paper_rotation_gap),
         "rotation_min_score": float(s.paper_rotation_min_score),
-        # 做T（0 / False = 关闭）
-        "t_active": False,
+        # 做T：全部跟随实盘 paper_t_*（之前硬编码 False/0 会让回测默认与实盘脱节）
+        "t_active": bool(s.paper_t_active),
         "t_minute_path": False,
         "t_minute_period": "5",
         "exec_fill": "open",
         "exec_fill_minutes": 30,
-        "t_size": 0.0,
-        "t_up_sell": 0.0,
-        "t_up_buyback": 0.0,
-        "t_down_add": 0.0,
-        "t_down_full": 0.0,
-        "t_rebound_sell": 0.0,
-        "t_limit_sell_half": False,
-        "t_crash_guard": 0.0,
+        "t_size": float(s.paper_t_size),
+        "t_up_sell": float(s.paper_t_up_sell),
+        "t_up_buyback": float(s.paper_t_up_buyback),
+        "t_down_add": float(s.paper_t_down_add),
+        "t_down_full": float(s.paper_t_down_full),
+        "t_rebound_sell": float(s.paper_t_rebound_sell),
+        "t_limit_sell_half": bool(s.paper_t_limit_sell_half),
+        "t_crash_guard": float(s.paper_t_crash_guard),
         # ---- 打分层：默认跟随实盘开关，避免「回测中心」与实盘两处各说一套 ----
         # live_ml_scoring 打开时线上用 ML 分位排序，回测默认就该同口径；
         # 想跑 14 因子基线对照，把这个下拉改回 factors 即可（其余参数不动）。
