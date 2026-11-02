@@ -883,6 +883,58 @@ onUnmounted(() => {
       </p>
     </div>
 
+    <!-- 当前持仓 -->
+    <div v-if="tab === 'account'" class="glass-card p-5">
+      <div class="mb-3 flex items-center justify-between">
+        <h3 class="text-subheading">当前持仓</h3>
+        <span class="text-[12.5px] text-content-faint">{{ account?.position_count ?? 0 }} 只</span>
+      </div>
+      <div v-if="account && account.positions.length > 0" class="overflow-x-auto">
+        <table class="w-full text-left text-[13.5px]">
+          <thead class="border-b border-base-600/60 text-content-faint">
+            <tr>
+              <th class="px-3 py-2 font-medium">代码</th>
+              <th class="px-3 py-2 font-medium">名称</th>
+              <th class="px-3 py-2 text-right font-medium">股数</th>
+              <th class="px-3 py-2 text-right font-medium">成本价</th>
+              <th class="px-3 py-2 text-right font-medium">现价</th>
+              <th class="px-3 py-2 text-right font-medium">盈亏</th>
+              <th class="px-3 py-2 text-right font-medium">盈亏%</th>
+              <th class="px-3 py-2 font-medium">买入原因</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr
+              v-for="p in account.positions"
+              :key="p.code"
+              class="cursor-pointer border-b border-base-600/30 transition-colors hover:bg-primary/10"
+              @click="router.push(`/stock/${p.code}`)"
+            >
+              <td class="font-num px-3 py-2.5 text-content-muted">{{ p.code }}</td>
+              <td class="px-3 py-2.5 font-medium text-content">{{ p.name }}</td>
+              <td class="font-num px-3 py-2.5 text-right text-content">{{ p.shares }}</td>
+              <td class="font-num px-3 py-2.5 text-right text-content-muted">{{ p.cost_price.toFixed(2) }}</td>
+              <td class="font-num px-3 py-2.5 text-right text-content">{{ p.price.toFixed(2) }}</td>
+              <td class="font-num px-3 py-2.5 text-right font-semibold" :class="pctTone(p.pnl)">
+                {{ p.pnl > 0 ? '+' : '' }}{{ p.pnl.toFixed(0) }}
+              </td>
+              <td class="font-num px-3 py-2.5 text-right font-semibold" :class="pctTone(p.pnl_pct)">
+                {{ p.pnl_pct > 0 ? '+' : '' }}{{ p.pnl_pct.toFixed(2) }}%
+              </td>
+              <td class="max-w-[260px] truncate px-3 py-2.5 text-content-faint" :title="p.strategy">
+                {{ p.strategy }}
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div v-else class="flex flex-col items-center gap-2 py-10 text-content-faint">
+        <Wallet class="h-8 w-8 opacity-30" />
+        <p class="text-[13.5px]">暂无持仓</p>
+        <p class="text-[12.5px]">盘中实时撮合：建议进入队列后 5 秒内按实时价成交（需有自选股）</p>
+      </div>
+    </div>
+
     <!-- 资金与净值 -->
     <div v-if="tab === 'account'" class="grid grid-cols-1 gap-5 xl:grid-cols-3">
       <div class="glass-card p-5">
@@ -925,6 +977,65 @@ onUnmounted(() => {
           <p class="text-[14.5px]">暂无净值数据</p>
           <p class="text-[12.5px]">每个交易日收盘后自动记录（需后端保持运行）</p>
         </div>
+      </div>
+    </div>
+
+    <!-- 交易流水 -->
+    <div v-if="tab === 'account'" class="glass-card p-5">
+      <div class="mb-3 flex items-center justify-between">
+        <h3 class="text-subheading">交易流水</h3>
+        <span class="text-[12.5px] text-content-faint">最近 {{ trades.length }} 笔</span>
+      </div>
+      <div v-if="trades.length > 0" class="max-h-[400px] overflow-y-auto">
+        <table class="w-full text-left text-[13.5px]">
+          <thead class="sticky top-0 bg-base-800 text-content-faint">
+            <tr class="border-b border-base-600/60">
+              <th class="px-3 py-2 font-medium">时间</th>
+              <th class="px-3 py-2 font-medium">方向</th>
+              <th class="px-3 py-2 font-medium">股票</th>
+              <th class="px-3 py-2 text-right font-medium">成交价</th>
+              <th class="px-3 py-2 text-right font-medium">股数</th>
+              <th class="px-3 py-2 text-right font-medium">金额</th>
+              <th class="px-3 py-2 text-right font-medium">费用</th>
+              <th class="px-3 py-2 font-medium">原因</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr
+              v-for="t in trades"
+              :key="t.id"
+              class="border-b border-base-600/30 transition-colors hover:bg-primary/10"
+            >
+              <td class="font-num px-3 py-2.5 text-content-muted">{{ t.trade_date }}</td>
+              <td class="px-3 py-2.5">
+                <span
+                  class="inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[12.5px] font-medium"
+                  :class="t.side === 'buy' ? 'border-up/40 bg-up/10 text-up' : 'border-down/40 bg-down/10 text-down'"
+                >
+                  <ArrowUpCircle v-if="t.side === 'buy'" class="h-3 w-3" />
+                  <ArrowDownCircle v-else class="h-3 w-3" />
+                  {{ t.side === 'buy' ? '买入' : '卖出' }}
+                </span>
+              </td>
+              <td class="px-3 py-2.5">
+                <span class="text-content">{{ t.name }}</span>
+                <span class="font-num ml-1.5 text-[12.5px] text-content-faint">{{ t.code }}</span>
+              </td>
+              <td class="font-num px-3 py-2.5 text-right text-content">{{ t.price.toFixed(2) }}</td>
+              <td class="font-num px-3 py-2.5 text-right text-content">{{ t.shares }}</td>
+              <td class="font-num px-3 py-2.5 text-right text-content">{{ (t.amount / 10000).toFixed(2) }}万</td>
+              <td class="font-num px-3 py-2.5 text-right text-content-faint">{{ t.fee.toFixed(2) }}</td>
+              <td class="max-w-[240px] truncate px-3 py-2.5 text-content-faint" :title="t.reason">
+                {{ t.reason }}
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <div v-else class="flex flex-col items-center gap-2 py-10 text-content-faint">
+        <RefreshCw class="h-8 w-8 opacity-30" />
+        <p class="text-[13.5px]">暂无交易记录</p>
+        <p class="text-[12.5px]">自动撮合或手动下单成交后在此留下完整流水</p>
       </div>
     </div>
 
@@ -990,117 +1101,6 @@ onUnmounted(() => {
         <ul class="mt-1 list-disc pl-5 text-[12.5px] text-content-muted">
           <li v-for="s in simSkipped" :key="s">{{ s }}</li>
         </ul>
-      </div>
-    </div>
-
-    <!-- 当前持仓 -->
-    <div v-if="tab === 'account'" class="glass-card p-5">
-      <div class="mb-3 flex items-center justify-between">
-        <h3 class="text-subheading">当前持仓</h3>
-        <span class="text-[12.5px] text-content-faint">{{ account?.position_count ?? 0 }} 只</span>
-      </div>
-      <div v-if="account && account.positions.length > 0" class="overflow-x-auto">
-        <table class="w-full text-left text-[13.5px]">
-          <thead class="border-b border-base-600/60 text-content-faint">
-            <tr>
-              <th class="px-3 py-2 font-medium">代码</th>
-              <th class="px-3 py-2 font-medium">名称</th>
-              <th class="px-3 py-2 text-right font-medium">股数</th>
-              <th class="px-3 py-2 text-right font-medium">成本价</th>
-              <th class="px-3 py-2 text-right font-medium">现价</th>
-              <th class="px-3 py-2 text-right font-medium">盈亏</th>
-              <th class="px-3 py-2 text-right font-medium">盈亏%</th>
-              <th class="px-3 py-2 font-medium">买入原因</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr
-              v-for="p in account.positions"
-              :key="p.code"
-              class="cursor-pointer border-b border-base-600/30 transition-colors hover:bg-primary/10"
-              @click="router.push(`/stock/${p.code}`)"
-            >
-              <td class="font-num px-3 py-2.5 text-content-muted">{{ p.code }}</td>
-              <td class="px-3 py-2.5 font-medium text-content">{{ p.name }}</td>
-              <td class="font-num px-3 py-2.5 text-right text-content">{{ p.shares }}</td>
-              <td class="font-num px-3 py-2.5 text-right text-content-muted">{{ p.cost_price.toFixed(2) }}</td>
-              <td class="font-num px-3 py-2.5 text-right text-content">{{ p.price.toFixed(2) }}</td>
-              <td class="font-num px-3 py-2.5 text-right font-semibold" :class="pctTone(p.pnl)">
-                {{ p.pnl > 0 ? '+' : '' }}{{ p.pnl.toFixed(0) }}
-              </td>
-              <td class="font-num px-3 py-2.5 text-right font-semibold" :class="pctTone(p.pnl_pct)">
-                {{ p.pnl_pct > 0 ? '+' : '' }}{{ p.pnl_pct.toFixed(2) }}%
-              </td>
-              <td class="max-w-[260px] truncate px-3 py-2.5 text-content-faint" :title="p.strategy">
-                {{ p.strategy }}
-              </td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-      <div v-else class="flex flex-col items-center gap-2 py-10 text-content-faint">
-        <Wallet class="h-8 w-8 opacity-30" />
-        <p class="text-[13.5px]">暂无持仓</p>
-        <p class="text-[12.5px]">盘中实时撮合：建议进入队列后 5 秒内按实时价成交（需有自选股）</p>
-      </div>
-    </div>
-
-    <!-- 交易流水 -->
-    <div v-if="tab === 'account'" class="glass-card p-5">
-      <div class="mb-3 flex items-center justify-between">
-        <h3 class="text-subheading">交易流水</h3>
-        <span class="text-[12.5px] text-content-faint">最近 {{ trades.length }} 笔</span>
-      </div>
-      <div v-if="trades.length > 0" class="max-h-[400px] overflow-y-auto">
-        <table class="w-full text-left text-[13.5px]">
-          <thead class="sticky top-0 bg-base-800 text-content-faint">
-            <tr class="border-b border-base-600/60">
-              <th class="px-3 py-2 font-medium">时间</th>
-              <th class="px-3 py-2 font-medium">方向</th>
-              <th class="px-3 py-2 font-medium">股票</th>
-              <th class="px-3 py-2 text-right font-medium">成交价</th>
-              <th class="px-3 py-2 text-right font-medium">股数</th>
-              <th class="px-3 py-2 text-right font-medium">金额</th>
-              <th class="px-3 py-2 text-right font-medium">费用</th>
-              <th class="px-3 py-2 font-medium">原因</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr
-              v-for="t in trades"
-              :key="t.id"
-              class="border-b border-base-600/30 transition-colors hover:bg-primary/10"
-            >
-              <td class="font-num px-3 py-2.5 text-content-muted">{{ t.trade_date }}</td>
-              <td class="px-3 py-2.5">
-                <span
-                  class="inline-flex items-center gap-1 rounded border px-1.5 py-0.5 text-[12.5px] font-medium"
-                  :class="t.side === 'buy' ? 'border-up/40 bg-up/10 text-up' : 'border-down/40 bg-down/10 text-down'"
-                >
-                  <ArrowUpCircle v-if="t.side === 'buy'" class="h-3 w-3" />
-                  <ArrowDownCircle v-else class="h-3 w-3" />
-                  {{ t.side === 'buy' ? '买入' : '卖出' }}
-                </span>
-              </td>
-              <td class="px-3 py-2.5">
-                <span class="text-content">{{ t.name }}</span>
-                <span class="font-num ml-1.5 text-[12.5px] text-content-faint">{{ t.code }}</span>
-              </td>
-              <td class="font-num px-3 py-2.5 text-right text-content">{{ t.price.toFixed(2) }}</td>
-              <td class="font-num px-3 py-2.5 text-right text-content">{{ t.shares }}</td>
-              <td class="font-num px-3 py-2.5 text-right text-content">{{ (t.amount / 10000).toFixed(2) }}万</td>
-              <td class="font-num px-3 py-2.5 text-right text-content-faint">{{ t.fee.toFixed(2) }}</td>
-              <td class="max-w-[240px] truncate px-3 py-2.5 text-content-faint" :title="t.reason">
-                {{ t.reason }}
-              </td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-      <div v-else class="flex flex-col items-center gap-2 py-10 text-content-faint">
-        <RefreshCw class="h-8 w-8 opacity-30" />
-        <p class="text-[13.5px]">暂无交易记录</p>
-        <p class="text-[12.5px]">自动撮合或手动下单成交后在此留下完整流水</p>
       </div>
     </div>
 
