@@ -23,9 +23,19 @@ $Root   = Split-Path -Parent $MyInvocation.MyCommand.Path
 $LogDir = Join-Path $Root 'data\logs'
 
 # 后端若在 .env 里配了 API_TOKEN，探活请求要带上令牌，否则会误报 401。
-# 用法：先在当前会话 $env:SAS_API_TOKEN = '<token>'，未设置则不带任何头。
+# 取法：优先 $env:SAS_API_TOKEN（显式覆盖），否则直接读 backend\.env 的 API_TOKEN。
+# 2026-11-02：此前只认环境变量，没设就一律不带头 → verify 段把 401 误报成
+# 「TIMEOUT/ERR (event loop may be blocked)」，实际业务接口 4~70ms 就返回了 200。
 $ApiHeaders = @{}
-if ($env:SAS_API_TOKEN) { $ApiHeaders['X-API-Token'] = $env:SAS_API_TOKEN }
+$ApiToken = $env:SAS_API_TOKEN
+$EnvFile = Join-Path $Root 'backend\.env'
+if (-not $ApiToken -and (Test-Path $EnvFile)) {
+    $tokenLine = Select-String -Path $EnvFile -Pattern '^API_TOKEN=' | Select-Object -First 1
+    if ($tokenLine) {
+        $ApiToken = ($tokenLine.Line -replace '^API_TOKEN=', '').Trim().Trim('"').Trim("'")
+    }
+}
+if ($ApiToken) { $ApiHeaders['X-API-Token'] = $ApiToken }
 if (-not (Test-Path $LogDir)) { New-Item -ItemType Directory -Path $LogDir -Force | Out-Null }
 try { Start-Transcript -Path (Join-Path $LogDir 'deploy.log') -Append -Force | Out-Null } catch { }
 
@@ -150,7 +160,14 @@ foreach ($p in $bizPaths) {
         }
     } catch {
         $bizOk = $false
-        Write-Host ("Business  : {0} -> TIMEOUT/ERR (event loop may be blocked)" -f $p) -ForegroundColor Red
+        # 401 与「事件循环被阻塞」是两类完全不同的故障，别混成一句话（会白排查一轮）
+        $code = 0
+        if ($_.Exception.Response) { $code = [int]$_.Exception.Response.StatusCode }
+        if ($code -eq 401) {
+            Write-Host ("Business  : {0} -> HTTP 401 (no X-API-Token: set env SAS_API_TOKEN, or check API_TOKEN in backend\.env)" -f $p) -ForegroundColor Yellow
+        } else {
+            Write-Host ("Business  : {0} -> TIMEOUT/ERR (event loop may be blocked)" -f $p) -ForegroundColor Red
+        }
     }
 }
 if (-not $bizOk) {

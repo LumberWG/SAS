@@ -581,14 +581,38 @@ schtasks /run /tn SASDbBackup                              # 立即触发计划�
 | 改动 | 需要的动作 |
 | --- | --- |
 | 前端 `.vue` / `.ts` | 重新构建：`cd frontend && npm run build` |
-| 后端 `.py` / 策略 / 配置 | 重启服务：`Restart-Service SAS` |
+| 后端 `.py` / 策略 / 配置 | 重启服务：`schtasks /run /tn SASRestart`（推荐，无需管理员） |
 | 两者都改 | 一起做 |
+
+**重启后端**（nssm 服务 `SAS`，:8000）——两条等价，优先用第一条（不需要 UAC）：
+
+```powershell
+schtasks /run /tn SASRestart
+```
+
+```powershell
+Restart-Service SAS   # 需管理员 PowerShell
+```
+
+起来后核对：
+
+```powershell
+Invoke-RestMethod http://127.0.0.1:8000/api/health
+Get-Content e:\Study\SAS\backend\logs\backend.log -Tail 30
+```
+
+> 重启会清空内存里的撮合 `pending` / `backlog` 队列，启动时按落库快照恢复；
+> 前端（`SAS-frontend` :8080）只是静态文件服务，后端重启不影响它，无需一起重启。
 
 **一键部署**（管理员，自动完成 构建前端 → 重启服务 → 本地健康检查）：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File e:\Study\SAS\deploy.ps1
 ```
+
+> 部署末尾会探活三个业务接口（`/api/paper/account`、`/api/screening/strategies`、`/api/analysis/status`）。
+> 接口已启用 `API_TOKEN`，脚本会**自动读 `backend\.env` 的令牌**（也可用 `$env:SAS_API_TOKEN` 覆盖）；
+> 若看到 `HTTP 401` 说明只是没带上令牌，与「事件循环被阻塞」无关——后者表现为 `TIMEOUT/ERR`。
 
 **推送到 GitHub 不会自动发生**，需手动：
 
