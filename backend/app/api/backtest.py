@@ -222,9 +222,10 @@ def _defaults_payload() -> dict:
         "invert_score": False,
         # 五段式③⑤（0 = 不启用）
         "queue_top_m": int(s.paper_trade_queue_top_m),
-        "entry_max_chase": 0.0,
-        "entry_pullback": 0.0,
-        "entry_window_minutes": 0,
+        # 五段式⑤切入点：跟随实盘 paper_entry_*（之前写死 0，将来实盘改了回测默认自动同步）
+        "entry_max_chase": float(s.paper_entry_max_chase),
+        "entry_pullback": float(s.paper_entry_pullback),
+        "entry_window_minutes": int(s.paper_entry_timeout_minutes),
         # 止损 / 止盈（实盘这三项已挪进 Settings，落盘后默认值同步变化）
         "stop_loss": float(s.paper_stop_loss),
         "take_profit": float(s.paper_take_profit),
