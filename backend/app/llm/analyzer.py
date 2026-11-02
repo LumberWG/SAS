@@ -80,6 +80,7 @@ class DecisionDashboard:
     degraded: bool = False                # 是否为规则降级结果
     generated_at: str = ""
     sentiment: dict | None = None         # 市场情绪上下文（可选）
+    indicators: dict | None = None        # 最新一行实测指标值（前端「指标明细」展示）
 
     def to_dict(self) -> dict:
         return {
@@ -91,6 +92,7 @@ class DecisionDashboard:
             "model": self.model, "degraded": self.degraded,
             "generated_at": self.generated_at,
             "sentiment": self.sentiment,
+            "indicators": self.indicators,
         }
 
 
@@ -127,6 +129,7 @@ class StockAnalyzer:
             raise ValueError("K线数据不足，无法分析")
 
         df = add_all_indicators(kline)
+        indicators = self._build_indicators(df, snapshot)
         snapshot_text = self._build_snapshot_text(code, name, df, snapshot, sentiment)
 
         if llm_client.available:
@@ -137,13 +140,16 @@ class StockAnalyzer:
                 ])
                 dashboard = self._parse_dashboard(content, code, name, df, sentiment)
                 dashboard.model = llm_client.settings.llm_model
+                dashboard.indicators = indicators
                 logger.info("LLM 分析完成 %s %s -> %s",
                             code, name, dashboard.conclusion)
                 return dashboard
             except Exception as exc:  # noqa: BLE001 - 任何失败都降级
                 logger.warning("LLM 分析失败，降级为规则评分: %s", exc)
 
-        return self._rule_based_dashboard(code, name, df, sentiment)
+        dashboard = self._rule_based_dashboard(code, name, df, sentiment)
+        dashboard.indicators = indicators
+        return dashboard
 
     # ------------------------------------------------------------------
     # 快照文本组装
@@ -201,6 +207,36 @@ ATR(14)={f(last['atr'], '{:.3f}')}
 
 【近10日K线】
 {kline_lines}"""
+
+    # ------------------------------------------------------------------
+    # 指标明细（回传前端展示实测数值）
+    # ------------------------------------------------------------------
+    def _build_indicators(self, df: pd.DataFrame, snapshot: dict | None) -> dict:
+        """提取最新一行的实测指标值，供前端『指标明细』展示。
+
+        缺失列 / NaN 统一置 None（前端按 '--' 处理）；与 _build_snapshot_text
+        取自同一份 last 行，LLM 与规则降级两条路径展示的数值完全一致。
+        """
+        last = df.iloc[-1]
+        snap = snapshot or {}
+        n = _num_or_none
+        return {
+            "close": n(last.get("close")),
+            "ma5": n(last.get("ma5")), "ma10": n(last.get("ma10")),
+            "ma20": n(last.get("ma20")), "ma60": n(last.get("ma60")),
+            "dif": n(last.get("dif")), "dea": n(last.get("dea")),
+            "macd_hist": n(last.get("macd_hist")),
+            "kdj_k": n(last.get("kdj_k")), "kdj_d": n(last.get("kdj_d")),
+            "kdj_j": n(last.get("kdj_j")),
+            "rsi6": n(last.get("rsi6")), "rsi12": n(last.get("rsi12")),
+            "boll_up": n(last.get("boll_up")), "boll_mid": n(last.get("boll_mid")),
+            "boll_dn": n(last.get("boll_dn")),
+            "bias6": n(last.get("bias6")), "bias12": n(last.get("bias12")),
+            "atr": n(last.get("atr")),
+            "vol_ratio": n(last.get("vol_ratio")),
+            "turnover_rate": n(snap.get("turnover_rate")),
+            "total_mv": n(snap.get("total_mv")),
+        }
 
     # ------------------------------------------------------------------
     # LLM 输出解析
@@ -278,13 +314,17 @@ ATR(14)={f(last['atr'], '{:.3f}')}
         checklist: list[ChecklistItem] = []
         score = 0.0
 
-        # 1. 均线排列
-        if last["ma5"] > last["ma10"] > last["ma20"]:
-            score += 2; status = "pass"; detail = "多头排列"
-        elif last["ma5"] < last["ma10"] < last["ma20"]:
-            score -= 2; status = "fail"; detail = "空头排列"
+        # 1. 均线排列（detail 直接带实测 MA 数值，避免只看定性结论）
+        ma5 = float(last["ma5"]); ma10 = float(last["ma10"]); ma20 = float(last["ma20"])
+        if ma5 > ma10 > ma20:
+            score += 2; status = "pass"
+            detail = f"多头排列 (MA5 {ma5:.2f} > MA10 {ma10:.2f} > MA20 {ma20:.2f})"
+        elif ma5 < ma10 < ma20:
+            score -= 2; status = "fail"
+            detail = f"空头排列 (MA5 {ma5:.2f} < MA10 {ma10:.2f} < MA20 {ma20:.2f})"
         else:
-            status = "warn"; detail = "交织粘合"
+            status = "warn"
+            detail = f"交织粘合 (MA5 {ma5:.2f} / MA10 {ma10:.2f} / MA20 {ma20:.2f})"
         checklist.append(ChecklistItem("均线排列", status, detail))
 
         # 2. MACD

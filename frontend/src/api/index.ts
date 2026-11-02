@@ -1048,6 +1048,7 @@ export interface DecisionDashboard {
   degraded: boolean
   generated_at: string
   sentiment: Sentiment | null
+  indicators?: Record<string, number | null>
 }
 
 export function getAnalysisStatus(): Promise<{ llm_available: boolean; model: string }> {

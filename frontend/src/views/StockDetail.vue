@@ -54,6 +54,38 @@ const chartTabs = [
   { key: 'kline', label: '日K' },
 ] as const
 const dashboard = ref<DecisionDashboard | null>(null)
+
+/** 指标明细展示顺序与格式（与后端 analyzer._build_indicators 的 key 对应）。 */
+const indicatorMeta: { key: string; label: string; digits: number; suffix?: string }[] = [
+  { key: 'close', label: '最新价', digits: 2 },
+  { key: 'ma5', label: 'MA5', digits: 2 },
+  { key: 'ma10', label: 'MA10', digits: 2 },
+  { key: 'ma20', label: 'MA20', digits: 2 },
+  { key: 'ma60', label: 'MA60', digits: 2 },
+  { key: 'dif', label: 'DIF', digits: 3 },
+  { key: 'dea', label: 'DEA', digits: 3 },
+  { key: 'macd_hist', label: 'MACD柱', digits: 3 },
+  { key: 'kdj_k', label: 'KDJ-K', digits: 1 },
+  { key: 'kdj_d', label: 'KDJ-D', digits: 1 },
+  { key: 'kdj_j', label: 'KDJ-J', digits: 1 },
+  { key: 'rsi6', label: 'RSI6', digits: 1 },
+  { key: 'rsi12', label: 'RSI12', digits: 1 },
+  { key: 'boll_up', label: 'BOLL上', digits: 2 },
+  { key: 'boll_mid', label: 'BOLL中', digits: 2 },
+  { key: 'boll_dn', label: 'BOLL下', digits: 2 },
+  { key: 'bias6', label: 'BIAS6', digits: 2, suffix: '%' },
+  { key: 'bias12', label: 'BIAS12', digits: 2, suffix: '%' },
+  { key: 'atr', label: 'ATR14', digits: 3 },
+  { key: 'vol_ratio', label: '量比', digits: 2 },
+  { key: 'turnover_rate', label: '换手率', digits: 2, suffix: '%' },
+  { key: 'total_mv', label: '总市值', digits: 1 },
+]
+
+/** 指标数值格式化：null/NaN → '--'，否则按精度 + 后缀。 */
+function fmtInd(v: number | null | undefined, m: { digits: number; suffix?: string }): string {
+  if (v == null || Number.isNaN(v)) return '--'
+  return v.toFixed(m.digits) + (m.suffix ?? '')
+}
 const analyzing = ref(false)
 const inWatchlist = ref(false)     // 是否已在自选股
 const watchToggling = ref(false)  // 按钮防重复点击
@@ -418,6 +450,19 @@ function statusColor(status: string) {
                   <span class="font-medium text-content">{{ item.label }}</span>
                 </div>
                 <div class="text-[12.5px] text-content-faint">{{ item.detail }}</div>
+              </div>
+            </div>
+          </div>
+
+          <!-- 指标明细 -->
+          <div v-if="dashboard.indicators" class="mt-4 border-t border-base-600/50 pt-3">
+            <div class="mb-2 text-[12.5px] font-medium text-content-muted">指标明细</div>
+            <div class="grid grid-cols-3 gap-x-3 gap-y-2">
+              <div v-for="m in indicatorMeta" :key="m.key" class="flex flex-col">
+                <span class="text-[11px] text-content-faint">{{ m.label }}</span>
+                <span class="font-num text-[13px] text-content">
+                  {{ fmtInd(dashboard.indicators[m.key], m) }}
+                </span>
               </div>
             </div>
           </div>
