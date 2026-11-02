@@ -606,11 +606,13 @@ class LiveTrader:
         # 候补：因满仓/总仓位上限/资金不足没买成的高分票，存起来等名额释放
         deferred = self._defer_skips(results, now)
 
+        pending_changed = False
         for code in list(self._pending):
             if code in kept_buys:  # 窗口外的买单留到下个开盘，不算本轮未成交
                 continue
             if code not in retry and code not in deferred:
                 self._pending.pop(code, None)
+                pending_changed = True
 
         # 已成交/已持仓的候补出队
         held = {p["code"] for p in db.list_paper_positions()}
@@ -618,9 +620,11 @@ class LiveTrader:
         for code in list(self._backlog):
             if code in held or code in traded:
                 self._backlog.pop(code, None)
+                pending_changed = True
 
-        # 队列已变化（出队/撤销），落库镜像供重启恢复
-        self._persist_pending()
+        # 队列仅在确有变化（出队/撤销）时落库镜像，避免每 tick 无谓写库
+        if pending_changed:
+            self._persist_pending()
 
         self._executed += len(executed) + len(stop_trades) + len(t_trades)
         trades = [
