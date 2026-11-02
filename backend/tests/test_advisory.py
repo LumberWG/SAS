@@ -209,4 +209,14 @@ class TestAdvisoryApi:
             r = client.get("/api/advisory/focus").json()
             assert len(r["items"]) == 1
             assert r["items"][0]["code"] == "600519"
-            assert r["for_date"]  # 对应关注日期
+            # for_date 必须是下一交易日（生成日+1 跳过周末），不能回显生成日当天
+            from app.monitor import is_trading_day
+            from datetime import timedelta
+
+            batch_date = datetime.now().strftime("%Y-%m-%d")
+            expected = datetime.strptime(batch_date, "%Y-%m-%d")
+            for _ in range(7):
+                expected = expected + timedelta(days=1)
+                if is_trading_day(expected):
+                    break
+            assert r["for_date"] == expected.strftime("%Y-%m-%d")

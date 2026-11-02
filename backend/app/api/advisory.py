@@ -60,9 +60,11 @@ def focus_list() -> dict:
 def advisory_summary() -> dict:
     """建议概况（角标数字 + 市场状态）。"""
     settings = get_settings()
-    buy = db.list_recommendations("intraday", "buy") or \
-        db.list_recommendations("premarket", "buy")
+    # 与 /buy、/sell 列表同一套「今日批次」逻辑，避免角标数字与列表内容日期错配
+    # （当天首笔盘中/开盘分析跑出前，未加今日守卫会显示昨天的买入数而列表已空）。
+    buy = _latest_by_action(("intraday", "premarket"), "buy")
     sell = _sell_items()
+    # 明日关注取最新批次即可（盘后生成、对应下一开盘日，本就不该按今日过滤）
     focus = db.list_recommendations("focus", "focus")
     return with_disclaimer({
         "buy_count": len(buy),
