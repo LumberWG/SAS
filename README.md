@@ -512,6 +512,7 @@ schtasks /run /tn SASDbBackup                              # 立即触发计划�
 - 调度：跟随 `paper_tick`（默认 5s）撮合；收盘 15:40 与主账本一起结算，为每个账本各写一行净值
 - 查看：模拟交易页「账户与持仓」tab 的「并行账本对比」（累计收益率曲线 + 参数摘要）；接口 `GET /api/paper/sim`、`GET /api/paper/sim/equity`、`GET /api/paper/sim/trades?tag=`、`POST /api/paper/sim/reset?tag=`
 - 注意：账本从建立当天开始记账，不补算历史（要补历史用回测或影子账户）
+- 边界：并行账本只复制主账本经 `submit → pending → tick` 撮合的**普通买卖信号**；**做T（`t_tick`）成交不经过 pending 队列、不会被复制**，因此 `paper_t_active=true` 时主账本会比 sim 多出做T维度的仓位变动，sim 对比的仅是信号处置参数差异、**不含做T维度**（别误判 sim 与主账本不一致）
 
 ### 7. 模拟交易（验证选股思路）
 
