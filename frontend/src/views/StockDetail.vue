@@ -9,6 +9,7 @@ import { ArrowLeft, CheckCircle2, AlertTriangle, XCircle, Sparkles, Star } from 
 import {
   addWatch,
   analyzeStock,
+  getPaperTrades,
   getStockIntraday,
   getStockKline,
   getStockQuote,
@@ -16,6 +17,7 @@ import {
   removeWatch,
   type DecisionDashboard,
   type IntradayData,
+  type PaperTrade,
   type StockQuote,
 } from '../api'
 import ConclusionBadge from '../components/ConclusionBadge.vue'
@@ -135,6 +137,34 @@ async function loadAnalysis() {
   }
 }
 
+const trades = ref<PaperTrade[]>([])
+
+/** 加载该股票的模拟成交流水（用于分时图标注买卖点）。 */
+async function loadTrades() {
+  try {
+    const data = await getPaperTrades(200, code.value)
+    trades.value = data.trades
+  } catch {
+    trades.value = []
+  }
+}
+
+/** 把成交映射到分时图标记：只对分时曲线所属交易日过滤（实时=今日，本地历史=对应日）。 */
+const tradeMarkers = computed(() => {
+  const d = intraday.value
+  if (!d?.times?.length) return []
+  // 实时分时接口可能不回传 date（实时源无日期列），此时曲线即当日行情，按今天过滤
+  const filterDate = d.date || new Date().toISOString().slice(0, 10)
+  return trades.value
+    .filter((t) => t.trade_date === filterDate && (t.side === 'buy' || t.side === 'sell'))
+    .map((t) => ({
+      time: (t.created_at || '').split(' ')[1] || '',
+      side: t.side,
+      price: t.price,
+      reason: t.reason,
+    }))
+})
+
 /** 查询当前股票是否已在自选股（按钮状态）。 */
 async function loadWatchStatus() {
   try {
@@ -173,7 +203,14 @@ async function toggleWatch() {
 }
 
 onMounted(async () => {
-  await Promise.all([loadKline(), loadIntraday(), loadQuote(), loadAnalysis(), loadWatchStatus()])
+  await Promise.all([
+    loadKline(),
+    loadIntraday(),
+    loadQuote(),
+    loadAnalysis(),
+    loadWatchStatus(),
+    loadTrades(),
+  ])
   // 分时/报价逐分钟刷新（后端接口与前端 GET 缓存均为 10s 级，60s 足够）
   pollTimer = window.setInterval(() => {
     if (chartTab.value !== 'intraday' || document.hidden) return
@@ -190,7 +227,14 @@ onUnmounted(() => {
 // 同组件内切换股票（路由参数变化）时重新加载全部数据
 watch(code, async () => {
   watchMsg.value = ''
-  await Promise.all([loadKline(), loadIntraday(), loadQuote(), loadAnalysis(), loadWatchStatus()])
+  await Promise.all([
+    loadKline(),
+    loadIntraday(),
+    loadQuote(),
+    loadAnalysis(),
+    loadWatchStatus(),
+    loadTrades(),
+  ])
 })
 
 /** 分时图副标题：交易日期 + 数据来源 + 昨收基准。 */
@@ -319,6 +363,13 @@ function statusColor(status: string) {
           <span class="text-[12.5px] text-content-faint">
             {{ chartTab === 'intraday' ? intradayHint : 'MA5 天蓝 · MA10 黄 · MA20 紫' }}
           </span>
+          <span
+            v-if="chartTab === 'intraday' && tradeMarkers.length"
+            class="flex items-center gap-2 text-[12px]"
+          >
+            <span class="text-up">▲ 买入</span>
+            <span class="text-down">▼ 卖出</span>
+          </span>
         </div>
 
         <!-- 分时图落后于日K/报价时明确提示（本地分钟库没导出到最新交易日） -->
@@ -344,6 +395,7 @@ function statusColor(status: string) {
             :avg-prices="intraday.avg_prices"
             :volumes="intraday.volumes"
             :prev-close="intraday.prev_close"
+            :markers="tradeMarkers"
             height="440px"
           />
           <div

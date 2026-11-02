@@ -13,6 +13,7 @@ import {
   TooltipComponent,
   LegendComponent,
   MarkLineComponent,
+  MarkPointComponent,
 } from 'echarts/components'
 
 import { chartTheme, tooltipStyle } from '../lib/chartTheme'
@@ -25,6 +26,7 @@ use([
   TooltipComponent,
   LegendComponent,
   MarkLineComponent,
+  MarkPointComponent,
 ])
 
 const props = defineProps<{
@@ -34,6 +36,8 @@ const props = defineProps<{
   volumes: number[]
   prevClose?: number | null
   height?: string
+  /** 成交标记：在该股票当日分时上标注买/卖点（持仓股交易复盘用）。 */
+  markers?: { time: string; side: 'buy' | 'sell'; price: number; reason?: string }[]
 }>()
 
 const base = computed(() =>
@@ -96,6 +100,49 @@ const volumeBars = computed(() => {
 const labelInterval = computed(() =>
   Math.max(0, Math.ceil(props.times.length / 5) - 1),
 )
+
+/** 把成交时间(HH:MM[:SS])对齐到分时图最近的分钟桶，返回索引（找不到返回 -1）。 */
+function matchTimeIndex(times: string[], tradeTime: string): number {
+  const hhmm = tradeTime.slice(0, 5)
+  for (let i = 0; i < times.length; i++) {
+    if (times[i].slice(0, 5) === hhmm) return i
+  }
+  // 没精确命中（集合竞价前 / 收盘后几秒）：取不晚于该时间的最近桶
+  for (let i = times.length - 1; i >= 0; i--) {
+    if (times[i] <= tradeTime) return i
+  }
+  return -1
+}
+
+/** 成交标记：把 buy/sell 成交映射到分时图的分钟桶上，画成 ▲买入 / ▼卖出。 */
+const markPointData = computed(() => {
+  const c = chartTheme()
+  const times = props.times
+  if (!props.markers || !times.length) return []
+  const out: Record<string, unknown>[] = []
+  for (const m of props.markers) {
+    const idx = matchTimeIndex(times, m.time)
+    if (idx < 0) continue
+    const isBuy = m.side === 'buy'
+    out.push({
+      coord: [times[idx], m.price],
+      value: m.price,
+      name: m.reason || (isBuy ? '买入' : '卖出'),
+      symbol: 'triangle',
+      symbolRotate: isBuy ? 0 : 180,
+      symbolSize: 13,
+      itemStyle: { color: isBuy ? c.up : c.down },
+      label: {
+        show: true,
+        formatter: isBuy ? 'B' : 'S',
+        fontSize: 10,
+        fontWeight: 'bold',
+        color: '#fff',
+      },
+    })
+  }
+  return out
+})
 
 const option = computed(() => {
   const c = chartTheme()
@@ -186,6 +233,9 @@ const option = computed(() => {
               data: [{ yAxis: base.value }],
             }
           : undefined,
+      markPoint: markPointData.value.length
+        ? { silent: false, data: markPointData.value }
+        : undefined,
     },
     {
       name: '均价',

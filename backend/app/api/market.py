@@ -432,6 +432,13 @@ async def stock_intraday(code: str) -> dict:
         dates = df["date"].dropna()
         if not dates.empty:
             date = str(dates.iloc[-1])
+    # 实时源不带 date 列：9:15 后走实时源=当日行情，补一个今天日期，
+    # 便于前端把分时曲线与当日成交标记(trade_date)按日期对齐；
+    # 周末/节假日实时源返回上一交易日时会带 date，此处不覆盖。
+    if not date:
+        date = now.strftime("%Y-%m-%d")
+    else:
+        date = date.split(" ")[0]  # 兼容 "2026-11-02 00:00:00" 这类带时间的日期
 
     return _with_disclaimer({
         "code": code,
