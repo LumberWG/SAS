@@ -128,6 +128,10 @@ class Settings(BaseSettings):
     # 五段式②：扫描命中即「股票池」（一选，全部落 signals 表），
     # 这里是从池内按技术面评分取前 N 只加入自选的口径（二选，0 表示关闭）
     scan_auto_watch_limit: int = 10
+    # 程序自选容量上限：每轮把「本轮命中 Top limit」与「现有 auto」统一按技术面评分排序，
+    # 保留高分前 watch_auto_max 只，其余 auto 淘汰（只删 auto，不动 manual）。
+    # 默认 scan_auto_watch_limit×3 = 30；设为 0 则回退 ×3。
+    watch_auto_max: int = 30
     # 盘中自选股分析间隔（分钟）。1 分钟一轮：分析本身走本地K线缓存，
     # 单轮耗时约 1~3 秒；「分析 → 成交」由实时撮合（paper_tick）负责，
     # 超过一轮耗时也不会堆积（max_instances=1 自动跳过）。

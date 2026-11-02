@@ -230,7 +230,8 @@ CREATE TABLE IF NOT EXISTS watchlist (
     note       TEXT NOT NULL DEFAULT '',
     -- 来源：auto=程序自选（扫描/收盘任务写入），manual=手动自选（用户添加）
     source     TEXT NOT NULL DEFAULT 'manual',
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    score      REAL                  -- 最近一次写入时的技术面评分（淘汰排序/展示用，可空）
 );
 CREATE TABLE IF NOT EXISTS signals (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -302,6 +303,19 @@ CREATE TABLE IF NOT EXISTS paper_equity (
     cash          REAL NOT NULL,
     market_value  REAL NOT NULL,
     created_at    TEXT NOT NULL
+);
+-- 实时撮合队列持久化（pending/backlog 镜像，重启后回填；不含影子账本队列）
+CREATE TABLE IF NOT EXISTS paper_pending (
+    code            TEXT NOT NULL,
+    kind            TEXT NOT NULL,   -- 'pending' | 'backlog'
+    name            TEXT,
+    action          TEXT,            -- buy / sell
+    reason          TEXT,
+    created_at      TEXT NOT NULL,   -- ISO 时间
+    expire_at       TEXT NOT NULL,   -- ISO 时间
+    price_at_signal REAL,
+    score           REAL DEFAULT 0,
+    PRIMARY KEY (code, kind)
 );
 -- 并行模拟账本（同一份信号 + 不同处置参数各自记账；与 paper_* 完全隔离，
 -- 主键带 account_id，因此同一代码在不同账本可以各自持仓、各有一条净值）
@@ -477,6 +491,7 @@ class Database:
         with self._lock, self._connect() as conn:
             conn.executescript(_SCHEMA_SQL)
             self._migrate_watchlist_source(conn)
+            self._migrate_watchlist_score(conn)
             self._migrate_recommendation_rank(conn)
             self._migrate_signal_rank(conn)
             self._migrate_position_score(conn)
@@ -665,17 +680,25 @@ class Database:
             )
 
     def add_watch_many(
-        self, items: list[tuple[str, str]], source: str = "auto", note: str = ""
+        self, items: list[tuple], source: str = "auto", note: str = ""
     ) -> int:
-        """批量加入自选股，返回真正新增的条数（已存在的手动自选不计入）。"""
+        """批量加入自选股，返回真正新增的条数（已存在的手动自选不计入）。
+
+        items 元素为 ``(code, name)`` 或 ``(code, name, score)``；缺省 score 记为 0。
+        """
         if not items:
             return 0
         from app.data.scope import clean_name
 
-        items = [(c, clean_name(c, n)) for c, n in items]   # 入库即清洗乱码名称
         added = 0
         with self._lock, self._connect() as conn:
-            for code, name in items:
+            for item in items:
+                if len(item) == 3:
+                    code, name, score = item
+                else:
+                    code, name = item
+                    score = 0.0
+                name = clean_name(code, name)   # 入库即清洗乱码名称
                 exists = conn.execute(
                     "SELECT source FROM watchlist WHERE code=?", (code,)
                 ).fetchone()
@@ -684,13 +707,33 @@ class Database:
                 if exists is None:
                     added += 1
                 conn.execute(
-                    "INSERT INTO watchlist(code, name, note, source, created_at) "
-                    "VALUES(?,?,?,?,?) "
+                    "INSERT INTO watchlist(code, name, note, source, created_at, score) "
+                    "VALUES(?,?,?,?,?,?) "
                     "ON CONFLICT(code) DO UPDATE SET name=excluded.name, "
-                    "source=excluded.source, note=excluded.note",
-                    (code, name, note, source, _now()),
+                    "source=excluded.source, note=excluded.note, score=excluded.score",
+                    (code, name, note, source, _now(), score),
                 )
         return added
+
+    def prune_watch_auto(self, keep_codes: set[str]) -> int:
+        """删除「程序自选」中不在 keep_codes 的记录（统一评分后淘汰低分用）。不动 manual。"""
+        with self._lock, self._connect() as conn:
+            if not keep_codes:
+                cur = conn.execute("DELETE FROM watchlist WHERE source='auto'")
+            else:
+                placeholders = ",".join("?" for _ in keep_codes)
+                cur = conn.execute(
+                    f"DELETE FROM watchlist WHERE source='auto' AND code NOT IN ({placeholders})",
+                    tuple(keep_codes),
+                )
+            return cur.rowcount or 0
+
+    @staticmethod
+    def _migrate_watchlist_score(conn: sqlite3.Connection) -> None:
+        """老库给 watchlist 补 score 列（新建库已在 _SCHEMA_SQL 内）。"""
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(watchlist)")}
+        if "score" not in cols:
+            conn.execute("ALTER TABLE watchlist ADD COLUMN score REAL")
 
     def set_watch_source(self, codes: list[str], source: str) -> int:
         """批量修改自选股来源（程序自选 → 手动自选），返回实际更新条数。"""
@@ -828,6 +871,30 @@ class Database:
                 " ORDER BY created_at",
                 led.args(),
             ).fetchall()
+        return [dict(r) for r in rows]
+
+    def save_paper_pending_snapshot(self, items: list[dict]) -> None:
+        """覆盖式保存 pending/backlog 快照（items 含 kind 字段），供重启恢复。"""
+        led = _scope()
+        with self._lock, self._connect() as conn:
+            conn.execute(f"DELETE FROM {led.t('paper_pending')}")
+            for it in items:
+                conn.execute(
+                    f"INSERT OR REPLACE INTO {led.t('paper_pending')}"
+                    "(code,kind,name,action,reason,created_at,expire_at,price_at_signal,score)"
+                    " VALUES(?,?,?,?,?,?,?,?,?)",
+                    (
+                        it["code"], it["kind"], it.get("name"), it.get("action"),
+                        it.get("reason"), it.get("created_at"), it.get("expire_at"),
+                        it.get("price_at_signal"), it.get("score"),
+                    ),
+                )
+
+    def list_paper_pending(self) -> list[dict[str, Any]]:
+        """读取持久化的撮合队列（重启恢复用）。"""
+        led = _scope()
+        with self._lock, self._connect() as conn:
+            rows = conn.execute(f"SELECT * FROM {led.t('paper_pending')}").fetchall()
         return [dict(r) for r in rows]
 
     def get_paper_position(self, code: str) -> dict[str, Any] | None:

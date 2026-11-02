@@ -433,19 +433,20 @@ class Scanner:
             logger.exception("选股联动实时交易失败")
 
     def _auto_watch_hits(self, hits: list[dict]) -> int:
-        """本轮命中按技术面评分 Top N 写入「程序自选」，返回新增条数。
+        """本轮命中 + 现有 auto 统一按技术面评分排序，保留高分前 K（watch_auto_max），淘汰其余 auto。
 
-        程序自选只是推荐关注池，已存在于手动自选的股票不会被降级。
+        程序自选只是推荐关注池，已存在手动自选的股票不会被降级/删除。
         """
         limit = self.settings.scan_auto_watch_limit
+        cap = self.settings.watch_auto_max or (limit * 3)
         if limit <= 0 or not hits:
             return 0
         ranked = sorted(
             hits, key=lambda h: h.get("extra", {}).get("score", 0), reverse=True
         )
         # 一只股票命中多个策略时只取一次，避免 TopN 名额被同一只股票吃掉
-        items: list[tuple[str, str]] = []
         seen: set[str] = set()
+        candidates: list[tuple[str, str, float]] = []
         skipped = 0
         for hit in ranked:
             code = str(hit.get("code") or "")
@@ -458,14 +459,36 @@ class Scanner:
             if not is_tradable(code, name)[0]:
                 skipped += 1
                 continue
-            items.append((code, name))
-            if len(items) >= limit:
+            score = float(hit.get("extra", {}).get("score", 0) or 0)
+            candidates.append((code, name, score))
+            if len(candidates) >= limit:
                 break
         if skipped:
             logger.info("程序自选跳过 %d 只范围外股票（科创板/北交所/ST/巨无霸）", skipped)
-        added = db.add_watch_many(items, source="auto", note="自动加入(扫描命中)")
-        if added:
-            logger.info("程序自选新增 %d 只（本轮命中 Top %d）", added, limit)
+        # 现有 auto（排除本轮候选）：重算当前技术面评分，纳入统一排序
+        from app.analysis.scoring import score_technical
+        existing = [w for w in db.list_watchlist("auto") if w["code"] not in seen]
+        for w in existing:
+            code = w["code"]
+            name = w.get("name") or code
+            score = -1.0
+            try:
+                df = get_kline_cached(code)
+                if df is not None and not df.empty and len(df) >= 30:
+                    score = float(score_technical(df).score)
+            except Exception:  # noqa: BLE001 - 单票评分失败不阻断整轮
+                score = -1.0
+            candidates.append((code, name, score))
+        # 统一按评分降序（失败/数据不足记 -1 排末尾），保留高分前 cap
+        candidates.sort(key=lambda x: x[2], reverse=True)
+        keep = candidates[:cap]
+        keep_codes = {c for c, _, _ in keep}
+        added = db.add_watch_many(keep, source="auto", note="自动加入(扫描命中/保活)")
+        pruned = db.prune_watch_auto(keep_codes)
+        logger.info(
+            "程序自选: 候选 %d + 现有 %d，统一评分保留 %d（上限 %d），新增 %d，淘汰 %d",
+            limit, len(existing), len(keep), cap, added, pruned,
+        )
         return added
 
     def _resolve_strategies(self, names: list[str]) -> list[Strategy]:

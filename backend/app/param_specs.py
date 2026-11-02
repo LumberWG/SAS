@@ -71,7 +71,7 @@ _LAYOUT: tuple[tuple[str, str, tuple[tuple[str, str, tuple[str, ...]], ...]], ..
             (
                 "扫描并发",
                 "全市场扫描的并发度与等待上限",
-                ("scan_concurrency", "scan_wait_timeout", "scan_auto_watch_limit"),
+                ("scan_concurrency", "scan_wait_timeout", "scan_auto_watch_limit", "watch_auto_max"),
             ),
             ("抓取与缓存", "失败重试与快照缓存时长", ("fetch_retries", "snapshot_ttl")),
             ("K 线预热", "历史 K 线的预热范围与并发", ("kline_warmup_concurrency", "kline_warmup_top_n")),
@@ -458,6 +458,7 @@ _SHORT_LABELS: dict[str, str] = {
     "snapshot_ttl": "快照缓存时长",
     "scan_wait_timeout": "扫描等待上限",
     "scan_auto_watch_limit": "扫描入池上限",
+    "watch_auto_max": "程序自选容量上限",
     # ---- 选股与自选 ----
     "factor_buy_threshold": "买入阈值",
     "factor_sell_threshold": "卖出阈值",
