@@ -68,3 +68,4 @@
 
 - 本文件即路线与借鉴清单。**路线 C 已实跑验证并写入 BACKTEST_LOG #73**：加了 `disable_limit_mask` 开关 + `no_mask` profile，A/B 证明 mask 默认已生效、贡献≈0（见 `random_dist_maskab.json`）。**路线 A-minus 已落地实测并写入 BACKTEST_LOG #74**：`ml_scorer.py`（零依赖 Ridge + Purged Group CV）+ `ml_default`/`ml_blend` profile，A/B 证明未过 3.5pp 显著线但收紧下行（见 `random_dist_mlab.json`）。两处代码均未动线上默认值。
 - **下一步（路线 A 已验收，进行收尾）**：(a) **路线 A 完整版已真机验收通过（#76）**——`ml_lgb` 配对中位 +4.55%（>3.5pp），已新增生产候选 `default_ml`（LightGBM 打分 + 因子回退兜底，其余继承 `default`）；原 `default`(14 因子) 保留为对照基线未覆盖。**建议将线上 active profile 切到 `default_ml`，并保留前向验证纪律（首个判读 ≈ 2026-12-01）。** 两项非阻塞待补：① 跑 `scripts/fetch_industry_map.py` 拉真实行业映射后重测 `ml_lgb_ind`，看真行业中性是否更优；② 置信度中等，按"采纳候选 + 监控"而非"锁定唯一真理"处理。(b) 路线 B（截面动量/低波动）仍可作为多元化补充或"降回撤变体"并行评估（优先级降至更低，因 A 已提供主 alpha）。
+- **战略锚点 → 见 [`ALPHA_CONCLUSIONS.md`](./ALPHA_CONCLUSIONS.md)**：把"已定论（直接采用）/ 待验证（跑数据归档）/ 差异点（重点投入）"三分，附 #87（加速股真实特征）、#88（`live_ml_scoring` 重开）、#89（不追高过滤证伪）的实证结论。新想法先查该表第 0 节纪律，不在已知结论上反复纠结。
