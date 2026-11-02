@@ -834,6 +834,84 @@ class TestRotation:
         assert results[0].side == "skip"
         assert "持仓已满" in results[0].reason
 
+    def test_no_rotation_when_target_rejected_by_gate(self, engine):
+        """换入票被交易池闸门拒掉时不许卖：否则只卖不买、凭空降仓。"""
+        eng, db, _ = engine
+        eng.settings.paper_max_positions = 1
+        eng.ensure_account()
+        self._seed(db)
+
+        # 北交所票：评分再高也买不进，不值得为它卖掉现有持仓
+        results = asyncio.run(eng.execute_recommendations(
+            [FakeRec("830799", "北交票", "buy", 90.0, "突破")]))
+
+        assert all(r.side == "skip" for r in results)
+        assert db.get_paper_position("600004") is not None
+
+    def test_no_rotation_when_target_below_half_score(self, engine, monkeypatch):
+        """低于半额分的换入票买入阶段本来就会丢，轮动时同样不认。"""
+        eng, db, _ = engine
+        eng.settings.paper_max_positions = 1
+        eng.ensure_account()
+        monkeypatch.setattr(eng.settings, "paper_rotation_min_score", 20.0, raising=False)
+        self._seed(db, score=0.0)
+
+        # 22 分：过了 min_score(20) 与 gap(22>=20)，但 < half_score(25)
+        results = asyncio.run(eng.execute_recommendations(
+            [FakeRec("600001", "温票", "buy", 22.0, "突破")]))
+
+        assert all(r.side == "skip" for r in results)
+        assert db.get_paper_position("600004") is not None
+
+    def test_no_rotation_when_proceeds_below_one_lot(self, engine):
+        """卖出所得不够买新票一手时不卖（只卖不买等于凭空降仓）。"""
+        eng, db, _ = engine
+        eng.settings.paper_max_positions = 1
+        eng.ensure_account()
+        # 100 股 × 10 元 = 1000 元，换 600001（50 元/股，一手要 5000）
+        self._seed(db, shares=100)
+
+        results = asyncio.run(eng.execute_recommendations(
+            [FakeRec("600001", "新强", "buy", 60.0, "突破")]))
+
+        assert all(r.side == "skip" for r in results)
+        assert db.get_paper_position("600004") is not None
+
+    def test_rotation_uses_backlog_candidates(self, engine):
+        """满仓时候补队列的票不会进 recommendations，必须靠 rotation_candidates 才换得动。"""
+        eng, db, _ = engine
+        eng.settings.paper_max_positions = 1
+        eng.ensure_account()
+        self._seed(db)
+
+        results = asyncio.run(eng.execute_recommendations(
+            [], rotation_candidates=[FakeRec("600001", "候补强票", "buy", 60.0, "突破")]))
+
+        assert [r.side for r in results] == ["sell", "buy"]
+        assert results[0].code == "600004"
+        assert db.get_paper_position("600001") is not None
+
+    def test_weakest_skips_today_buy(self, engine):
+        """选弱要跳过当日买入的持仓，而不是被它把整次轮动挡掉。"""
+        from datetime import datetime
+
+        eng, db, prices = engine
+        eng.settings.paper_max_positions = 2
+        eng.ensure_account()
+        today = datetime.now().strftime("%Y-%m-%d")
+        db.upsert_paper_position("600004", "今仓", 1000, 10.0, today, "test", score=0.0)
+        db.upsert_paper_position("600001", "底仓", 1000, 50.0, "2026-10-20", "test", score=30.0)
+        db.update_paper_cash(40000.0)
+        prices["600002"] = 100.0
+
+        results = asyncio.run(eng.execute_recommendations(
+            [FakeRec("600002", "新强", "buy", 60.0, "突破")]))
+
+        assert [r.side for r in results] == ["sell", "buy"]
+        assert results[0].code == "600001"      # 换掉底仓，今仓不动
+        assert db.get_paper_position("600004") is not None
+        assert db.get_paper_position("600001") is None
+
 
 class TestBacklog:
     """候补队列：名额/资金不足时先存着，有名额再买。"""

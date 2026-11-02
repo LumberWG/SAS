@@ -141,6 +141,7 @@ const groups: { name: string; items: ParamDef[] }[] = [
     { key: 'rotation_enabled', label: '满仓轮动', type: 'bool' },
     { key: 'rotation_gap', label: '轮动分差', type: 'number' },
     { key: 'rotation_min_score', label: '轮动最低分', type: 'number' },
+    { key: 'rotation_max_per_day', label: '每日轮动次数', type: 'number', min: 0, max: 20 },
   ]},
   { name: '做T引擎', items: [
     { key: 't_active', label: '启用做T', type: 'bool' },

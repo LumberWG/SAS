@@ -150,7 +150,7 @@
 | --- | --- | --- |
 | E0 | 默认 | `BUY_THRESHOLD=15`、`stop_loss=0.08`（即记录 #1 基线） |
 | E1-a | 买入阈值 25 | 按记录 #1 的第 1 条建议 |
-| E1-b | 买入阈值 55 | 取成交建仓分中位数 54.8，相当于“只买上半区” |
+| E1-b | 买入阈值 55 | 取成交建仓分中位数 54.8，相当于"只买上半区" |
 | E3 | `stop_loss=0.10` | 按记录 #1 的第 3 条建议 |
 
 ### 2. 结果（15 日窗口）
@@ -188,7 +188,7 @@
 | 类型 | 内容 | 文件 |
 | --- | --- | --- |
 | 回测能力 | 新增 `buy_threshold` 参数，可在不动线上常量的前提下做阈值实验（默认 None = 沿用 15） | `app/backtest/pipeline.py`、`scripts/pipeline_backtest.py` |
-| 规则修正 | `review` 的“提高买入阈值”建议改为先看成交分分布：成交分远高于阈值时，明确提示「阈值已不是约束」，不再输出无效建议 | `app/backtest/review.py` |
+| 规则修正 | `review` 的"提高买入阈值"建议改为先看成交分分布：成交分远高于阈值时，明确提示「阈值已不是约束」，不再输出无效建议 | `app/backtest/review.py` |
 
 线上选股/交易参数**零改动**。
 
@@ -6193,3 +6193,86 @@ scripts\regression.py --windows A,B,C,D,G,H --profiles default,chase15,chase30,c
 | 新增 | 止损架构对比脚本 | `backend/scripts/stop_loss_compare.py` |
 | 数据 | 三档 x 两年回测结果 | `data/logs/stop_loss_compare.json` |
 | 文档 | 本记录 | `BACKTEST_LOG.md` |
+
+## 记录 #91 — 2026-11-02 · 满仓轮动的机制修复（换入票必须真能买进 + 候补队列入候选）
+
+### 1. 触发与假设
+
+**本条不是参数实验，不产生新回测结果，只登记一次机制修复的口径**，避免日后把「轮动打开后
+反而更差」误判成轮动本身无效。
+
+检查 `app/paper/engine.py` 的轮动分支时发现三处缺陷，它们只在打开 `paper_rotation_enabled`
+时暴露（默认关闭，所以线上从未踩到）：
+
+1. **只卖不买**：旧实现只看评分就卖，换入票随后在买入阶段被交易池闸门（北交所 / 大市值 /
+   不在当日成交额 TopN）、切入点（不追高 / 待回踩）或评分分档（`< half_score` 只记录不下单）
+   拒掉。结果是「卖掉一只、一只没买进」，仓位凭空降一档，且与弱市降仓混在一起无法归因。
+2. **T+1 误挡**：选弱时把当日买入的持仓也算进候选，今天恰好买了最弱那只 → 整次轮动被判
+   「不可卖」，哪怕另一只持仓明明可换。
+3. **候选视野过窄**：候选只取本轮 `buy_candidates`。满仓时 `live.tick` 不会把候补队列塞进
+   撮合队列（只在有剩余名额时补位），于是「今天没买到、分还很高」的票永远不会触发轮动。
+
+### 2. 条件
+
+无新增回测。改动口径（与买入阶段对齐）：
+
+| 环节 | 旧 | 新 |
+| --- | --- | --- |
+| 选弱 | 全持仓取最低分，事后才查 T+1 | `_weakest_rotatable`：排除手动建仓 + 当日买入 |
+| 选强 | 取本轮买入建议中评分最高者 | `_pick_rotation_target`：未持仓 / ≥`min_score` / **≥`half_score`** / gap / `entry_gate(ignore_slots=True)` / `entry_price_ok` / 卖出所得够一手 |
+| 候选来源 | 本轮 `buy_candidates` | ∪ `rotation_candidates`（实盘 backlog 的未持仓买单，仅开盘窗口内传） |
+| 成交闭环 | 卖完等下一轮 tick | 换入票补进本轮 `buy_candidates`，同一次调用内完成「卖弱 + 买强」 |
+| 每日限次 | `settings.paper_rotation_max_per_day` | 回测新增参数 `rotation_max_per_day`（0 = 当日不轮动） |
+| 回测选弱 | 仅排除当日买入 | 额外排除**已在卖出队列**的票（空动作会吃掉当日唯一配额） |
+
+### 3. 结果
+
+新增 5 个单测（`backend/tests/test_paper.py::TestRotation`），全部通过：
+
+- 换入票被交易池拒（北交所 90 分）→ 不卖；
+- 换入票低于 `half_score`（22 分、`min_score` 调到 20）→ 不卖；
+- 卖出所得不足一手（100 股 × 10 元 → 换 50 元/股）→ 不卖；
+- 候补候选（`recommendations` 为空、`rotation_candidates` 给 60 分）→ 卖 + 买各 1 笔；
+- 选弱跳过今仓（两只持仓，今仓 0 分、底仓 30 分）→ 换掉底仓而不是被 T+1 挡掉。
+
+全量：341 passed、2 failed；两例失败在 `tests/test_exec_rules.py`，根因是 `.env` 的
+`PAPER_BUY_OPEN_WINDOW_MINUTES=0`（2026-11-02 让开盘窗口恒为真），与本次改动无关。
+
+### 4. 归因
+
+- 缺陷 1 的实质是「卖出与买入用了两套门槛」：卖出侧只看评分，买入侧有 5 道闸。任何一侧
+  单独改动都会让两边错位，因此修复方式是把买入的门槛**前置**到卖出之前，而不是放宽买入。
+- 缺陷 2 是判定顺序问题（先选弱再验 T+1），不是参数问题。
+- 缺陷 3 决定了「轮动能触发的频率」：线上候选池比回测宽（多了 backlog），所以**回测的轮动
+  触发次数应视为实盘的下界**，两边不可直接比触发频次。
+
+### 5. 结论与动作（人工判断）
+
+1. **默认开关不动**：`paper_rotation_enabled` 仍为 `False`。#30 的结论（Top300 池下几乎不触发、
+   关掉只降摩擦不改收益）没有被本次改动推翻——本次只是把「打开后会不会帮倒忙」修掉了。
+2. **不采纳**「因为修好了就把轮动打开」：机制修好 ≠ 有超额。要开必须按 #30 的前提重跑配对
+   实验（池子规模变更 / 候选来源变化都要重跑），以 `rotation_max_per_day=0` 作对照。
+3. 回测侧新增的 `rotation_count` 是关键判读字段：答案为 0 说明压根没触发（结论与 #30 一致），
+   大于 0 才有必要看收益差。
+
+### 6. 本轮变更
+
+| 类型 | 内容 | 文件 |
+| --- | --- | --- |
+| 代码 | `entry_gate(ignore_slots=)`、`_weakest_rotatable`、`_pick_rotation_target`、`rotation_candidates` 参数 | `backend/app/paper/engine.py` |
+| 代码 | 开盘窗口内把 backlog 未持仓买单作为轮动候选 | `backend/app/paper/live.py` |
+| 代码 | `rotation_max_per_day` 参数、选弱排除已在卖出队列的票、`rotation_count` 落 metadata | `backend/app/backtest/pipeline.py` |
+| 代码 | 落盘映射补 `rotation_max_per_day` | `backend/app/backtest/apply.py` |
+| 配置 | 轮动注释口径、设置页说明文案、`.env.example` 补 `PAPER_ROTATION_*` / `PAPER_BACKLOG_*` | `backend/app/config.py`、`backend/app/param_specs.py`、`backend/.env.example` |
+| 测试 | `TestRotation` 新增 5 例 | `backend/tests/test_paper.py` |
+| 文档 | 本记录 + §4.4 重写 + README 功能条目 + WORKLOG 第十一节 | `BACKTEST_LOG.md`、`docs/sas_formulas.md`、`README.md`、`WORKLOG.md` |
+
+### 7. 下轮计划
+
+打开轮动做配对实验时（前提：池子规模或候选来源变了，否则直接引用 #30）：
+
+- 对照组：`rotation_max_per_day=0`（完全关闭，等价现网）；实验组：`1`，其余参数不动；
+- 至少 3 段不重叠区间（含一段下跌市），看**超额**而不是绝对收益；
+- 先看 `metadata.rotation_count`：为 0 直接结束，不解释收益差；
+- 若触发次数可观但超额为负，把「换入票是否被后续止损打掉」单独统计（轮动的真实成本在
+  卖出摩擦 + 换入票的短命），再决定是否加「轮动后 N 日冷却」这类机制——**未验证前不加**。

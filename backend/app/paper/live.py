@@ -580,7 +580,24 @@ class LiveTrader:
                         entry_armed=signal.armed,
                     ))
 
-        results = await self.engine.execute_recommendations(recs, prices=prices)
+        # 轮动候选：满仓时 backlog 不会被塞进 recs（只在有剩余名额时补位），
+        # 单独传给引擎，轮动才能用上「今天没买到、分还很高」的票。
+        # 只在开盘窗口内传：窗口外的买单要等下一个开盘，轮动必须跟着等，
+        # 否则会「立刻卖 + 立刻买」，偏离「次日开盘价」口径（BACKTEST_LOG #19）。
+        rotation_candidates: list[SimpleNamespace] = []
+        if in_window and self.settings.paper_rotation_enabled and self._backlog:
+            held_codes = {p["code"] for p in db.list_paper_positions()}
+            rotation_candidates = [
+                SimpleNamespace(
+                    code=s.code, name=s.name, action=s.action, reason=s.reason,
+                    score=s.score, price=s.price_at_signal, entry_armed=s.armed,
+                )
+                for s in self._backlog.values()
+                if s.action == "buy" and s.code not in held_codes
+            ]
+
+        results = await self.engine.execute_recommendations(
+            recs, prices=prices, rotation_candidates=rotation_candidates)
 
         # 并行模拟账本：同一批信号、各自处置参数，各自记账（与主账本完全隔离）
         sim = await self._tick_sim(prices, now)

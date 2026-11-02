@@ -10,7 +10,9 @@
      评分分档：≥40 全额、25~40 权重打 5 折、<25 只记录不下单；
      总仓位上限 paper_max_total_exposure（默认 80%，即常留 20% 现金）；
   2.1 轮动替换：满仓时若新票评分 >= paper_rotation_min_score 且比最弱持仓的建仓
-     评分高出 paper_rotation_gap，则卖出最弱持仓换入（T+1、每日限次由配置控制）；
+     评分高出 paper_rotation_gap，则卖出最弱持仓换入（T+1、每日限次由配置控制）。
+     换入票必须**真能买进**：与买入阶段同一套交易池/切入点闸门，且卖出所得够买一手，
+     否则不卖（避免「只卖不买」把仓位凭空降下来）；手动建仓与当日买入的持仓不参与选弱。
   3. 整手交易：买入数量向下取整到 100 股；
   4. T+1：当日买入次日才能卖出；
   5. 费用：佣金万2.5（最低5元）+ 卖出印花税千1 + 双边过户费万0.1；
@@ -320,7 +322,9 @@ class PaperEngine:
             return False, f"不在当日成交额Top{top_n}池（与回测口径对齐）"
         return True, ""
 
-    def entry_gate(self, rec, *, positions: dict, timing_pause: bool) -> tuple[bool, str]:
+    def entry_gate(
+        self, rec, *, positions: dict, timing_pause: bool, ignore_slots: bool = False,
+    ) -> tuple[bool, str]:
         """五段式④ 交易池判定（前置闸，不取价），判定顺序即语义：
 
         1. 板块范围 / 北交所 / 大市值 / 名称 / 成交额池（``_buy_allowed``，**永久性**拒绝）；
@@ -332,6 +336,10 @@ class PaperEngine:
         第 1 步必须排在第 2 步之前：否则弱势期间所有票都显示「大盘弱势」，
         交易池面板看不出 688 这类票其实是被「不在可交易范围」拒掉的
         （真实原因被临时闸门盖住）。
+
+        ``ignore_slots=True`` 只供轮动替换使用：那一刻**必然是满仓**，名额检查会
+        把所有候选一律拒成「持仓已满」，于是「换入票是否真的买得进」永远无法预判。
+        跳过名额这一步，其余（永久性拒绝 / 已持仓）照常生效。
 
         与 :meth:`entry_price_ok` 合起来构成 ``entry_check``；拆成两段是为了
         保持原实现的取价时机——被前置闸拒掉的票不必再去拉一次实时价。
@@ -347,7 +355,7 @@ class PaperEngine:
         if code in positions:
             return False, "已持仓"
         max_positions = self.settings.paper_max_positions
-        if len(positions) >= max_positions:
+        if not ignore_slots and len(positions) >= max_positions:
             return False, f"持仓已满({max_positions}只)"
         return True, ""
 
@@ -702,16 +710,102 @@ class PaperEngine:
         return round(commission + stamp + transfer, 2)
 
     # ------------------------------------------------------------------
+    # 轮动替换（选弱 + 选强）
+    # ------------------------------------------------------------------
+    def _weakest_rotatable(
+        self, positions: dict, today: str
+    ) -> tuple[str | None, dict | None, float]:
+        """选出可以被自动轮动卖出的最弱持仓（按建仓评分）。
+
+        排除两类持仓：
+
+        - **手动建仓**（``strategy`` 含「手动」）：不打分、代表用户意图，程序不该卖掉；
+        - **当日买入**（``buy_date >= today``）：T+1 卖不掉。
+
+        T+1 的判断放在「选弱」而不是「成交前」：原来的实现先选最弱的、再检查它是否
+        当日买入，于是今天恰好买了最弱那只时整个轮动被挡掉，哪怕另一只持仓明明可换。
+        """
+        weak_code: str | None = None
+        weak_pos: dict | None = None
+        weak_score = 0.0
+        for code, pos in positions.items():
+            if "手动" in str(pos.get("strategy") or ""):
+                continue
+            if str(pos.get("buy_date") or "") >= today:
+                continue
+            score = float(pos.get("score") or 0.0)
+            if weak_pos is None or score < weak_score:
+                weak_code, weak_pos, weak_score = code, pos, score
+        return weak_code, weak_pos, weak_score
+
+    async def _pick_rotation_target(
+        self,
+        candidates: list,
+        *,
+        positions: dict,
+        prices: dict[str, float] | None,
+        budget: float,
+        weak_score: float,
+    ) -> tuple[object, float, float] | None:
+        """挑出「真能买进」的替换标的，挑不到就返回 ``None``（此时不卖）。
+
+        门槛按买入阶段同一套口径（否则会出现「卖了却买不进」的空转卖出）：
+
+        1. 未持仓、代码去重；
+        2. 评分 >= ``paper_rotation_min_score`` 且 >= ``paper_half_score``
+           （低于半额分的票买入阶段本来就会被丢掉）；
+        3. 建仓分差 >= ``paper_rotation_gap``；
+        4. 交易池闸门（板块/北交所/大市值/名称/成交额池），``ignore_slots=True``
+           ——此刻必然满仓，名额检查只会一律拒掉；
+        5. 切入点闸门（不追高 / 待回踩），用实时价；
+        6. 卖出所得 ``budget`` 够买一手。
+        """
+        min_score = float(self.settings.paper_rotation_min_score)
+        gap = float(self.settings.paper_rotation_gap)
+        half_score = float(self.settings.paper_half_score)
+        pool: list[tuple[float, object]] = []
+        seen: set[str] = set()
+        for rec in candidates:
+            code = str(getattr(rec, "code", "") or "")
+            if not code or code in positions or code in seen:
+                continue
+            seen.add(code)
+            score = _rec_score(rec)
+            if score < min_score or score < half_score or score - weak_score < gap:
+                continue
+            ok, _why = self.entry_gate(
+                rec, positions=positions, timing_pause=False, ignore_slots=True)
+            if not ok:
+                continue
+            pool.append((score, rec))
+        for score, rec in sorted(pool, key=lambda item: -item[0]):
+            price = await self._latest_price(rec.code, prices)
+            ok, _why = self.entry_price_ok(rec, price, _rec_price(rec))
+            if not ok:
+                continue
+            if budget < float(price) * LOT_SIZE:
+                continue
+            return rec, score, float(price)
+        return None
+
+    # ------------------------------------------------------------------
     # 信号执行（核心）
     # ------------------------------------------------------------------
     async def execute_recommendations(
-        self, recommendations: list, prices: dict[str, float] | None = None
+        self,
+        recommendations: list,
+        prices: dict[str, float] | None = None,
+        rotation_candidates: list | None = None,
     ) -> list[TradeResult]:
         """执行一批买卖建议（智能建议引擎的输出）。
 
         Args:
             recommendations: Recommendation 对象列表（action/price 等字段）
             prices: 可选的逐股最新价（实时撮合传入），缺省时内部取最新价
+            rotation_candidates: 额外的**轮动候选**（只在轮动分支里使用）。
+                满仓时 ``live.tick`` 不会把候补队列塞进 ``recommendations``
+                （只在有剩余名额时补位），于是被满仓挡下的高分票永远进不了轮动视野。
+                由调用方把它们单独传进来，轮动才能用上「今天没买到、分还很高」的票。
 
         Returns:
             执行结果列表（含 skip 的原因）
@@ -840,62 +934,69 @@ class PaperEngine:
                         weak_exposure * 100, self._regime_paused,
                     )
 
-        # ---- 轮动替换：满仓时用显著更高分的新票换掉最弱持仓 ----
-        # 触发条件（全部满足）：开关开启 + 持仓已满 + 存在未持仓的买入候选 +
-        #   新票评分 >= rotation_min_score 且比最弱持仓的建仓评分高出 rotation_gap +
-        #   最弱持仓非当日买入（T+1）+ 当日轮动次数未达上限。
+        # ---- 轮动替换：满仓时用「真能买进」的更高分新票换掉最弱持仓 ----
+        # 触发条件（全部满足）：开关开启 + 非全暂停 + 持仓已满 + 当日次数未达上限 +
+        #   最弱持仓可被自动卖出（非手动、非当日买入）+ 存在未持仓候选满足
+        #   评分 >= rotation_min_score、>= half_score、比最弱持仓建仓分高出 rotation_gap、
+        #   且通过交易池闸门与切入点闸门 + 卖出所得够买该票一手。
+        # 为什么要求「真能买进」：早期版本只看评分就卖，换入票随后被交易池（大市值/
+        #   北交所/不在成交额池）、切入点（追高/待回踩）或评分分档拒掉 → 白付一次卖出
+        #   摩擦、名额空着等下一轮，等于凭空降仓。见 BACKTEST_LOG 记录 #91。
         if (
             self.settings.paper_rotation_enabled
             and not weak_pause_all
             and len(positions) >= self.settings.paper_max_positions
         ):
-            fresh = [r for r in buy_candidates if r.code not in positions]
-            if fresh:
-                best = max(fresh, key=_rec_score)
-                best_score = _rec_score(best)
-                weak_code: str | None = None
-                weak_pos: dict | None = None
-                weak_score = 0.0
-                for code, pos in positions.items():
-                    # 手动下单建仓的持仓不打分，也不允许被自动轮动卖出
-                    if "手动" in str(pos.get("strategy") or ""):
-                        continue
-                    score = float(pos.get("score") or 0.0)
-                    if weak_pos is None or score < weak_score:
-                        weak_code, weak_pos, weak_score = code, pos, score
-                used = db.count_paper_trades("轮动替换", today, side="sell")
-                can_rotate = (
-                    weak_code is not None
-                    and best_score >= self.settings.paper_rotation_min_score
-                    and best_score - weak_score >= self.settings.paper_rotation_gap
-                    and str(weak_pos.get("buy_date") or "") < today
-                    and used < self.settings.paper_rotation_max_per_day
+            used = db.count_paper_trades("轮动替换", today, side="sell")
+            weak_code, weak_pos, weak_score = self._weakest_rotatable(positions, today)
+            can_rotate = (
+                weak_code is not None
+                and weak_pos is not None
+                and used < int(self.settings.paper_rotation_max_per_day)
+            )
+            if can_rotate:
+                weak_price = await self._latest_price(weak_code, prices)
+                # 换入预算 = 卖出所得扣费后的金额。不够买一手就不换，
+                # 否则「卖得掉、买不进」，仓位被凭空降下来（与弱市降仓混在一起无法归因）。
+                proceeds = 0.0
+                if weak_price and weak_price > 0:
+                    proceeds = weak_price * int(weak_pos["shares"])
+                    proceeds -= self.calc_fee("sell", proceeds)
+                target = await self._pick_rotation_target(
+                    [*buy_candidates, *(rotation_candidates or [])],
+                    positions=positions,
+                    prices=prices,
+                    budget=proceeds,
+                    weak_score=weak_score,
                 )
-                if can_rotate:
-                    price = await self._latest_price(weak_code, prices)
-                    if price and price > 0:
-                        # 严格 T+1：只卖可卖批次，今仓留到次日
-                        sold = db.reduce_paper_sellable(weak_code, int(weak_pos["shares"]), today)
-                        if sold > 0:
-                            amount = price * sold
-                            fee = self.calc_fee("sell", amount)
-                            cash += amount - fee
-                            reason = (
-                                f"轮动替换(建仓{weak_score:.0f}分→新票{best_score:.0f}分)"
-                            )
-                            db.insert_paper_trade(
-                                weak_code, weak_pos.get("name", ""), "sell", price,
-                                sold, amount, fee, reason, today,
-                            )
-                            positions.pop(weak_code, None)
-                            results.append(TradeResult(
-                                weak_code, weak_pos.get("name", ""), "sell", sold,
-                                price, amount, fee, reason,
-                            ))
-                            logger.info(
-                                "轮动替换：卖出 %s（建仓 %.0f 分），换入 %s（%.0f 分）",
-                                weak_code, weak_score, best.code, best_score,
-                            )
+                if target is not None and weak_price and weak_price > 0:
+                    target_rec, target_score, _target_price = target
+                    # 严格 T+1：只卖可卖批次，今仓留到次日
+                    sold = db.reduce_paper_sellable(weak_code, int(weak_pos["shares"]), today)
+                    if sold > 0:
+                        amount = weak_price * sold
+                        fee = self.calc_fee("sell", amount)
+                        cash += amount - fee
+                        reason = (
+                            f"轮动替换(建仓{weak_score:.0f}分→新票{target_score:.0f}分)"
+                        )
+                        db.insert_paper_trade(
+                            weak_code, weak_pos.get("name", ""), "sell", weak_price,
+                            sold, amount, fee, reason, today,
+                        )
+                        positions.pop(weak_code, None)
+                        results.append(TradeResult(
+                            weak_code, weak_pos.get("name", ""), "sell", sold,
+                            weak_price, amount, fee, reason,
+                        ))
+                        # 换入标的必须在同一次调用里真的买到：候补队列里的票不在本轮
+                        # buy_candidates 里，不补进去就只剩「卖出」这一半。
+                        if all(r.code != target_rec.code for r in buy_candidates):
+                            buy_candidates.append(target_rec)
+                        logger.info(
+                            "轮动替换：卖出 %s（建仓 %.0f 分），换入 %s（%.0f 分）",
+                            weak_code, weak_score, target_rec.code, target_score,
+                        )
 
         # ---- 买入（第 3 次排序：评分加权仓位 + 评分分档 + 总仓位上限） ----
         # 规则：

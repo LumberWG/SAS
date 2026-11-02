@@ -119,6 +119,9 @@ class BacktestRequest(BaseModel):
     rotation_enabled: bool | None = Field(None, description="满仓轮动开关")
     rotation_gap: float | None = Field(None, description="轮动分差")
     rotation_min_score: float | None = Field(None, description="轮动最低分")
+    rotation_max_per_day: int | None = Field(
+        None, ge=0, le=20, description="每日轮动次数上限（0 = 当日不轮动，可作对照组）"
+    )
     # ---- 做T引擎（参数化主动交易） ----
     t_active: bool | None = Field(None, description="启用次日做T/分级网格")
     t_minute_path: bool | None = Field(
@@ -258,6 +261,7 @@ def _defaults_payload() -> dict:
         "rotation_enabled": bool(s.paper_rotation_enabled),
         "rotation_gap": float(s.paper_rotation_gap),
         "rotation_min_score": float(s.paper_rotation_min_score),
+        "rotation_max_per_day": int(s.paper_rotation_max_per_day),
         # 做T：全部跟随实盘 paper_t_*（之前硬编码 False/0 会让回测默认与实盘脱节）
         "t_active": bool(s.paper_t_active),
         "t_minute_path": False,

@@ -169,12 +169,16 @@ class Settings(BaseSettings):
     paper_scan_autotrade_overnight: bool = True
 
     # ---------- 满仓后的处理：轮动替换 + 候补队列 ----------
-    # 轮动替换：满仓时若出现更高分的新票，卖出最弱持仓换入（T+1 与持有满 1 日保护）
+    # 轮动替换：满仓时若出现更高分的新票，卖出最弱持仓换入。
+    # **默认关闭**：回测（BACKTEST_LOG #30）在 Top300 成交额池下几乎不触发，关掉只降摩擦
+    # 不改收益；打开属于「换手/摩擦」方向的实验，改池子规模后必须重跑 #30 再判断。
+    # 换入票必须**真能买进**（交易池闸门 + 切入点闸门 + 卖出所得够一手），否则不卖，
+    # 避免「只卖不买」把仓位凭空降下来；手动建仓与当日买入的持仓不参与选弱（T+1）。
     paper_rotation_enabled: bool = False
-    # 触发条件：新票评分 >= min_score，且比「最弱持仓的建仓评分」高出 gap 分
+    # 触发条件：新票评分 >= min_score（且 >= half_score），且比「最弱持仓的建仓评分」高出 gap 分
     paper_rotation_min_score: float = 40.0
     paper_rotation_gap: float = 20.0
-    # 每日最多轮动次数（一次 = 卖弱 + 买强）
+    # 每日最多轮动次数（一次 = 卖弱 + 买强）；0 = 当日不轮动
     paper_rotation_max_per_day: int = 1
     # 候补队列：因满仓/资金不足没买成的高分票先存着，有名额时按评分优先买入
     paper_backlog_enabled: bool = True

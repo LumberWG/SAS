@@ -363,6 +363,8 @@ export interface BacktestRequest {
   rotation_enabled?: boolean
   rotation_gap?: number
   rotation_min_score?: number
+  /** 每日轮动次数上限；0 = 当日不轮动（可作「关轮动」对照组） */
+  rotation_max_per_day?: number
   // 五段式③⑤：队列容量与切入点
   queue_top_m?: number
   entry_max_chase?: number

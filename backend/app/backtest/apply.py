@@ -43,6 +43,7 @@ BACKTEST_TO_SETTING: dict[str, str] = {
     "rotation_enabled": "paper_rotation_enabled",
     "rotation_gap": "paper_rotation_gap",
     "rotation_min_score": "paper_rotation_min_score",
+    "rotation_max_per_day": "paper_rotation_max_per_day",
     # 五段式③④⑤：队列容量与切入点
     "queue_top_m": "paper_trade_queue_top_m",
     "entry_max_chase": "paper_entry_max_chase",

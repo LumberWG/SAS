@@ -165,7 +165,7 @@ _LAYOUT: tuple[tuple[str, str, tuple[tuple[str, str, tuple[str, ...]], ...]], ..
             ("仓位评分", "评分与仓位权重的对应关系", ("paper_full_score", "paper_half_score")),
             (
                 "轮动替换",
-                "用更高分的票替换最弱持仓",
+                "用更高分且真能买进的票替换最弱持仓",
                 (
                     "paper_rotation_enabled",
                     "paper_rotation_min_score",
@@ -570,7 +570,12 @@ _DESC_OVERRIDES: dict[str, str] = {
     "auto_watch_top_n": "收盘选股后按评分取前 N 只自动加入自选",
     "paper_half_score": "评分介于半额线与全额线之间时，仓位权重打 5 折",
     "paper_scan_autotrade_top_n": "扫描命中后最多自动送多少只进交易队列",
+    "paper_rotation_enabled": (
+        "满仓时用更高分的新票替换最弱持仓；默认关闭（Top300 池下几乎不触发，只增换手摩擦）"
+    ),
+    "paper_rotation_min_score": "换入票的最低评分（同时要求 ≥ 半额分），低于此分不因轮动卖出任何持仓",
     "paper_rotation_gap": "新票评分需高出最弱持仓的建仓评分多少分才触发轮动",
+    "paper_rotation_max_per_day": "每日最多轮动次数（一次 = 卖弱 + 买强；0 = 当日不轮动）",
     "paper_backlog_max": "候补队列最多存多少只高分票（有名额时按评分优先买入）",
     "paper_large_cap_yi": "总市值超过该值（亿元）视为大盘股，默认不进买入队列",
     "paper_atr_stop_max": "ATR 止损放宽的上限（0.20 = 最多放宽到 20%）",

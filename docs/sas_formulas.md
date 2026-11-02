@@ -199,9 +199,42 @@ action = buy   若 total ≥ +15
 - `score < half(25)` → 只记录不下单。
 
 ### 4.4 轮动替换（满仓时，**默认关闭**）
-满足条件全部成立才换：`paper_rotation_enabled` + 持仓已满 `paper_max_positions(10)` + 存在未持仓买入候选 +
-新票 `score ≥ paper_rotation_min_score(40)` 且比最弱持仓建仓 `score` 高 `paper_rotation_gap(20)` +
-最弱持仓非当日买入（T+1）+ 当日轮动次数 < `paper_rotation_max_per_day(1)`。
+
+**选弱** `_weakest_rotatable(positions, today)`：按建仓 `score` 取最低，但排除两类持仓：
+
+- **手动建仓**（`strategy` 含「手动」）：不打分、代表用户意图，程序不卖；
+- **当日买入**（`buy_date >= today`）：T+1 卖不掉。
+
+> T+1 的判断放在「选弱」而不是「成交前」：旧实现先选最弱、再检查它是否当日买入，于是今天
+> 恰好买了最弱那只时整次轮动被挡掉——哪怕另一只持仓明明可换。
+
+**选强** `_pick_rotation_target(...)`：换入票必须**真能买进**，否则不卖（空转卖出＝白付摩擦 +
+名额空着，等于凭空降仓）。逐条门槛：
+
+1. 未持仓、代码去重；
+2. `score ≥ paper_rotation_min_score(40)` **且** `score ≥ paper_half_score(25)`（低于半额分的票
+   买入阶段本来就会被丢，为它卖持仓没有意义）；
+3. 比最弱持仓建仓 `score` 高 `paper_rotation_gap(20)`；
+4. 交易池闸门 `entry_gate(..., ignore_slots=True)`：板块范围 / 北交所 / 大市值 / 名称 / 成交额池。
+   `ignore_slots` 只为轮动而设——此刻**必然满仓**，名额检查会把所有候选一律拒成「持仓已满」，
+   导致「换入票是否买得进」永远无法预判；
+5. 切入点闸门 `entry_price_ok`（取实时价）：不追高 / 待回踩；
+6. 卖出所得（扣费后）≥ 换入票一手 `price × 100`。
+
+**候选来源** = 本轮买入建议 ∪ `rotation_candidates`（实盘 `live.tick` 传入**候补队列**中未持仓的
+买单，且只在开盘窗口内传）。满仓时 backlog 不会进 `recommendations`（只在有剩余名额时补位），
+不单独传进来，「今天没买到、分还很高」的票就永远进不了轮动视野；窗口外传则会「立刻卖 + 立刻买」，
+偏离「次日开盘价」口径（记录 #19）。
+
+**执行**：卖出最弱持仓（严格 T+1，`reduce_paper_sellable` 只卖可卖批次）→ 把换入票补进本轮
+`buy_candidates`（候补来源的票不在其中，不补就只剩「卖」这一半）→ 买入阶段按评分优先与仓位规则建仓。
+每日次数上限用 `count_paper_trades("轮动替换", today, side="sell")` 计数，
+`paper_rotation_max_per_day=0` 等价于当日不轮动。
+
+**回测同口径**（`backtest/pipeline.py`）：条件同 1~3，且当日买入（`buy_date >= date`）与**已在
+卖出队列**里的票都不参与选弱（后者只是空动作，却会吃掉当日唯一一次配额）；限次用参数
+`rotation_max_per_day`（`None` = 沿用 `settings.paper_rotation_max_per_day`），
+`metadata` 落 `rotation_count` / `rotation_max_per_day`，便于区分「压根没触发」与「触发但没用」。
 
 > 默认 `paper_rotation_enabled=False`：回测实测轮动在 Top300 池下几乎不触发，却是强制卖出与
 > 换手（月换手约 2.2 个资本）的主要来源，故线上关闭。
@@ -571,8 +604,8 @@ peak = max(历史峰值总资产, 当前总资产)；dd = 1 − 总资产 / peak
 | `paper_full_score` | 40 | 评分全额系数阈值 | engine |
 | `paper_half_score` | 25 | 评分半额系数阈值（低于只记录） | engine |
 | `paper_rotation_enabled` | **False** | 满仓轮动替换开关 | engine |
-| `paper_rotation_min_score / gap / max_per_day` | 40 / 20 / 1 | 轮动门槛、分差、每日次数 | engine |
-| `paper_backlog_enabled / max` | True / 30 | 候补队列开关/上限 | live |
+| `paper_rotation_min_score / gap / max_per_day` | 40 / 20 / 1 | 轮动门槛、分差、每日次数（0=当日不轮动） | engine |
+| `paper_backlog_enabled / max` | True / 30 | 候补队列开关/上限（满仓时同时作为轮动候选） | live |
 | `paper_trade_queue_top_m` | 5 | 交易队列**买入**容量 topM（0=不限，卖出不受限） | live |
 | `paper_exclude_bj` | True | 排除北交所 | engine |
 | `paper_pool_top_n` | 300 | 成交额 TopN 池（对齐回测，0=不限） | engine |
@@ -682,6 +715,8 @@ peak = max(历史峰值总资产, 当前总资产)；dd = 1 − 总资产 / peak
   与 #67 的 VWAP 结论（−1.4~−2.5pp）独立互证。因此**验收门槛**：
   配对差必须 **>3.5pp / 21 天**才算超出度量噪声；`#59~#68` 所有参数改进（+0.35~+1.46pp）均低于此门槛。
 - **候补与轮动**：回测无候补队列，满仓/资金不足直接丢弃（实盘会顺延到窗口内补位）。
+  实盘轮动会额外吃候补队列的票（见 §4.4），回测的轮动候选只有当轮 `buys`——因此
+  **回测的轮动触发次数是实盘的下界**，两边不可直接比触发频次。
 - **交易队列容量**：回测没有队列概念，买单数只受剩余名额（`max_positions - 持仓`）约束；线上额外限
   `paper_trade_queue_top_m`(5) 只买入候选。M 小于剩余名额时线上更保守，回测收益会略高估
   （满分票扎堆的日子尤甚），对照时需注意。

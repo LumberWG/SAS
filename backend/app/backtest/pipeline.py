@@ -149,6 +149,9 @@ class PipelineParams:
     half_score: float | None = None
     rotation_gap: float | None = None
     rotation_min_score: float | None = None
+    #: 每日轮动次数上限（None = 沿用 settings.paper_rotation_max_per_day）。
+    #: 0 = 当日不轮动（等价于关开关，但保留 min_score/gap 便于对照）。
+    rotation_max_per_day: int | None = None
     # ---- 选股模型实验（None = 线上行为） ----
     factor_weights: dict[str, float] | None = None  # 14 因子权重覆盖，自动归一化到 100
     strategies: tuple[str, ...] | None = None       # 只启用指定策略，None = 全部注册策略
@@ -879,6 +882,11 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
         if params.rotation_min_score is not None
         else settings.paper_rotation_min_score
     )
+    rotation_max_per_day = int(
+        params.rotation_max_per_day
+        if params.rotation_max_per_day is not None
+        else settings.paper_rotation_max_per_day
+    )
 
     cash = initial_capital
     positions: dict[str, dict] = {}
@@ -1367,6 +1375,7 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
     day_no = {d: i for i, d in enumerate(dates)}
 
     rebalance_every = max(1, int(params.rebalance_days or 1))
+    rotation_total = 0  # 全区间轮动次数（落 metadata，便于判断「压根没触发」还是「触发但没用」）
 
     for day_idx, date in enumerate(dates):
         rotation_used = 0  # 每日轮动次数上限独立计数
@@ -1690,28 +1699,39 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
                 and (params.buy_threshold is None or s["score"] >= params.buy_threshold)
                 and pass_filters(s["code"], date)
             ]
-        # 轮动替换：满仓时用显著更高分的新票换掉最弱持仓（每日 1 次）
+        # 轮动替换：满仓时用显著更高分的新票换掉最弱持仓（每日限次 rotation_max_per_day）
+        # 与线上引擎同口径（app/paper/engine.py::_weakest_rotatable / _pick_rotation_target）：
+        #   - 当日买入的持仓不参与选弱（T+1）；
+        #   - 已在卖出队列里的票不参与选弱：时间止损/收盘确认止损本来就要卖它，
+        #     再记一笔「轮动」只是空动作，却会吃掉当日唯一一次配额；
+        #   - 换入票必须未持仓、评分 >= half_score（低于半额分的票买入阶段本来就会丢，
+        #     线上同样不允许为这种票卖持仓）。
         if (
             rotation_on
+            and rotation_max_per_day > 0
             and len(positions) >= max_positions
-            and buys and rotation_used < settings.paper_rotation_max_per_day
+            and buys and rotation_used < rotation_max_per_day
         ):
-            best = max(buys, key=lambda x: x["score"])
-            weak_code, weak_score = None, 0.0
-            for code, p in positions.items():
-                if p["buy_date"] >= date:
-                    continue
-                if weak_code is None or p["score"] < weak_score:
-                    weak_code, weak_score = code, p["score"]
-            if (
-                weak_code
-                and best["score"] >= rotation_min_score
-                and best["score"] - weak_score >= rotation_gap
-            ):
-                pending_sells[weak_code] = (
-                    f"轮动替换(建仓{weak_score:.0f}→新票{best['score']:.0f})"
-                )
-                rotation_used += 1
+            pool = [b for b in buys if b["code"] not in positions]
+            if pool:
+                best = max(pool, key=lambda x: x["score"])
+                weak_code, weak_score = None, 0.0
+                for code, p in positions.items():
+                    if p["buy_date"] >= date or code in pending_sells:
+                        continue
+                    if weak_code is None or p["score"] < weak_score:
+                        weak_code, weak_score = code, p["score"]
+                if (
+                    weak_code
+                    and best["score"] >= rotation_min_score
+                    and best["score"] >= half_score
+                    and best["score"] - weak_score >= rotation_gap
+                ):
+                    pending_sells[weak_code] = (
+                        f"轮动替换(建仓{weak_score:.0f}→新票{best['score']:.0f})"
+                    )
+                    rotation_used += 1
+                    rotation_total += 1
 
         # 买入委托（次日开盘按分档/加权执行；止损止盈在成交后按成本价生成）
         pending_buys = [
@@ -1827,6 +1847,8 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
             "buy_top_pct": params.buy_top_pct,
             "slippage": params.slippage,
             "rotation_enabled": rotation_on,
+            "rotation_max_per_day": rotation_max_per_day,
+            "rotation_count": rotation_total,
             "intraday_minutes": params.intraday_minutes,
             "rebalance_days": rebalance_every,
             "max_open_gain": params.max_open_gain,
