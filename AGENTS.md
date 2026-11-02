@@ -89,7 +89,7 @@ Invoke-RestMethod -Headers @{'X-API-Token'='<令牌>'} http://127.0.0.1:8000/api
 
 | 项 | 值 | 说明 |
 | --- | --- | --- |
-| `paper_t_active` | false | 做T 按 `#66` 结论关闭，重开条件写在 README「做T引擎」 |
+| `paper_t_active` | **true**（2026-11-02 开） | 用户决策强制开启（覆盖 #66 待满足条件）；`.env` 与 `app_state` 覆盖层均为 true，还原不回退；监控见 README「做T引擎」 |
 | `live_ml_scoring` | **true**（2026-11-01 重开） | `#82` 配对 +4.55pp 超 3.5pp 线；实测 152 只 20.7s、当日 `as_of` 缓存只训练一次，见 `docs` §7.6 |
 | `paper_weak_exposure` | 0.3 | 弱市只降仓不全停（`#63`）；0 会让弱市零成交 |
 | `paper_dynamic_exposure` / `paper_policy_floor_enabled` / `paper_circuit_breaker_enabled` | 全 false | 机制层（`#84`/`#85`）已落地但**均未经配对回测**，需单开满 21 个交易日再判读 |

@@ -328,13 +328,14 @@ paper_position_lots(code, shares, cost_price, buy_date, tag)
 - 卖出/止损/做T 都必须走 `reduce_paper_sellable`，不能直接改 `shares`；
 - `ensure_lots_migrated()` 启动时把历史持仓（无批次）补建为一个批次（沿用原 `buy_date`），幂等。
 
-### 4.9 做T引擎 `t_tick()`（真实 tick，默认全关）
-总开关 `paper_t_active`（默认 False），仓位比例 `paper_t_size`（默认 0.25）。
+### 4.9 做T引擎 `t_tick()`（真实 tick；`paper_t_active` 实盘 2026-11-02 起开启）
+总开关 `paper_t_active`（`config.py` 默认 False，但 `.env` 与 `app_state` 覆盖层 2026-11-02 均置 true，故实盘已开），
+仓位比例 `paper_t_size`（默认 0.25）。
 
-**上线期口径（2026-10-31 复核）**：`config.py` 默认、`BACKTEST_LOG` #66、本节均要求关闭；某次「系统设置」操作
-把 `app_state.cfg:paper_t_active` 置成了 `1`（覆盖层优先级高于 `.env`/默认值，页面显示「运行时」），已改回 `false`。
-所以**判定某个开关是否生效要看 `/settings` 的 `source` 字段，不能只看 `.env` 或 `config.py` 默认值**——
-`cfg:` 覆盖层会静默压过它们。重开条件见 README §「做T引擎」：先有实测滑点，再用 `t_minute_path=True` 重跑配对实验。
+**口径提醒（沿用 #1065）**：判定开关是否生效要看 `/settings` 的 `source` 字段，不能只看 `.env` 或 `config.py` 默认值——
+`cfg:` 覆盖层优先级高于它们，会静默压过。2026-10-31 曾纠正一次误覆盖（改回 false）；2026-11-02 用户决策强制开启，
+把覆盖层置 true 并与 `.env` 一致。重开条件（已覆盖，留存备查）见 README §「做T引擎」：先有实测滑点，再用
+`t_minute_path=True` 重跑配对实验。
 每个 tick 按持仓逐只判断，**每只票每个 tick 只做一个动作**（命中分支后 `continue`）：
 
 ```
@@ -581,7 +582,7 @@ peak = max(历史峰值总资产, 当前总资产)；dd = 1 − 总资产 / peak
 | `paper_trail_arm` | 0.00 | 移动止损启用门槛（浮盈达此比例后跟踪） | engine |
 | `paper_regime_ma` | 60 | 大盘择时 MA 周期（<=0 关闭） | engine |
 | `paper_regime_weak_pause` | True | 弱市（指数在 MA 下）暂停自动买入 | engine |
-| `paper_t_active` | False | 做T引擎总开关 | engine |
+| `paper_t_active` | False（config 默认）/ **实盘已开**（2026-11-02 覆盖层+`.env` 均 true） | 做T引擎总开关 | engine |
 | `paper_t_size` | 0.25 | 单次做T比例（相对总持仓） | engine |
 | `paper_t_up_sell` | 0.05 | 开盘涨且盘中触此幅度 → 卖出 t_size | engine |
 | `paper_t_up_buyback` | 0.03 | 回调买回线（相对 max(开盘, 昨收)） | engine |
