@@ -40,8 +40,41 @@ def pct(a: float, b: float) -> float:
     return (a / b - 1) * 100 if b else 0.0
 
 
-def day_kline(kd: Path, code: str, today: str):
-    """返回 (当日 open/close/high/low/prev_close/涨跌幅%/振幅%, 是否命中当日)。"""
+def _sina_rows(symbols: list[str]) -> dict[str, dict]:
+    """新浪批量实时行情（收盘后 price 即当日收盘价）→ {code: row}。
+
+    注意 ``sina_quotes`` 会把 symbol 前缀（sh/sz）剥掉存 ``code``，
+    个股六位码全局无歧义可直接用；指数须由调用方按名称回配
+    （sh000001 剥前缀后与平安银行 sz000001 撞码）。
+    """
+    try:
+        from app.data.fallback import sina_quotes
+        df = sina_quotes(list(symbols))
+    except Exception:
+        return {}
+    if df is None or df.empty:
+        return {}
+    return {str(r["code"]): dict(r) for r in df.to_dict("records")}
+
+
+def day_kline(kd: Path, code: str, today: str, live: dict | None = None):
+    """当日行情：优先实时（收盘后=真实收盘价），退化本地 parquet 日线。
+
+    本地日线盘中是快照、收盘后不回填（2026-11-02 实证：301313 parquet
+    收盘 59.21 vs 实时收盘 62.49，差 5%），复盘「今天」一律以实时为准。
+    """
+    if live and float(live.get("price") or 0) > 0 and live.get("prev_close"):
+        price = float(live["price"])
+        prev = float(live["prev_close"])
+        hi = float(live.get("high") or price)
+        lo = float(live.get("low") or price)
+        return {
+            "open": float(live.get("open") or price), "close": price,
+            "high": hi, "low": lo, "prev_close": prev,
+            "pct": pct(price, prev),
+            "amp": (hi - lo) / prev * 100 if prev else 0.0,
+            "src": "实时",
+        }
     p = kd / f"{code}.parquet"
     if not p.exists():
         return None
@@ -62,6 +95,7 @@ def day_kline(kd: Path, code: str, today: str):
         "prev_close": prev,
         "pct": pct(close, prev),
         "amp": (float(r["high"]) - float(r["low"])) / prev * 100,
+        "src": "K线",
     }
 
 
@@ -107,19 +141,41 @@ def main() -> None:
     positions = {r["code"]: r for r in c.execute(
         "SELECT code,name,shares,cost_price,stop_price,peak_price,score FROM paper_positions")}
 
-    # 大盘基准
+    # 实时行情（仅复盘「今天」时取：收盘后 price 即真实收盘价）
+    is_today = today == pd.Timestamp.now().strftime("%Y-%m-%d")
+    live_stocks: dict[str, dict] = {}
+    idx_live: dict[str, dict] = {}
+    if is_today and codes:
+        from app.data.fallback import code_to_symbol
+        rows = _sina_rows([code_to_symbol(c) for c in codes])
+        live_stocks = {c: rows[c] for c in codes if rows.get(c)}
+        # 指数：'idx_sh000001' → 新浪 'sh000001'；结果按名称回配（避免 000001 撞码）
+        irows = _sina_rows([f[4:] for f, _ in IDX_BENCH])
+        for r in irows.values():
+            nm = str(r.get("name") or "")
+            for _, name in IDX_BENCH:
+                if nm == name and float(r.get("price") or 0) > 0:
+                    idx_live[name] = r
+
+    # 大盘基准：优先实时（修复创业板指本地缓存滞后），退化本地 idx parquet
     bench = {}
     for f, name in IDX_BENCH:
-        v = index_pct(kd, f, today)
+        v = None
+        lr = idx_live.get(name)
+        if lr and lr.get("pct_change") is not None:
+            v = float(lr["pct_change"])
+        if v is None:
+            v = index_pct(kd, f, today)
         if v is not None:
             bench[name] = v
     main_bench = bench.get("上证指数")
     bench_note = "、".join(f"{k}{v:+.2f}%" for k, v in bench.items())
+    src = "新浪实时收盘" if live_stocks else "本地K线（注意：盘中快照，可能未回填收盘价）"
 
     lines = [f"## {today} 收盘复盘", ""]
-    lines.append(f"**大盘基准**：{bench_note or '（本地指数文件无当日数据）'}  "
-                 f"（创业板指/深证成指若显示滞后或缺失，说明本地 idx 缓存未更新到当日）" if bench else
-                 "**大盘基准**：本地指数文件无当日数据，以下超额对比暂不可用。")
+    lines.append(f"**大盘基准**：{bench_note or '（指数数据不可用）'} ｜ 价格源：**{src}**")
+    lines.append(f"> 复盘对象为真实主账户（`paper_positions`，与前端「模拟交易」卡片同源）；"
+                 f"本地 parquet 日线盘中是快照、收盘后不回填，故复盘「今天」以实时行情为准。")
     lines.append("")
 
     if not codes:
@@ -148,7 +204,7 @@ def main() -> None:
         else:
             base = "其他"
         sig = base + ("+做T" if has_t else "")
-        kl = day_kline(kd, code, today)
+        kl = day_kline(kd, code, today, live=live_stocks.get(code))
         pos = positions.get(code)
         cost = float(pos["cost_price"]) if pos else wprice
         shares = int(pos["shares"]) if pos else tot_shares
@@ -219,7 +275,7 @@ def main() -> None:
     if combo_mv > 0 and main_bench is not None:
         cv = "整体跑赢大盘" if combo_excess_w / combo_mv > 0 else "整体跑输大盘"
         lines.append(f"- **组合{cv}**（超额 {combo_excess_w/combo_mv:+.2f}pp）。"
-                     f"做T加仓标的若浮亏扩大，说明加仓点在下跌途中，需复核做T触发条件。")
+                     f"做T加仓会抬升成本，重点看加仓后浮盈变化：若当日冲高回落则放大回撤，需复核做T触发条件。")
 
     # 原始信号（备查）
     lines.append("")
@@ -232,7 +288,7 @@ def main() -> None:
     lines.append("")
 
     _write(lines, today)
-    print(f"[daily_review] {today}: {len(codes)} 只标的，基准 {bench_note}")
+    print(f"[daily_review] {today}: {len(codes)} 只标的，基准 {bench_note}，价格源 {src}")
 
 
 def _write(lines: list[str], today: str) -> None:
