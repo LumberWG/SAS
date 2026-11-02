@@ -221,7 +221,17 @@ def ledger_overview() -> list[dict]:
             positions = db.list_paper_positions()
         init = float(acct.get("initial_capital") or 0)
         last = equity[-1] if equity else None
-        total = float(last["total_asset"]) if last else float(acct.get("cash") or 0)
+        if last is not None:
+            total = float(last["total_asset"])
+            as_of = last["date"]
+        else:
+            # 无净值历史（账本当天刚启用、尚未到 15:40 结算）：用现金 + 持仓成本估值，
+            # 避免把持仓当 0、把现金误当总资产而显示虚假巨亏（如 -29.79%）
+            total = float(acct.get("cash") or 0) + sum(
+                float(p.get("shares") or 0) * float(p.get("cost_price") or 0)
+                for p in positions
+            )
+            as_of = None
         rows.append({
             "tag": acct.get("tag") or "",
             "profile": acct.get("profile") or "",
@@ -232,7 +242,7 @@ def ledger_overview() -> list[dict]:
             "return_pct": round((total / init - 1) * 100, 2) if init > 0 else 0.0,
             "positions": len(positions),
             "equity_days": len(equity),
-            "as_of": last["date"] if last else None,
+            "as_of": as_of,
             "overrides": account_overrides(acct),
         })
     return rows
