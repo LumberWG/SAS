@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Query
 
@@ -50,8 +50,8 @@ def focus_list() -> dict:
     return with_disclaimer({
         "items": with_realtime(_with_detail(items)),
         "batch": batch,
-        # focus_2026-10-21 → 对应 2026-10-22 开盘关注
-        "for_date": batch.split("_", 1)[1] if batch else None,
+        # focus_<生成日> 对应下一交易日开盘关注，for_date = 生成日之后的首个交易日
+        "for_date": _focus_for_date(batch),
         "updated_at": _latest_time(items),
     })
 
@@ -134,3 +134,22 @@ def _sell_items() -> list[dict]:
     items = _latest_by_action(("intraday", "premarket"), "sell")
     held = _held_codes()
     return [it for it in items if str(it.get("code")) in held]
+
+
+def _focus_for_date(batch: str | None) -> str | None:
+    """focus_<生成日> 对应下一交易日的开盘关注，返回生成日之后的第一个交易日。
+
+    盘后(15:35)生成，本意是「次日开盘重点关注」；直接取批次日期会显示成生成日
+    当天（如 11-02 生成却显示 11-02 开盘），这里 +1 天并跳过周末得到真正的下一开盘日。
+    """
+    if not batch:
+        return None
+    try:
+        d = datetime.strptime(batch.split("_", 1)[1], "%Y-%m-%d")
+    except (ValueError, IndexError):
+        return None
+    for _ in range(7):
+        d = d + timedelta(days=1)
+        if is_trading_day(d):
+            return d.strftime("%Y-%m-%d")
+    return None
