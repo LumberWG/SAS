@@ -458,6 +458,9 @@ class LiveTrader:
             try:
                 with ledger_scope(run.account_id):
                     stops = await run.engine.check_stop_loss_target(prices)
+                    # 做T引擎：与主账户一致，每个账本按各自参数各自做T
+                    # （ledger_scope 已把块内 db.paper_* 调用路由到该账本的 sim_* 表）
+                    t_trades = await run.engine.t_tick(prices)
                     ordered = sorted(
                         run.pending.values(),
                         key=lambda s: (s.action != "sell", -s.score),
@@ -485,7 +488,7 @@ class LiveTrader:
                             run.pending.pop(code, None)
                         elif not any(k in hit.reason for k in keep_reasons):
                             run.pending.pop(code, None)
-                out[tag] = len(stops) + len([r for r in results if r.side != "skip"])
+                out[tag] = len(stops) + len(t_trades) + len([r for r in results if r.side != "skip"])
             except Exception as exc:  # noqa: BLE001 - 单个账本失败不能拖垮其它账本
                 logger.warning("并行账本 %s 撮合失败: %s", tag, exc)
                 out[tag] = -1
