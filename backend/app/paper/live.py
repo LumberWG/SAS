@@ -128,6 +128,8 @@ class LiveTrader:
         self._sim_skipped: list[str] = []
         #: 上一 tick 各账本成交笔数（状态接口展示用）
         self._sim_last: dict[str, int] = {}
+        # 重启后从库恢复未过期的撮合队列（避免内存队列丢失）
+        self._restore_pending()
 
     # ------------------------------------------------------------------
     # 交易模式（自动 / 手动）
@@ -154,6 +156,7 @@ class LiveTrader:
             self._backlog.clear()
             for run in self._sim.values():
                 run.pending.clear()
+            self._persist_pending()
         logger.info("模拟交易模式切换为 %s", "自动" if auto else "手动")
         return self.status()
 
@@ -248,6 +251,7 @@ class LiveTrader:
             logger.info(
                 "实时队列更新 %d 条（%s），待执行 %d 条", added, source, len(self._pending)
             )
+        self._persist_pending()
         return added
 
     def _window_minutes(self) -> int:
@@ -334,6 +338,7 @@ class LiveTrader:
         self._sim_last.clear()
         for run in self._sim.values():
             run.pending.clear()
+        self._persist_pending()
 
     def _purge(self, now: datetime) -> None:
         """丢弃过期信号（价格已漂移，执行没有意义）。"""
@@ -614,6 +619,9 @@ class LiveTrader:
             if code in held or code in traded:
                 self._backlog.pop(code, None)
 
+        # 队列已变化（出队/撤销），落库镜像供重启恢复
+        self._persist_pending()
+
         self._executed += len(executed) + len(stop_trades) + len(t_trades)
         trades = [
             {
@@ -668,6 +676,71 @@ class LiveTrader:
         return prices
 
     # ------------------------------------------------------------------
+    # 撮合队列持久化（重启恢复）
+    # ------------------------------------------------------------------
+    def _persist_pending(self) -> None:
+        """把当前 pending/backlog 快照覆盖式落库，供重启恢复。"""
+        items: list[dict] = []
+        for s in self._pending.values():
+            items.append({
+                "code": s.code, "kind": "pending", "name": s.name, "action": s.action,
+                "reason": s.reason,
+                "created_at": s.created_at.isoformat(timespec="seconds"),
+                "expire_at": s.expire_at.isoformat(timespec="seconds"),
+                "price_at_signal": s.price_at_signal, "score": s.score,
+            })
+        for s in self._backlog.values():
+            items.append({
+                "code": s.code, "kind": "backlog", "name": s.name, "action": s.action,
+                "reason": s.reason,
+                "created_at": s.created_at.isoformat(timespec="seconds"),
+                "expire_at": s.expire_at.isoformat(timespec="seconds"),
+                "price_at_signal": s.price_at_signal, "score": s.score,
+            })
+        try:
+            db.save_paper_pending_snapshot(items)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("持久化撮合队列失败: %s", exc)
+
+    def _restore_pending(self) -> None:
+        """启动时从库恢复未过期的撮合队列（内存队列重启即丢，需回填）。"""
+        try:
+            rows = db.list_paper_pending()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("恢复撮合队列失败: %s", exc)
+            return
+        now = datetime.now()
+        now_iso = now.isoformat(timespec="seconds")
+        rp = rb = 0
+        for r in rows:
+            exp = r.get("expire_at")
+            if exp and exp <= now_iso:
+                continue  # 已过期，丢弃
+            try:
+                created = datetime.fromisoformat(r["created_at"]) if r.get("created_at") else now
+                expire = datetime.fromisoformat(exp) if exp else now
+            except ValueError:
+                created, expire = now, now
+            sig = PendingSignal(
+                code=r["code"],
+                name=r.get("name") or r["code"],
+                action=r.get("action") or "buy",
+                reason=r.get("reason") or "",
+                created_at=created,
+                expire_at=expire,
+                price_at_signal=r.get("price_at_signal"),
+                score=float(r.get("score") or 0.0),
+            )
+            if r.get("kind") == "backlog":
+                self._backlog[sig.code] = sig
+                rb += 1
+            else:
+                self._pending[sig.code] = sig
+                rp += 1
+        if rp or rb:
+            logger.info("重启恢复撮合队列 pending=%d backlog=%d", rp, rb)
+
+    # ------------------------------------------------------------------
     # 状态
     # ------------------------------------------------------------------
     def status(self) -> dict:
@@ -709,6 +782,8 @@ class LiveTrader:
             "recent_trades": self._last_trades,
             "last_error": self._last_error,
             "prices": {code: round(p, 2) for code, p in self._last_prices.items()},
+            # 持仓直接读库（撮合本就依赖 db），避免重启后内存/库不一致
+            "positions": db.list_paper_positions(),
         }
 
 

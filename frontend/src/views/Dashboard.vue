@@ -11,6 +11,7 @@ import { CanvasRenderer } from 'echarts/renderers'
 import { BarChart, LineChart } from 'echarts/charts'
 import { GridComponent, TooltipComponent } from 'echarts/components'
 
+import { useRouter } from 'vue-router'
 import { getAlerts, getIndexKline, getOverview, type MarketAlert, type MarketOverview } from '../api'
 import { chartTheme, tooltipStyle } from '../lib/chartTheme'
 import { useMarketStore } from '../stores/market'
@@ -84,6 +85,11 @@ function toggleAuto() {
   } else if (timer) {
     window.clearInterval(timer)
   }
+}
+
+const router = useRouter()
+function goDetail(code: string) {
+  router.push(`/stock/${code}`)
 }
 
 onMounted(() => {
@@ -375,7 +381,8 @@ const breadthOption = computed(() => {
         <div
           v-for="(alert, i) in alerts"
           :key="i"
-          class="flex items-center justify-between gap-2 rounded border border-base-600/50 bg-base-700/30 px-2 py-1 transition-colors hover:border-primary/40"
+          class="flex cursor-pointer items-center justify-between gap-2 rounded border border-base-600/50 bg-base-700/30 px-2 py-1 transition-colors hover:border-primary/40"
+          @click="goDetail(alert.code)"
         >
           <div class="flex min-w-0 items-center gap-1.5">
             <span class="shrink-0 rounded border px-1.5 py-0.5 text-[11.5px] font-medium" :class="alertBadgeClass(alert.type)">
