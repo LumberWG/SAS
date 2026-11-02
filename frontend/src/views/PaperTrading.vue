@@ -42,6 +42,15 @@ import {
 
 use([CanvasRenderer, LineChart, GridComponent, LegendComponent, TooltipComponent])
 
+/** 净值只在交易日落库（结算任务 mon-fri + is_trading_day 守卫）；这里再兜底剔除非交易日，
+ *  保证净值曲线横坐标不会出现周末/节假日（即便数据源偶发写入非交易日行）。 */
+function isTradingDay(dateStr: string): boolean {
+  const p = (dateStr || '').split('-').map(Number)
+  if (p.length !== 3 || p.some((n) => !n)) return true
+  const w = new Date(p[0], p[1] - 1, p[2]).getDay()
+  return w !== 0 && w !== 6
+}
+
 const router = useRouter()
 const route = useRoute()
 
@@ -97,10 +106,12 @@ async function load() {
     ])
     account.value = acc
     trades.value = tradeData.trades
-    equity.value = equityData.equity.map((e) => ({
-      date: e.date.slice(5),
-      total_asset: e.total_asset,
-    }))
+    equity.value = equityData.equity
+      .filter((e) => isTradingDay(e.date))
+      .map((e) => ({
+        date: e.date.slice(5),
+        total_asset: e.total_asset,
+      }))
     live.value = liveData
     // 状态已与后端同步，此前的切换报错不再有意义
     if (modeError.value) modeError.value = ''
@@ -119,7 +130,13 @@ async function loadSim() {
     simAccounts.value = overview.accounts
     simEnabled.value = overview.enabled
     simSkipped.value = overview.skipped
-    simSeries.value = series.series
+    const filtered: Record<string, Array<{ date: string; total_asset: number }>> = {}
+    for (const [tag, rows] of Object.entries(series.series)) {
+      filtered[tag] = (rows as Array<{ date: string; total_asset: number }>).filter(
+        (r) => isTradingDay(r.date)
+      )
+    }
+    simSeries.value = filtered
   } catch {
     // 附加能力，失败不打扰用户
   }
