@@ -181,7 +181,7 @@ def main() -> None:
     if not codes:
         lines.append(f"> 当日（{today}）`paper_trades` 无成交记录，无交易标的可复盘。")
         lines.append("")
-        _append(lines)
+        _write(lines, today)
         print(f"[daily_review] {today}: 无交易，仅占位记录")
         return
 
