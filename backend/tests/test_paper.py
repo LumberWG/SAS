@@ -785,38 +785,50 @@ class TestRotationSoldGuard:
         return live_module.SimpleNamespace(
             code=code, name=code, action="buy", reason="突破", price=10.0, score=score)
 
-    def test_sold_code_not_bought_same_day(self, monkeypatch, tmp_path):
-        from datetime import datetime
+    def _seed_rotation_sell(self, live_module, code, day, target=67):
+        """在库里造一笔轮动卖出记录（内存为空 = 模拟重启后的状态）。"""
+        live_module.db.insert_paper_trade(
+            code, code, "sell", 4.17, 700, 2919.0, 7.95,
+            f"轮动替换(建仓40分→新票{target}分)", day)
 
-        trader, live_module = self._trader(monkeypatch, tmp_path)
-        today = datetime.now().strftime("%Y-%m-%d")
-        # 同日 tick 内记下的卖出（内存缓存在本进程内有效，_rotation_sold_day 已灌过）
-        trader._rotation_sold["600001"] = today
-        trader._rotation_sold_day = today
+    def test_rebuy_blocked_when_worse_than_swapped_out(self, monkeypatch, tmp_path):
+        """评分打不过当初换掉它的那只票 → 不给买回。
 
-        added = trader.submit([
-            self._rec(live_module, "600001", 90.0),
-            self._rec(live_module, "600002", 80.0),
-        ])
-
-        assert added == 1
-        assert set(trader._pending) == {"600002"}
-        assert trader.status()["rotation_sold_today"] == ["600001"]
-
-    def test_ban_reloaded_from_db_after_restart(self, monkeypatch, tmp_path):
-        """重启后仍要挡：黑名单以 `paper_trades` 为准，不靠内存。
-
-        2026-11-03 实例：600960 渤海汽车 09:30:01 轮动卖出 700@4.17，
-        12:23 部署重启清空内存后，13:00:35 又买回 300@4.25。
+        2026-11-03 实例：600960 渤海汽车 09:30:01 以「建仓40分→新票67分」卖出，
+        13:00:35 只有 41 分（< 67），买回只是白付一次摩擦。
         """
         from datetime import datetime
 
         trader, live_module = self._trader(monkeypatch, tmp_path)
         today = datetime.now().strftime("%Y-%m-%d")
-        # 只落在库里（模拟重启前那笔卖出，内存里没有）
-        live_module.db.insert_paper_trade(
-            "600960", "渤海汽车", "sell", 4.17, 700, 2919.0, 7.95,
-            "轮动替换(建仓40分→新票67分)", today)
+        self._seed_rotation_sell(live_module, "600960", today)
+
+        added = trader.submit([self._rec(live_module, "600960", 41.0)])
+
+        assert added == 0
+        assert trader._pending == {}
+        assert trader.status()["rotation_rebuy_floor"] == {"600960": 67.0}
+
+    def test_rebuy_allowed_when_better_than_swapped_out(self, monkeypatch, tmp_path):
+        """评分已超过当初换掉它的那只票 → 允许买回（不是一律禁止）。"""
+        from datetime import datetime
+
+        trader, live_module = self._trader(monkeypatch, tmp_path)
+        today = datetime.now().strftime("%Y-%m-%d")
+        self._seed_rotation_sell(live_module, "600960", today)
+
+        added = trader.submit([self._rec(live_module, "600960", 90.0)])
+
+        assert added == 1
+        assert set(trader._pending) == {"600960"}
+
+    def test_ban_reloaded_from_db_after_restart(self, monkeypatch, tmp_path):
+        """门槛以 `paper_trades` 为准，不靠内存：新实例（=重启）照样生效。"""
+        from datetime import datetime
+
+        _, live_module = self._trader(monkeypatch, tmp_path)
+        today = datetime.now().strftime("%Y-%m-%d")
+        self._seed_rotation_sell(live_module, "600960", today)
 
         trader2 = live_module.LiveTrader()          # 新实例 = 模拟重启
         added = trader2.submit([self._rec(live_module, "600960", 41.0)])
@@ -825,12 +837,12 @@ class TestRotationSoldGuard:
         assert trader2.status()["rotation_sold_today"] == ["600960"]
 
     def test_stale_mark_expires_next_day(self, monkeypatch, tmp_path):
-        """隔日的卖出记录不该继续挡：黑名单只在当日有效。"""
+        """隔日的卖出记录不该继续限制：门槛只在当日有效。"""
         trader, live_module = self._trader(monkeypatch, tmp_path)
-        trader._rotation_sold["600003"] = "2020-01-01"
+        trader._rotation_sold["600003"] = ("2020-01-01", 67.0)
         trader._rotation_sold_day = "2020-01-01"
 
-        added = trader.submit([self._rec(live_module, "600003", 70.0)])
+        added = trader.submit([self._rec(live_module, "600003", 41.0)])
 
         assert added == 1
         assert set(trader._pending) == {"600003"}
@@ -1062,7 +1074,11 @@ class TestRotation:
         assert db.get_paper_position("600001") is not None
 
     def test_weakest_skips_today_buy(self, engine):
-        """选弱要跳过当日买入的持仓，而不是被它把整次轮动挡掉。"""
+        """选弱要跳过当日买入的持仓，而不是被它把整次轮动挡掉。
+
+        注：底仓市值必须落在单票上限（总资产×20%）以内，否则会被「卖了的钱投不回去」
+        那条闸挡掉（见 test_no_rotation_when_proceeds_cannot_be_reinvested）。
+        """
         from datetime import datetime
 
         eng, db, prices = engine
@@ -1070,9 +1086,10 @@ class TestRotation:
         eng.ensure_account()
         today = datetime.now().strftime("%Y-%m-%d")
         db.upsert_paper_position("600004", "今仓", 1000, 10.0, today, "test", score=0.0)
-        db.upsert_paper_position("600001", "底仓", 1000, 50.0, "2026-10-20", "test", score=30.0)
+        db.upsert_paper_position("600001", "底仓", 1000, 10.0, "2026-10-20", "test", score=30.0)
         db.update_paper_cash(40000.0)
-        prices["600002"] = 100.0
+        prices["600001"] = 10.0
+        prices["600002"] = 50.0
 
         results = asyncio.run(eng.execute_recommendations(
             [FakeRec("600002", "新强", "buy", 60.0, "突破")]))
@@ -1119,14 +1136,19 @@ class TestRotation:
         assert db.get_paper_position("600004") is not None
 
     def test_rotation_swaps_multiple(self, engine):
-        """一次调用里可以连换多只（不必等下一个 tick，也不要求满仓）。"""
+        """一次调用里可以连换多只（不必等下一个 tick，也不要求满仓）。
+
+        每只持仓的市值都在单票上限（总资产×20%）以内，因此「卖出的钱投得回去」；
+        两只换入票各不相同——同一个目标只承接一次卖出（见 test_target_used_once）。
+        """
         eng, db, prices = engine
         eng.settings.paper_max_positions = 10
         eng.ensure_account()
         db.upsert_paper_position("600004", "弱A", 1000, 10.0, "2026-10-20", "test", score=10.0)
-        db.upsert_paper_position("600001", "弱B", 1000, 50.0, "2026-10-20", "test", score=20.0)
+        db.upsert_paper_position("600001", "弱B", 1000, 10.0, "2026-10-20", "test", score=20.0)
         db.update_paper_cash(40000.0)
-        prices["600002"] = 100.0
+        prices["600001"] = 10.0
+        prices["600002"] = 50.0
         prices["600003"] = 30.0
 
         results = asyncio.run(eng.execute_recommendations([
@@ -1137,6 +1159,49 @@ class TestRotation:
         assert [r.code for r in results if r.side == "sell"] == ["600004", "600001"]
         assert db.get_paper_position("600004") is None
         assert db.get_paper_position("600001") is None
+
+    def test_target_used_once(self, engine):
+        """一个换入标的只承接一次卖出。
+
+        2026-11-03 实盘：三笔轮动的换入全是 301331，因为换入票要到买入阶段才建仓，
+        循环里它一直「未持仓」而反复当选——卖 3 只（94,687 元）只买回 1 只（14,000 元）。
+        """
+        eng, db, prices = engine
+        eng.settings.paper_max_positions = 10
+        eng.ensure_account()
+        db.upsert_paper_position("600004", "弱A", 1000, 10.0, "2026-10-20", "test", score=10.0)
+        db.upsert_paper_position("600001", "弱B", 1000, 10.0, "2026-10-20", "test", score=20.0)
+        db.update_paper_cash(40000.0)
+        prices["600001"] = 10.0
+        prices["600002"] = 50.0
+
+        # 只有一只换入票：卖完第一只就没有第二个目标了，必须停下
+        results = asyncio.run(eng.execute_recommendations([
+            FakeRec("600002", "强票甲", "buy", 70.0, "突破"),
+        ]))
+
+        assert [r.code for r in results if r.side == "sell"] == ["600004"]
+        assert db.get_paper_position("600001") is not None
+
+    def test_no_rotation_when_proceeds_cannot_be_reinvested(self, engine):
+        """卖出的钱投不回去就不换：弱市压仓时「换股」会退化成「降仓」。
+
+        2026-11-03：卖 3 只共 94,687 元，只投回 28,182 元，仓位 96% → 28.6%，
+        差额被 30% 总仓位上限堵死，之后每分钟的高分候选全部「可用资金不足一手」。
+        """
+        eng, db, prices = engine
+        eng.settings.paper_max_positions = 10
+        eng.ensure_account()
+        # 一只 50,000 元的持仓 = 总资产 60,000 的 83% > 单票上限 20%
+        db.upsert_paper_position("600004", "大仓位", 1000, 50.0, "2026-10-20", "test", score=10.0)
+        db.update_paper_cash(10000.0)
+        prices["600001"] = 50.0
+
+        results = asyncio.run(eng.execute_recommendations(
+            [FakeRec("600001", "新强", "buy", 70.0, "突破")]))
+
+        assert all(r.side != "sell" for r in results)
+        assert db.get_paper_position("600004") is not None
 
 
 class TestLotAttrs:

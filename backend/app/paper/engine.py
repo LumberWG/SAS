@@ -945,6 +945,25 @@ class PaperEngine:
                         weak_exposure * 100, self._regime_paused,
                     )
 
+        # ---- 总仓位上限（轮动与买入共用，故提前算） ----
+        # 盘中不设「收盘目标」硬上限：`paper_max_total_exposure`(80%) 是**收盘目标**，
+        # 由 eod_trim 在收盘前压回；盘中允许满仓，只受现金（等价 100%）与单票上限约束。
+        # 熔断 / 动态机制 / 弱市三档仍按各自上限**硬压**（那些是风控，不是目标）。
+        # 轮动必须在卖出**之前**知道这个上限：弱市压到 30% 时，卖掉一只大票的钱根本投不
+        # 回去，「换股」会退化成「降仓」，却挂着「轮动替换」的名义（2026-11-03 实例：
+        # 卖 3 只共 94,687 元，只投回 28,182 元，仓位 96% → 28.6%）。
+        effective_exposure = 1.0
+        if cb_tripped:
+            # 熔断最高优先级：总仓位压到 target（只降不升），凌驾于机制层与弱市档
+            effective_exposure = min(effective_exposure, cb_target)
+        elif dyn_enabled and dyn is not None:
+            # 动态机制降暴露：把总仓位上限压到机制层给出的上限（只降不升）
+            effective_exposure = min(effective_exposure, float(dyn["exposure_cap"]))
+        elif market_weak and weak_exposure > 0:
+            # 弱市降仓：总仓位上限压到 paper_weak_exposure，与回测 day_exposure 同口径
+            effective_exposure = min(effective_exposure, weak_exposure)
+        exposure_cap = total_asset * effective_exposure
+
         # ---- 轮动替换：不用满仓，有更明显的强票就换；一次可换多只 ----
         # 语义（2026-11-02 使用者口径）：`paper_max_positions` 是**上限**不是门槛，
         #   「明显更好的票」就该把差的换掉，不必等止损/止盈；持仓可以少于上限。
@@ -964,6 +983,14 @@ class PaperEngine:
             rot_pool = [*buy_candidates, *(rotation_candidates or [])]
             # 本轮仍被建议买入的代码：不许当轮动卖出对象（见 _weakest_rotatable 第 3 条）
             keep = {str(getattr(r, "code", "") or "") for r in rot_pool}
+            #: 已被本轮换入占用的目标：一个换入标的只能承接**一次**卖出。
+            #: 少了这个，`while` 会反复挑同一只「未持仓」的票当目标（它要到买入阶段才建仓），
+            #: 于是「卖出 3 只、换入同一只」——2026-11-03 日志：三笔轮动的换入全是 301331。
+            consumed: set[str] = set()
+            single_max = float(
+                getattr(self.settings, "paper_single_position_max", SINGLE_POSITION_MAX_RATIO)
+                or SINGLE_POSITION_MAX_RATIO
+            )
             while used < max_rot:
                 weak_code, weak_pos, weak_score = self._weakest_rotatable(
                     positions, today, keep=keep)
@@ -974,19 +1001,35 @@ class PaperEngine:
                     break
                 # 换入预算 = 卖出所得扣费后的金额。不够买一手就不换，
                 # 否则「卖得掉、买不进」，仓位被凭空降下来（与弱市降仓混在一起无法归因）。
-                proceeds = weak_price * int(weak_pos["shares"])
-                proceeds -= self.calc_fee("sell", proceeds)
+                weak_mv = weak_price * int(weak_pos["shares"])
+                proceeds = weak_mv - self.calc_fee("sell", weak_mv)
                 target = await self._pick_rotation_target(
                     rot_pool,
                     positions=positions,
                     prices=prices,
                     budget=proceeds,
                     weak_score=weak_score,
-                    exclude=sold_codes,
+                    exclude=sold_codes | consumed,
                 )
                 if target is None:
                     break
-                target_rec, target_score, _target_price = target
+                target_rec, target_score, target_price = target
+                # 「换股」必须真能把钱投回去：换入票能吸收的金额受三重约束——
+                # 卖出所得、单票上限（总资产×20%）、卖出后的总仓位剩余额度。
+                # 弱市压到 30% 时，卖一只大票的钱大部分投不回去，那不是换股而是降仓；
+                # 降仓是风控的职责（exposure 上限在买入端自然实现），不该借轮动之名完成，
+                # 否则归因完全错位（2026-11-03：卖 3 只 94,687 元只投回 28,182 元）。
+                available_after = max(
+                    0.0, exposure_cap - max(0.0, total_asset - (cash + proceeds)))
+                deployable = min(proceeds, total_asset * single_max, available_after)
+                if deployable < proceeds or deployable < target_price * LOT_SIZE:
+                    logger.info(
+                        "不轮动 %s（市值 %.0f 元）：换入 %s 最多只投回 %.0f 元"
+                        "（单票上限 %.0f / 仓位剩余 %.0f），卖了也买不回来",
+                        weak_code, weak_mv, target_rec.code, deployable,
+                        total_asset * single_max, available_after,
+                    )
+                    break
                 # 严格 T+1：只卖可卖批次，今仓留到次日
                 sold = db.reduce_paper_sellable(weak_code, int(weak_pos["shares"]), today)
                 if sold <= 0:
@@ -1001,6 +1044,7 @@ class PaperEngine:
                 )
                 positions.pop(weak_code, None)
                 sold_codes.add(weak_code)
+                consumed.add(target_rec.code)   # 该目标已用掉，下一轮必须换别的票
                 used += 1
                 results.append(TradeResult(
                     weak_code, weak_pos.get("name", ""), "sell", sold,
@@ -1037,20 +1081,7 @@ class PaperEngine:
         max_positions = self.settings.paper_max_positions
         full_score = self.settings.paper_full_score
         half_score = self.settings.paper_half_score
-        # 盘中不设「收盘目标」硬上限：`paper_max_total_exposure`(80%) 是**收盘目标**，
-        # 由 eod_trim 在收盘前压回；盘中允许满仓，只受现金（等价 100%）与单票上限约束。
-        # 熔断 / 动态机制 / 弱市三档仍按各自上限**硬压**（那些是风控，不是目标）。
-        effective_exposure = 1.0
-        if cb_tripped:
-            # 熔断最高优先级：总仓位压到 target（只降不升），凌驾于机制层与弱市档
-            effective_exposure = min(effective_exposure, cb_target)
-        elif dyn_enabled and dyn is not None:
-            # 动态机制降暴露：把总仓位上限压到机制层给出的上限（只降不升）
-            effective_exposure = min(effective_exposure, float(dyn["exposure_cap"]))
-        elif market_weak and weak_exposure > 0:
-            # 弱市降仓：总仓位上限压到 paper_weak_exposure，与回测 day_exposure 同口径
-            effective_exposure = min(effective_exposure, weak_exposure)
-        exposure_cap = total_asset * effective_exposure
+        # `exposure_cap` 在轮动之前就算好了（见上），这里按**卖出后的现金**重算剩余额度
         available_budget = max(0.0, exposure_cap - max(0.0, total_asset - cash))
         candidates: list[tuple[float, object, float]] = []
         for rec in buy_candidates:
