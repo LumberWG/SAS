@@ -118,6 +118,12 @@ class LiveTrader:
         self._executed = 0
         #: 最近一批「因队列容量未入队」的买入信号（五段式③的判定证据）
         self._queue_rejected: list[dict[str, Any]] = []
+        #: 上一批被拒名单的指纹：名单没变就不再打日志（内容相同的 18 条
+        #: 每分钟重打一遍，2026-11-03 一天刷了 107 行，新信息被淹掉）
+        self._queue_reject_log_key: str = ""
+        #: 自本次启动累计「因容量未入队」条次：`_queue_rejected` 只留最后一批，
+        #: 看不出「一共被挡掉多少只次」，靠这个计数回答（重启归零，不做持久化）
+        self._queue_reject_total: int = 0
         #: 最近一批「被判定规则/切入点拒掉」的买入信号（五段式④⑤的证据）
         self._entry_rejected: list[dict[str, Any]] = []
         #: 并行模拟账本：tag -> 独立队列 + 独立引擎（共享信号、各自处置参数）
@@ -225,28 +231,50 @@ class LiveTrader:
                 _enqueue(rec, "sell")
 
         # 买入：高分优先占名额；已在队列的同一只票更新建议不重复占位
+        #
+        # 已持仓的票**不参与容量判定**：引擎下一步必然回「已持仓」把它踢出队列，
+        # 让它占名额等于每分钟白扔一个坑（2026-11-03 实盘：301331 恩威医药 83.3 分，
+        # 当天 09:30 已建仓，却排在 queue_rejected 第一位）。照常入队是刻意的——
+        # 并行账本各有各的持仓，影子账本不能因为主账本持有就丢信号。
+        held = {p["code"] for p in db.list_paper_positions()}
+        overflow: list[Any] = []
         buys.sort(key=_signal_score, reverse=True)
         for rec in buys:
             code = str(getattr(rec, "code", "") or "")
             if top_m > 0:
-                holding = {c for c, s in self._pending.items() if s.action == "buy"}
-                if code not in holding and len(holding) >= top_m:
+                holding = {
+                    c for c, s in self._pending.items()
+                    if s.action == "buy" and c not in held
+                }
+                if code not in holding and code not in held and len(holding) >= top_m:
                     rejected.append({
                         "code": code,
                         "name": str(getattr(rec, "name", "") or code),
                         "score": round(_signal_score(rec), 1),
                         "reason": f"交易队列已满（{top_m} 只，按评分择优）",
                     })
+                    overflow.append(rec)
                     continue
             _enqueue(rec, "buy")
 
+        # 五段式③收口：因容量被拒的票转存候补，不直接丢掉。
+        # 它们此前进不了 _pending，于是也进不了 _backlog、更当不了轮动候选
+        # （``rotation_candidates`` 只认候补），高分票就此从视野里彻底消失——
+        # 80 分以上的票被 5 个名额挡掉，比「仓位不够」更难发现（WORKLOG 十一节 2026-11-03）。
+        parked = sum(1 for rec in overflow if self._backlog_put(rec, now))
+        for item in rejected:
+            item["deferred"] = item["code"] in self._backlog
+
         self._queue_rejected = rejected
-        if rejected:
+        self._queue_reject_total += len(rejected)
+        # 名单没变就不再打日志：每分钟重复同样的 18 条，真正的变化会被淹掉
+        key = ",".join(f"{r['code']}({r['score']})" for r in rejected)
+        if rejected and key != self._queue_reject_log_key:
             logger.info(
-                "交易队列已满（上限 %d）：%d 条买入未入队 %s",
-                top_m, len(rejected),
-                ", ".join(f"{r['code']}({r['score']})" for r in rejected),
+                "交易队列已满（上限 %d）：%d 条买入未入队，其中 %d 条转入候补 %s",
+                top_m, len(rejected), parked, key,
             )
+        self._queue_reject_log_key = key
         if added:
             logger.info(
                 "实时队列更新 %d 条（%s），待执行 %d 条", added, source, len(self._pending)
@@ -334,6 +362,8 @@ class LiveTrader:
         self._last_prices.clear()
         self._last_error = ""
         self._queue_rejected.clear()
+        self._queue_reject_log_key = ""
+        self._queue_reject_total = 0
         self._entry_rejected.clear()
         self._sim_last.clear()
         for run in self._sim.values():
@@ -350,6 +380,39 @@ class LiveTrader:
         for run in self._sim.values():
             for code in [c for c, s in run.pending.items() if s.expire_at <= now]:
                 run.pending.pop(code, None)
+
+    def _backlog_put(self, rec, now: datetime) -> bool:
+        """把一条「连交易队列都没挤进去」的买入信号放进候补队列。
+
+        与 :meth:`_defer_skips` 分工：那条路处理「已入队、tick 时被判满仓/没钱」，
+        这里处理「队列容量满，压根没入队」。两者对下游必须等价——都要能在名额
+        释放后补位，也都要能当轮动候选（``rotation_candidates`` 只读候补队列）。
+
+        Args:
+            rec: Recommendation 对象
+            now: 当前时间（决定候补有效期）
+
+        Returns:
+            是否新增。已存在、开关关闭、或候补已满都返回 False。
+        """
+        if not bool(getattr(self.settings, "paper_backlog_enabled", False)):
+            return False
+        code = str(getattr(rec, "code", "") or "")
+        if not code or code in self._backlog:
+            return False
+        if len(self._backlog) >= int(getattr(self.settings, "paper_backlog_max", 0) or 0):
+            return False
+        self._backlog[code] = PendingSignal(
+            code=code,
+            name=str(getattr(rec, "name", "") or code),
+            action="buy",
+            reason=str(getattr(rec, "reason", "") or "队列容量已满，转入候补"),
+            created_at=now,
+            expire_at=self._backlog_expiry(now),
+            price_at_signal=getattr(rec, "price", None),
+            score=_signal_score(rec),
+        )
+        return True
 
     def _defer_skips(self, results, now: datetime) -> set[str]:
         """把「名额/资金不足」的买入信号转入候补队列，返回被延后的代码集合。
@@ -787,6 +850,8 @@ class LiveTrader:
             # 五段式③：队列容量与「因容量被拒」的买入候选（0=不限制）
             "queue_top_m": int(getattr(self.settings, "paper_trade_queue_top_m", 0) or 0),
             "queue_rejected": list(self._queue_rejected),
+            # 只保留最后一批看不出「一共被挡掉多少」，故另给累计条次（重启归零）
+            "queue_rejected_total": int(self._queue_reject_total),
             # 五段式⑤：切入点参数与本轮被拒原因
             "entry_max_chase": float(getattr(self.settings, "paper_entry_max_chase", 0.0) or 0.0),
             "entry_pullback": float(getattr(self.settings, "paper_entry_pullback", 0.0) or 0.0),

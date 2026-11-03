@@ -688,6 +688,81 @@ class TestQueueTopM:
         assert len(trader._pending) == 5
         assert trader._queue_rejected == []
 
+    def test_held_code_does_not_take_slot(self, monkeypatch, tmp_path):
+        """已持仓的票不占名额。
+
+        引擎对已持仓的买入建议下一步必然回「已持仓」并把它踢出队列，占名额
+        等于白扔一个坑。2026-11-03 实盘就是：301331 恩威医药当日 09:30 已建仓、
+        评分 83.3，却排在 queue_rejected 第一位，把 600887(82.6) 挤出队列。
+        入队本身保留（并行账本各有各的持仓，不能替它们决定）。
+        """
+        trader, live_module = self._trader(monkeypatch, tmp_path, top_m=1)
+        live_module.db.upsert_paper_position(
+            "600001", "测试A", 100, 10.0, "2026-11-03", "测试")
+
+        added = trader.submit([
+            self._rec(live_module, "600001", 90.0),
+            self._rec(live_module, "600002", 60.0),
+        ])
+
+        assert added == 2
+        assert set(trader._pending) == {"600001", "600002"}
+        assert trader._queue_rejected == []
+
+    def test_overflow_goes_to_backlog(self, monkeypatch, tmp_path):
+        """容量被拒的票转存候补，而不是从视野里消失。
+
+        没进过 ``_pending`` 的票进不了 ``_backlog``，也就当不了轮动候选
+        （``rotation_candidates`` 只读候补），高分票会被 5 个名额静默挡掉。
+        """
+        trader, live_module = self._trader(monkeypatch, tmp_path, top_m=1)
+        added = trader.submit([
+            self._rec(live_module, "600001", 30.0),
+            self._rec(live_module, "600002", 80.0),
+            self._rec(live_module, "600003", 50.0),
+        ])
+
+        assert added == 1
+        # 队列本体仍是 top_m 条，候补不是第二条队列，只在名额释放时补位
+        assert set(trader._pending) == {"600002"}
+        assert set(trader._backlog) == {"600003", "600001"}
+        assert [r["code"] for r in trader._queue_rejected] == ["600003", "600001"]
+        assert all(r["deferred"] for r in trader._queue_rejected)
+        assert trader._backlog["600003"].score == 50.0
+
+    def test_overflow_backlog_respects_max(self, monkeypatch, tmp_path):
+        """候补有上限，满了就不再收，被拒名单照旧留痕。"""
+        trader, live_module = self._trader(monkeypatch, tmp_path, top_m=1)
+        monkeypatch.setattr(trader.settings, "paper_backlog_max", 1)
+
+        trader.submit([
+            self._rec(live_module, "600001", 30.0),
+            self._rec(live_module, "600002", 80.0),
+            self._rec(live_module, "600003", 50.0),
+        ])
+
+        assert set(trader._backlog) == {"600003"}       # 高分先占候补
+        flags = {r["code"]: r["deferred"] for r in trader._queue_rejected}
+        assert flags == {"600003": True, "600001": False}
+
+    def test_reject_log_deduped_but_counted(self, monkeypatch, tmp_path, caplog):
+        """同一份被拒名单重复提交只留一条日志，累计条次仍要涨。"""
+        trader, live_module = self._trader(monkeypatch, tmp_path, top_m=1)
+        recs = [
+            self._rec(live_module, "600001", 10.0),
+            self._rec(live_module, "600002", 90.0),
+        ]
+
+        with caplog.at_level("INFO", logger="sas.paper.live"):
+            trader.submit(recs)
+            once = [r for r in caplog.records if "交易队列已满" in r.getMessage()]
+            trader.submit(recs)
+            twice = [r for r in caplog.records if "交易队列已满" in r.getMessage()]
+
+        assert len(once) == 1
+        assert len(twice) == 1          # 名单没变 → 不再刷屏
+        assert trader._queue_reject_total == 2
+
 
 class TestEntryPoint:
     """五段式⑤：切入点——不追高 / 回踩 / 信号价缺失不限制。"""
