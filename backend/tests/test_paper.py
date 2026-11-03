@@ -764,6 +764,54 @@ class TestQueueTopM:
         assert trader._queue_reject_total == 2
 
 
+class TestRotationSoldGuard:
+    """轮动卖出的票当日不再买入：盘中分析每分钟重生信号，只在 tick 里剔一次不够。"""
+
+    def _trader(self, monkeypatch, tmp_path):
+        from app.data.cache import Database
+
+        from app.paper import live as live_module
+
+        db = Database(tmp_path / "rot.db")
+        monkeypatch.setattr(live_module, "db", db)
+        monkeypatch.setattr("app.data.cache.db", db, raising=False)
+        trader = live_module.LiveTrader()
+        monkeypatch.setattr(trader.settings, "paper_live_enabled", True, raising=False)
+        monkeypatch.setattr(trader, "auto_trade_enabled", lambda: True)
+        return trader, live_module
+
+    @staticmethod
+    def _rec(live_module, code, score):
+        return live_module.SimpleNamespace(
+            code=code, name=code, action="buy", reason="突破", price=10.0, score=score)
+
+    def test_sold_code_not_bought_same_day(self, monkeypatch, tmp_path):
+        from datetime import datetime
+
+        trader, live_module = self._trader(monkeypatch, tmp_path)
+        trader._rotation_sold["600001"] = datetime.now().strftime("%Y-%m-%d")
+
+        added = trader.submit([
+            self._rec(live_module, "600001", 90.0),
+            self._rec(live_module, "600002", 80.0),
+        ])
+
+        assert added == 1
+        assert set(trader._pending) == {"600002"}
+        assert trader.status()["rotation_sold_today"] == ["600001"]
+
+    def test_stale_mark_expires_next_day(self, monkeypatch, tmp_path):
+        """隔日的卖出记录不该继续挡：黑名单只在当日有效。"""
+        trader, live_module = self._trader(monkeypatch, tmp_path)
+        trader._rotation_sold["600003"] = "2020-01-01"
+
+        added = trader.submit([self._rec(live_module, "600003", 70.0)])
+
+        assert added == 1
+        assert set(trader._pending) == {"600003"}
+        assert trader._rotation_sold == {}
+
+
 class TestEntryPoint:
     """五段式⑤：切入点——不追高 / 回踩 / 信号价缺失不限制。"""
 
@@ -1022,6 +1070,28 @@ class TestRotation:
         assert [r.side for r in results] == ["sell", "buy"]
         assert db.get_paper_position("600004") is None
         assert db.get_paper_position("600001") is not None
+
+    def test_stock_with_buy_signal_not_rotated(self, engine):
+        """建仓分 0（未知）但当前仍是「建议买入」的持仓，不得当最弱卖掉。
+
+        2026-11-03 实盘：301314 科瑞思 建仓分 0、当前分 100，被轮动当最弱卖掉 400 股，
+        同一 tick 又按 100 分买回 300 股——白付 24.12+5.14 元费用，持仓还少了一手。
+        「建仓分缺失」不能当「建仓分最差」用。
+        """
+        eng, db, prices = engine
+        eng.settings.paper_max_positions = 10
+        eng.ensure_account()
+        self._seed(db, score=0.0)
+        prices["600001"] = 50.0
+        prices["600004"] = 10.0
+
+        results = asyncio.run(eng.execute_recommendations([
+            FakeRec("600004", "科瑞思", "buy", 100.0, "ML"),   # 同一只票仍是买入建议
+            FakeRec("600001", "新强", "buy", 60.0, "突破"),
+        ]))
+
+        assert all(r.side != "sell" for r in results)
+        assert db.get_paper_position("600004") is not None
 
     def test_rotation_swaps_multiple(self, engine):
         """一次调用里可以连换多只（不必等下一个 tick，也不要求满仓）。"""

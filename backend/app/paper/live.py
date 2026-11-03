@@ -121,6 +121,8 @@ class LiveTrader:
         #: 上一批被拒名单的指纹：名单没变就不再打日志（内容相同的 18 条
         #: 每分钟重打一遍，2026-11-03 一天刷了 107 行，新信息被淹掉）
         self._queue_reject_log_key: str = ""
+        #: 当日被轮动卖出的代码 → 日期：当日不再买入，防止「卖完下一分钟又买回」
+        self._rotation_sold: dict[str, str] = {}
         #: 自本次启动累计「因容量未入队」条次：`_queue_rejected` 只留最后一批，
         #: 看不出「一共被挡掉多少只次」，靠这个计数回答（重启归零，不做持久化）
         self._queue_reject_total: int = 0
@@ -229,6 +231,24 @@ class LiveTrader:
                 buys.append(rec)
             else:
                 _enqueue(rec, "sell")
+
+        # 当日被轮动卖出的代码不再买入：盘中分析每分钟重生信号，
+        # 不在入口挡一次，tick 里剔掉的下一分钟就回来了（见 tick 里的同一段说明）。
+        today_key = now.strftime("%Y-%m-%d")
+        self._rotation_sold = {
+            c: d for c, d in self._rotation_sold.items() if d == today_key
+        }
+        if self._rotation_sold:
+            dropped = [
+                str(getattr(r, "code", "") or "") for r in buys
+                if str(getattr(r, "code", "") or "") in self._rotation_sold
+            ]
+            if dropped:
+                buys = [
+                    r for r in buys
+                    if str(getattr(r, "code", "") or "") not in self._rotation_sold
+                ]
+                logger.info("跳过当日已轮动卖出的买入信号：%s", ", ".join(sorted(set(dropped))))
 
         # 买入：高分优先占名额；已在队列的同一只票更新建议不重复占位
         #
@@ -364,6 +384,7 @@ class LiveTrader:
         self._queue_rejected.clear()
         self._queue_reject_log_key = ""
         self._queue_reject_total = 0
+        self._rotation_sold.clear()
         self._entry_rejected.clear()
         self._sim_last.clear()
         for run in self._sim.values():
@@ -695,6 +716,25 @@ class LiveTrader:
         deferred = self._defer_skips(results, now)
 
         pending_changed = False
+
+        # 轮动卖出的票，当日不再买入。
+        # 引擎里已有两道闸（选弱时排除「本轮仍建议买入」的票、卖出票不进本轮买入候选），
+        # 但盘中分析每分钟都会重生信号，只在单次调用里剔一次不够：不记到日级黑名单，
+        # 下一分钟的扫描就能把它买回来（2026-11-03：301314 科瑞思 09:30:01 卖 400 买回 300）。
+        rot_sold = {
+            r.code for r in results
+            if r.side == "sell" and "轮动替换" in (r.reason or "")
+        }
+        if rot_sold:
+            day = now.strftime("%Y-%m-%d")
+            for code in rot_sold:
+                self._rotation_sold[code] = day
+                self._pending.pop(code, None)
+                self._backlog.pop(code, None)
+            pending_changed = True
+            logger.info(
+                "轮动卖出后当日不再买入：%s", ", ".join(sorted(rot_sold)))
+
         for code in list(self._pending):
             if code in kept_buys:  # 窗口外的买单留到下个开盘，不算本轮未成交
                 continue
@@ -852,6 +892,10 @@ class LiveTrader:
             "queue_rejected": list(self._queue_rejected),
             # 只保留最后一批看不出「一共被挡掉多少」，故另给累计条次（重启归零）
             "queue_rejected_total": int(self._queue_reject_total),
+            # 当日被轮动卖出、因此当日不再买入的代码（「卖完又买回」的证据）
+            "rotation_sold_today": sorted(
+                c for c, d in self._rotation_sold.items()
+                if d == now.strftime("%Y-%m-%d")),
             # 五段式⑤：切入点参数与本轮被拒原因
             "entry_max_chase": float(getattr(self.settings, "paper_entry_max_chase", 0.0) or 0.0),
             "entry_pullback": float(getattr(self.settings, "paper_entry_pullback", 0.0) or 0.0),

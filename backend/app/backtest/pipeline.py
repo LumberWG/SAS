@@ -1704,6 +1704,10 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
         #   - 当日买入的持仓不参与选弱（T+1）；
         #   - 已在卖出队列里的票不参与选弱：时间止损/收盘确认止损本来就要卖它，
         #     再记一笔「轮动」只是空动作，却会吃掉当日唯一一次配额；
+        #   - **本轮仍是买入建议的持仓不参与选弱**（2026-11-03 补）：同一只票同时是
+        #     「最弱持仓」和「最强候选」是自相矛盾，会导致「卖掉又买回」——线上实测
+        #     301314 科瑞思建仓分 0（未知）、当前分 100，被卖掉 400 股又买回 300 股，
+        #     白付两笔费用还少一手。建仓分缺失不能当建仓分最差用。
         #   - 换入票必须未持仓、评分 >= half_score（低于半额分的票买入阶段本来就会丢，
         #     线上同样不允许为这种票卖持仓）。
         # 2026-11-02 口径：`max_positions` 是上限不是门槛 —— 不满仓也能换，
@@ -1713,6 +1717,7 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
                 (b for b in buys if b["code"] not in positions),
                 key=lambda x: -x["score"],
             )
+            buy_codes = {b["code"] for b in buys}
             taken: set[str] = set()
             while rotation_used < rotation_max_per_day:
                 best = next((b for b in pool if b["code"] not in taken), None)
@@ -1721,6 +1726,8 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
                 weak_code, weak_score = None, 0.0
                 for code, p in positions.items():
                     if p["buy_date"] >= date or code in pending_sells:
+                        continue
+                    if code in buy_codes:
                         continue
                     if weak_code is None or p["score"] < weak_score:
                         weak_code, weak_score = code, p["score"]

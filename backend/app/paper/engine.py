@@ -713,14 +713,19 @@ class PaperEngine:
     # 轮动替换（选弱 + 选强）
     # ------------------------------------------------------------------
     def _weakest_rotatable(
-        self, positions: dict, today: str
+        self, positions: dict, today: str, keep: set[str] | None = None
     ) -> tuple[str | None, dict | None, float]:
         """选出可以被自动轮动卖出的最弱持仓（按建仓评分）。
 
-        排除两类持仓：
+        排除三类持仓：
 
         - **手动建仓**（``strategy`` 含「手动」）：不打分、代表用户意图，程序不该卖掉；
-        - **当日买入**（``buy_date >= today``）：T+1 卖不掉。
+        - **当日买入**（``buy_date >= today``）：T+1 卖不掉；
+        - **本轮仍被建议买入的**（``keep``：买入候选 ∪ 候补候选）：同一只票在两条口径下
+          同时是「最弱」和「最强」是自相矛盾。2026-11-03 实盘：301314 科瑞思**建仓分 0**
+          （0 = 未知，不是真的差）、**当前分 100**，于是被判为最弱卖掉 400 股，同一 tick 又
+          按 100 分买回 300 股 —— 白付 24.12+5.14 元费用，持仓还少了一手。
+          结论：**建仓分缺失不能当建仓分最差用**；只要本轮还在建议买入，就不许当卖出对象。
 
         T+1 的判断放在「选弱」而不是「成交前」：原来的实现先选最弱的、再检查它是否
         当日买入，于是今天恰好买了最弱那只时整个轮动被挡掉，哪怕另一只持仓明明可换。
@@ -728,10 +733,13 @@ class PaperEngine:
         weak_code: str | None = None
         weak_pos: dict | None = None
         weak_score = 0.0
+        skip = keep or set()
         for code, pos in positions.items():
             if "手动" in str(pos.get("strategy") or ""):
                 continue
             if str(pos.get("buy_date") or "") >= today:
+                continue
+            if code in skip:
                 continue
             score = float(pos.get("score") or 0.0)
             if weak_pos is None or score < weak_score:
@@ -949,13 +957,16 @@ class PaperEngine:
         #   摩擦、名额空着等下一轮，等于凭空降仓。见 BACKTEST_LOG 记录 #91。
         # 为什么循环：一次 API 调用里可以连换多只（含全换），不必等下一个 tick；
         #   每轮重新取「当前最弱」，被换掉的票即退出候选池（sold_codes 防回转买入）。
+        sold_codes: set[str] = set()
         if self.settings.paper_rotation_enabled and not weak_pause_all:
             used = db.count_paper_trades("轮动替换", today, side="sell")
             max_rot = int(self.settings.paper_rotation_max_per_day)
             rot_pool = [*buy_candidates, *(rotation_candidates or [])]
-            sold_codes: set[str] = set()
+            # 本轮仍被建议买入的代码：不许当轮动卖出对象（见 _weakest_rotatable 第 3 条）
+            keep = {str(getattr(r, "code", "") or "") for r in rot_pool}
             while used < max_rot:
-                weak_code, weak_pos, weak_score = self._weakest_rotatable(positions, today)
+                weak_code, weak_pos, weak_score = self._weakest_rotatable(
+                    positions, today, keep=keep)
                 if weak_code is None or weak_pos is None:
                     break
                 weak_price = await self._latest_price(weak_code, prices)
@@ -1003,6 +1014,19 @@ class PaperEngine:
                     "轮动替换：卖出 %s（建仓 %.0f 分），换入 %s（%.0f 分），今日第 %d 只",
                     weak_code, weak_score, target_rec.code, target_score, used,
                 )
+
+        # 轮动刚卖掉的票不进本轮买入候选：卖出与买入是两条独立分支，队列里留着它的旧
+        # 买单就会「卖完立刻买回」。2026-11-03 实盘：301314 科瑞思 卖 400 又买回 300。
+        # 卖出侧已有 keep 规则挡住主因，这里是同一 tick 内的兜底。
+        if sold_codes:
+            before = len(buy_candidates)
+            buy_candidates = [
+                r for r in buy_candidates
+                if str(getattr(r, "code", "") or "") not in sold_codes
+            ]
+            if len(buy_candidates) != before:
+                logger.info(
+                    "轮动已卖出，本轮不再买回：%s", ", ".join(sorted(sold_codes)))
 
         # ---- 买入（第 3 次排序：评分加权仓位 + 评分分档 + 总仓位上限） ----
         # 规则：
