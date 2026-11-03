@@ -1106,12 +1106,27 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
         if params.t_up_sell and open_chg > 0 and high is not None and high >= open_px * (1 + params.t_up_sell):
             _t_sell(code, date, open_px * (1 + params.t_up_sell), size, "做T卖")
             return
-        # 下跌分级加仓（隔夜）
+        # 下跌分级加仓（隔夜）：与分钟版同序（elif 互斥）+ 套单票/总仓位上限，
+        # 避免 cash*0.95 把单票打满、组合超配（与线上 t_tick 同口径）。
         if open_chg < 0:
-            if params.t_down_add and low is not None and low <= open_px * (1 - params.t_down_add):
-                _t_buy(code, date, open_px * (1 - params.t_down_add), cash * float(params.t_down_add))
+            mv = market_value(date, "open")
+            ta = cash + mv
+            pos_px = price_on(code, date, "open") or p["cost"]
+            single_room = max(0.0, ta * single_ratio - p["shares"] * pos_px)
+            total_room = max(0.0, ta * day_exposure - mv)
+            budget = 0.0
+            thr = 0.0
             if params.t_down_full and low is not None and low <= open_px * (1 - params.t_down_full):
-                _t_buy(code, date, open_px * (1 - params.t_down_full), cash * 0.95)
+                budget = cash * 0.95
+                thr = float(params.t_down_full)
+            elif params.t_down_add and low is not None and low <= open_px * (1 - params.t_down_add):
+                budget = cash * float(params.t_down_add)
+                thr = float(params.t_down_add)
+            budget = min(budget, single_room, total_room)
+            if budget > 0:
+                est = int(budget / (open_px * (1 - thr)) / LOT) * LOT
+                if est >= LOT:
+                    _t_buy(code, date, open_px * (1 - thr), est)
             # 反弹减仓：只减「昨日及更早」的加仓批次（今仓 T+1 不可卖）
             sellable_added = max(
                 0, int(p.get("t_added_shares") or 0) - int(p.get("t_today_added") or 0)
@@ -1246,11 +1261,17 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
                             )
                             continue
                 if int(p.get("t_down_armed") or 0) == 0:
+                    mv = market_value(date, "open")
+                    ta = cash + mv
+                    pos_px = price_on(code, date, "open") or p["cost"]
+                    single_room = max(0.0, ta * single_ratio - p["shares"] * pos_px)
+                    total_room = max(0.0, ta * day_exposure - mv)
                     budget = 0.0
                     if params.t_down_full and px <= day_open * (1 - float(params.t_down_full)):
                         budget = cash * 0.95
                     elif params.t_down_add and px <= day_open * (1 - float(params.t_down_add)):
                         budget = cash * float(params.t_down_add)
+                    budget = min(budget, single_room, total_room)
                     if budget > 0:
                         est = int(budget / px / LOT) * LOT
                         if est >= LOT:

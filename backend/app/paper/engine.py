@@ -1402,6 +1402,33 @@ class PaperEngine:
         cash = float(account["cash"])
         trades = []
 
+        # 做T加仓的总仓位/单票上限：与买入、轮动同口径，避免 ``cash * 0.95`` 式近乎满仓加仓
+        # （单票打满、组合超配）。盘中常规上限=100%（80% 是收盘目标，由 eod_trim 压回），
+        # 弱市/熔断/动态机制按下限硬压。
+        total_asset = await self.total_asset(prices)
+        single_ratio = float(
+            getattr(self.settings, "paper_single_position_max", SINGLE_POSITION_MAX_RATIO)
+            or SINGLE_POSITION_MAX_RATIO
+        )
+        eff_exposure = 1.0
+        if bool(getattr(self.settings, "paper_circuit_breaker_enabled", False)):
+            cb = await self._circuit_breaker(today, total_asset)
+            if bool(cb["tripped"]):
+                eff_exposure = min(eff_exposure, float(cb["target_exposure"]))
+        elif bool(getattr(self.settings, "paper_dynamic_exposure", False)):
+            dyn = await self._dynamic_regime(today)
+            if dyn is not None:
+                eff_exposure = min(eff_exposure, float(dyn["exposure_cap"]))
+        elif (
+            bool(getattr(self.settings, "paper_regime_weak_pause", False))
+            and int(getattr(self.settings, "paper_regime_ma", 0) or 0) > 0
+            and await self._index_is_weak(today)
+        ):
+            we = float(getattr(self.settings, "paper_weak_exposure", 0.0) or 0.0)
+            if we > 0:
+                eff_exposure = min(eff_exposure, we)
+        exposure_cap = total_asset * eff_exposure
+
         def _num(v):
             try:
                 f = float(v)
@@ -1526,6 +1553,12 @@ class PaperEngine:
                     elif settings.paper_t_down_add and low <= open_px * (1 - float(settings.paper_t_down_add)):
                         budget = cash * float(settings.paper_t_down_add)
                     if budget > 0:
+                        # 套上单票上限与总仓位上限：单票市值不超过总资产×single_ratio，
+                        # 加仓后总持仓不超过 exposure_cap（防止单票打满/组合超配）。
+                        pos_mv = total * price
+                        single_room = max(0.0, total_asset * single_ratio - pos_mv)
+                        total_room = max(0.0, exposure_cap - (total_asset - cash))
+                        budget = min(budget, single_room, total_room)
                         est = int(budget / price / LOT_SIZE) * LOT_SIZE
                         if est >= LOT_SIZE:
                             amount = price * est

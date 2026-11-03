@@ -488,9 +488,18 @@ paper_position_lots(code, shares, cost_price, buy_date, tag)
    4b 分级加仓（每票每日最多一次，t_down_armed 防重复）：
       最低价 ≤ 开盘价 × (1 - paper_t_down_full 0.20) → 预算 = 现金 × 0.95
       否则 最低价 ≤ 开盘价 × (1 - paper_t_down_add 0.20) → 预算 = 现金 × paper_t_down_add
-      → 买入 floor(预算/price/100)×100 股，tag=t_add（今仓，次日可卖）
+      → 预算再与「单票剩余额度」「总仓位剩余额度」取 min（见下），
+        买入 floor(预算/price/100)×100 股，tag=t_add（今仓，次日可卖）
 ```
 - 触发用快照的 `open/high/low/prev_close`，成交价用当 tick 的实时价 `price`；
+- **加仓预算三道护栏（2026-11-03 定稿，线上 `t_tick` + 回测 `pipeline` 日K版/分钟版同口径）**：
+  先按现金比例算出 `budget0`（满仓档 `cash×0.95`、浅档 `cash×t_down_add`），再与下面两者取 `min`，
+  最后才整手估算——避免「单票打满、组合超配」（`#93` 已指出 `cash*0.95` 把单票顶到 73%、仓位 96%）：
+  1) **单票上限**：`single_room = max(0, 总资产 × paper_single_position_max(0.20) − 该票当前市值)`；
+  2) **总仓位上限**：`total_room = max(0, 总资产 × effective_exposure − 当前已投入)`，
+     其中 `effective_exposure` 盘中常规 = 1.0（80% 是收盘目标、由 `eod_trim` 压回），
+     弱市 / 熔断 / 动态机制按下限硬压（与买入、轮动共用同一套 `effective_exposure` 计算）。
+  即下跌加仓**不会**把单票推过 20%、也不会把组合推过当时生效的总仓位上限；现金不足的整手回退循环照旧。
 - 每日跨交易日只重置 `t_down_armed`（每票每日最多加仓一次）；`t_t_sold` **跨日保留**直到买回完成，
   否则「当日没买回」会静默变成永久减仓，与回测口径不一致；
 - 加仓预算按**现金比例**计算（`paper_t_down_add` 在 config 注释里写「相对总仓」，实现是相对现金）；
@@ -509,6 +518,7 @@ day_open = 首根 5m 的开盘（缺失用首根收盘）
   ② 涨停卖半：px ≥ 昨收 × 1.095 且可卖底仓 ≥ 100 → 卖一半（t_half_date 按日重置）
   ③ 倒T：day_open > 昨收 且 px ≥ day_open × (1+t_up_sell) → 卖 t_size 底仓
   ④ 低开日（day_open < 昨收）：反弹减仓（只减昨日及更早的 t_add 批次）→ 分级加仓（每日一次）
+     · 分级加仓预算同样先现金比例、再与「单票剩余额度 / 总仓位剩余额度」取 min（同线上 t_tick，2026-11-03）
 收尾：仍待买回 → t_buyback_shares（次日开盘无条件恢复底仓）
 ```
 - **crash guard 只用开盘跌幅**：`指数开盘 / 前一日收盘 ≤ −t_crash_guard`，不用当日收盘（未来函数）；
@@ -731,7 +741,7 @@ peak = max(历史峰值总资产, 当前总资产)；dd = 1 − 总资产 / peak
 | `paper_t_size` | 0.25 | 单次做T比例（相对总持仓） | engine |
 | `paper_t_up_sell` | 0.05 | 开盘涨且盘中触此幅度 → 卖出 t_size | engine |
 | `paper_t_up_buyback` | 0.03 | 回调买回线（相对 max(开盘, 昨收)） | engine |
-| `paper_t_down_add / down_full` | 0.20 / 0.20 | 低开达此跌幅加仓（0.20≈关闭） | engine |
+| `paper_t_down_add / down_full` | 0.20 / 0.20 | 低开达此跌幅加仓（0.20≈关闭）；预算先现金比例、再与单票上限(20%)/总仓位上限取 min | engine |
 | `paper_t_rebound_sell` | 0.02 | 反弹至跌幅小于此 → 减加仓批次 | engine |
 | `paper_t_limit_sell_half` | True | 涨停（弱封板）卖 1/2 | engine |
 | `paper_t_crash_guard` | 0.02 | 大盘当日跌幅超此暂停做T | engine |
