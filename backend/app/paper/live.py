@@ -123,6 +123,10 @@ class LiveTrader:
         self._queue_reject_log_key: str = ""
         #: 当日被轮动卖出的代码 → 日期：当日不再买入，防止「卖完下一分钟又买回」
         self._rotation_sold: dict[str, str] = {}
+        #: `_rotation_sold` 已经按日期从 `paper_trades` 灌过库的日期标记。
+        #: 必须回库读而不是只放内存：重启（每日 SASRestart、部署重启）会把内存清空，
+        #: 只靠内存时上午卖掉的票下午就能被买回（2026-11-03 实盘即如此）。
+        self._rotation_sold_day: str = ""
         #: 自本次启动累计「因容量未入队」条次：`_queue_rejected` 只留最后一批，
         #: 看不出「一共被挡掉多少只次」，靠这个计数回答（重启归零，不做持久化）
         self._queue_reject_total: int = 0
@@ -234,19 +238,16 @@ class LiveTrader:
 
         # 当日被轮动卖出的代码不再买入：盘中分析每分钟重生信号，
         # 不在入口挡一次，tick 里剔掉的下一分钟就回来了（见 tick 里的同一段说明）。
-        today_key = now.strftime("%Y-%m-%d")
-        self._rotation_sold = {
-            c: d for c, d in self._rotation_sold.items() if d == today_key
-        }
-        if self._rotation_sold:
+        banned = self._rotation_sold_codes(now.strftime("%Y-%m-%d"))
+        if banned:
             dropped = [
                 str(getattr(r, "code", "") or "") for r in buys
-                if str(getattr(r, "code", "") or "") in self._rotation_sold
+                if str(getattr(r, "code", "") or "") in banned
             ]
             if dropped:
                 buys = [
                     r for r in buys
-                    if str(getattr(r, "code", "") or "") not in self._rotation_sold
+                    if str(getattr(r, "code", "") or "") not in banned
                 ]
                 logger.info("跳过当日已轮动卖出的买入信号：%s", ", ".join(sorted(set(dropped))))
 
@@ -385,6 +386,7 @@ class LiveTrader:
         self._queue_reject_log_key = ""
         self._queue_reject_total = 0
         self._rotation_sold.clear()
+        self._rotation_sold_day = ""
         self._entry_rejected.clear()
         self._sim_last.clear()
         for run in self._sim.values():
@@ -401,6 +403,33 @@ class LiveTrader:
         for run in self._sim.values():
             for code in [c for c, s in run.pending.items() if s.expire_at <= now]:
                 run.pending.pop(code, None)
+
+    def _rotation_sold_codes(self, day: str) -> set[str]:
+        """当日被轮动卖出、因此当日不许买回的代码。
+
+        **以 `paper_trades` 为准，每个交易日回库灌一次**，内存 map 只做当日增量缓存。
+        为什么不能只放内存：重启会把内存清空，而重启是常态——每个交易日 15:30 的
+        `SASRestart`、每次部署、以及盘中任何一次手动重启。2026-11-03 就是这样一个实例：
+        600960 渤海汽车 09:30:01 以「轮动替换(建仓40分→新票67分)」卖出 700 股 @4.17，
+        12:23 部署重启清空内存后，13:00:35 又按「ML打分 41」买回 300 股 @4.25
+        （比卖出价高 1.9%，另付 7.95+5.01 元费用）。
+        回库读还顺带覆盖了「功能当天上线、上午的卖出发生在旧代码里」的空档。
+        """
+        if self._rotation_sold_day != day:
+            try:
+                rows = db.list_paper_trades(limit=500)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("读取当日轮动卖出记录失败：%s", exc)
+                rows = []
+            sold = {
+                str(r.get("code") or "") for r in rows
+                if str(r.get("side") or "") == "sell"
+                and str(r.get("trade_date") or "") == day
+                and "轮动替换" in str(r.get("reason") or "")
+            }
+            self._rotation_sold = {c: day for c in sold if c}
+            self._rotation_sold_day = day
+        return {c for c, d in self._rotation_sold.items() if d == day}
 
     def _backlog_put(self, rec, now: datetime) -> bool:
         """把一条「连交易队列都没挤进去」的买入信号放进候补队列。
@@ -893,9 +922,7 @@ class LiveTrader:
             # 只保留最后一批看不出「一共被挡掉多少」，故另给累计条次（重启归零）
             "queue_rejected_total": int(self._queue_reject_total),
             # 当日被轮动卖出、因此当日不再买入的代码（「卖完又买回」的证据）
-            "rotation_sold_today": sorted(
-                c for c, d in self._rotation_sold.items()
-                if d == now.strftime("%Y-%m-%d")),
+            "rotation_sold_today": sorted(self._rotation_sold_codes(now.strftime("%Y-%m-%d"))),
             # 五段式⑤：切入点参数与本轮被拒原因
             "entry_max_chase": float(getattr(self.settings, "paper_entry_max_chase", 0.0) or 0.0),
             "entry_pullback": float(getattr(self.settings, "paper_entry_pullback", 0.0) or 0.0),

@@ -789,7 +789,10 @@ class TestRotationSoldGuard:
         from datetime import datetime
 
         trader, live_module = self._trader(monkeypatch, tmp_path)
-        trader._rotation_sold["600001"] = datetime.now().strftime("%Y-%m-%d")
+        today = datetime.now().strftime("%Y-%m-%d")
+        # 同日 tick 内记下的卖出（内存缓存在本进程内有效，_rotation_sold_day 已灌过）
+        trader._rotation_sold["600001"] = today
+        trader._rotation_sold_day = today
 
         added = trader.submit([
             self._rec(live_module, "600001", 90.0),
@@ -800,10 +803,32 @@ class TestRotationSoldGuard:
         assert set(trader._pending) == {"600002"}
         assert trader.status()["rotation_sold_today"] == ["600001"]
 
+    def test_ban_reloaded_from_db_after_restart(self, monkeypatch, tmp_path):
+        """重启后仍要挡：黑名单以 `paper_trades` 为准，不靠内存。
+
+        2026-11-03 实例：600960 渤海汽车 09:30:01 轮动卖出 700@4.17，
+        12:23 部署重启清空内存后，13:00:35 又买回 300@4.25。
+        """
+        from datetime import datetime
+
+        trader, live_module = self._trader(monkeypatch, tmp_path)
+        today = datetime.now().strftime("%Y-%m-%d")
+        # 只落在库里（模拟重启前那笔卖出，内存里没有）
+        live_module.db.insert_paper_trade(
+            "600960", "渤海汽车", "sell", 4.17, 700, 2919.0, 7.95,
+            "轮动替换(建仓40分→新票67分)", today)
+
+        trader2 = live_module.LiveTrader()          # 新实例 = 模拟重启
+        added = trader2.submit([self._rec(live_module, "600960", 41.0)])
+
+        assert added == 0
+        assert trader2.status()["rotation_sold_today"] == ["600960"]
+
     def test_stale_mark_expires_next_day(self, monkeypatch, tmp_path):
         """隔日的卖出记录不该继续挡：黑名单只在当日有效。"""
         trader, live_module = self._trader(monkeypatch, tmp_path)
         trader._rotation_sold["600003"] = "2020-01-01"
+        trader._rotation_sold_day = "2020-01-01"
 
         added = trader.submit([self._rec(live_module, "600003", 70.0)])
 
