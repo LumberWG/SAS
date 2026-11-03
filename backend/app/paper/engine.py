@@ -945,6 +945,31 @@ class PaperEngine:
                         weak_exposure * 100, self._regime_paused,
                     )
 
+        # ---- 开盘保护：跳空护栏 + 开盘延迟（仅拦买入，卖出照常） ----
+        # 跳空护栏复用做T 的 crash guard 阈值（paper_t_crash_guard）：大盘当日开盘跌幅超阈值，
+        # 暂停自动买入与轮动换入（开盘猛跌/外围利空时不接刀）。
+        # 开盘延迟：仅在大盘向下跳空时，开盘后 N 分钟内禁止自动买入，让跳空消化；
+        # 利好日（大盘上涨）不延迟，避免踏空误伤（保护只针对下行风险）。
+        idx_open_drop = self._idx_open_drop()
+        crash_guard_th = float(getattr(self.settings, "paper_t_crash_guard", 0) or 0)
+        crash_pause_buy = (
+            bool(crash_guard_th)
+            and idx_open_drop is not None
+            and idx_open_drop >= crash_guard_th
+        )
+        open_delayed = self._open_delayed(datetime.now())
+        buy_paused = weak_pause_all or crash_pause_buy or open_delayed
+        if crash_pause_buy and not weak_pause_all:
+            logger.warning(
+                "开盘跳空护栏：大盘开盘跌幅 %.1f%% ≥ %.1f%%，暂停自动买入/轮动（仅卖出）",
+                idx_open_drop * 100, crash_guard_th * 100,
+            )
+        if open_delayed:
+            logger.info(
+                "开盘延迟：开盘后 %d 分钟内暂停自动买入/轮动（仅卖出）",
+                int(getattr(self.settings, "paper_buy_open_delay_minutes", 0) or 0),
+            )
+
         # ---- 总仓位上限（轮动与买入共用，故提前算） ----
         # 盘中不设「收盘目标」硬上限：`paper_max_total_exposure`(80%) 是**收盘目标**，
         # 由 eod_trim 在收盘前压回；盘中允许满仓，只受现金（等价 100%）与单票上限约束。
@@ -977,7 +1002,7 @@ class PaperEngine:
         # 为什么循环：一次 API 调用里可以连换多只（含全换），不必等下一个 tick；
         #   每轮重新取「当前最弱」，被换掉的票即退出候选池（sold_codes 防回转买入）。
         sold_codes: set[str] = set()
-        if self.settings.paper_rotation_enabled and not weak_pause_all:
+        if self.settings.paper_rotation_enabled and not buy_paused:
             used = db.count_paper_trades("轮动替换", today, side="sell")
             max_rot = int(self.settings.paper_rotation_max_per_day)
             rot_pool = [*buy_candidates, *(rotation_candidates or [])]
@@ -1086,10 +1111,20 @@ class PaperEngine:
         candidates: list[tuple[float, object, float]] = []
         for rec in buy_candidates:
             name = getattr(rec, "name", "") or rec.code
+            # 开盘保护（跳空护栏/开盘延迟/弱市全暂停）：先按准确原因跳过买入，避免误归因为「弱势」
+            if buy_paused:
+                why = (
+                    "开盘跳空护栏暂停买入" if crash_pause_buy
+                    else "开盘延迟暂停买入" if open_delayed
+                    else "大盘弱势暂停买入"
+                )
+                results.append(TradeResult(
+                    rec.code, name, "skip", 0, 0.0, 0.0, 0.0, why))
+                continue
             # ④ 交易池前置闸：范围/大市值/名称/池子 → 择时 → 已持仓 → 名额
-            #    只有「全暂停」档（weak_pause_all）才在这里拒掉买入；降仓档放行，
+            #    只有「全暂停」档（buy_paused）才在这里拒掉买入；降仓档放行，
             #    由上面算出的 exposure_cap 控总量
-            ok, why = self.entry_gate(rec, positions=positions, timing_pause=weak_pause_all)
+            ok, why = self.entry_gate(rec, positions=positions, timing_pause=buy_paused)
             if not ok:
                 results.append(TradeResult(
                     rec.code, name, "skip", 0, 0.0, 0.0, 0.0, why))
@@ -1344,6 +1379,47 @@ class PaperEngine:
             logger.info("止盈止损触发 %d 笔", len(results))
         return results
 
+    def _idx_open_drop(self) -> float | None:
+        """大盘当日开盘跌幅（护栏用）：取最弱主要指数当日涨跌幅的负值（即最大跌幅）。
+
+        与做T crash guard、买入端跳空护栏共用，避免重复取数；``None`` 表示无法取指数。
+        """
+        try:
+            from app.data.snapshot_store import snapshot_store
+            indices = snapshot_store.peek_indices()
+            if indices is not None and not indices.empty and "pct_change" in indices.columns:
+                vals = [
+                    float(getattr(r, "pct_change", 0) or 0)
+                    for r in indices.itertuples(index=False)
+                ]
+                if vals:
+                    return -min(vals)
+        except Exception:  # noqa: BLE001
+            return None
+        return None
+
+    def _open_delayed(self, now: datetime | None = None) -> bool:
+        """是否仍处于「开盘延迟」期：各交易时段（09:30 / 13:00）开始后
+        ``paper_buy_open_delay_minutes`` 分钟内，禁止自动买入。仅拦买入、不拦卖出。
+
+        关键：只在**大盘向下跳空**时才延迟——外围也可能出**利好**（大盘上涨），
+        无条件延迟会让利好日开盘踏空误伤；保护只针对下行风险，不针对上行收益。
+        方向由大盘当日最弱指数涨跌幅判定（与跳空护栏同口径）。
+        """
+        delay = int(getattr(self.settings, "paper_buy_open_delay_minutes", 0) or 0)
+        if delay <= 0:
+            return False
+        idx_open_drop = self._idx_open_drop()
+        if idx_open_drop is None or idx_open_drop <= 0:
+            return False
+        if now is None:
+            now = datetime.now()
+        cur = now.hour * 60 + now.minute
+        for start in (9 * 60 + 30, 13 * 60):
+            if start <= cur < start + delay:
+                return True
+        return False
+
     # ------------------------------------------------------------------
     # 做T引擎（真实 tick，严格 T+1）
     # ------------------------------------------------------------------
@@ -1362,6 +1438,9 @@ class PaperEngine:
         if not settings.paper_t_active:
             return []
         today = datetime.now().strftime("%Y-%m-%d")
+        now = datetime.now()
+        # 开盘延迟：开盘后 N 分钟内禁止做T买入（买回/加仓），卖出照常
+        open_delayed = self._open_delayed(now)
         self.ensure_account()  # 确保 lots migrate + 刷新可卖股数（T+1 跨日生效）
 
         # 每日重置：只清「下跌加仓已触发」，使每票每日最多加一次。
@@ -1384,19 +1463,8 @@ class PaperEngine:
             for row in snap.itertuples(index=False):
                 snap_map[str(getattr(row, "code", ""))] = row
 
-        # 大盘当日涨跌幅（护栏）：取最弱主要指数当日跌幅
-        idx_drop = None
-        try:
-            indices = snapshot_store.peek_indices()
-            if indices is not None and not indices.empty and "pct_change" in indices.columns:
-                vals = [
-                    float(getattr(r, "pct_change", 0) or 0)
-                    for r in indices.itertuples(index=False)
-                ]
-                if vals:
-                    idx_drop = -min(vals)
-        except Exception:  # noqa: BLE001
-            idx_drop = None
+        # 大盘当日开盘跌幅（护栏）：复用统一口径（与买入端跳空护栏同方法）
+        idx_drop = self._idx_open_drop()
 
         account = db.get_paper_account()
         cash = float(account["cash"])
@@ -1474,6 +1542,8 @@ class PaperEngine:
                 stale = str(pos.get("t_sold_date") or today) < today
                 if crash and not stale:
                     continue
+                if open_delayed and not stale:
+                    continue
                 buyback_line = max(open_px, prev_close) * (1 + float(settings.paper_t_up_buyback))
                 if stale or price <= buyback_line:
                     want = (t_t_sold // LOT_SIZE) * LOT_SIZE
@@ -1547,6 +1617,10 @@ class PaperEngine:
                         continue  # 本轮已减仓，不再加仓
                 # 分级加仓（今仓，T+1 次日可卖）：每日每票最多一次（t_down_armed 当日内防重复）
                 if t_down_armed == 0:
+                    if open_delayed:
+                        # 开盘延迟期内不触发下跌加仓（避免开盘跳空接刀），标记避免反复尝试
+                        db.update_paper_t_state(code, t_down_armed=1)
+                        continue
                     budget = 0.0
                     if settings.paper_t_down_full and low <= open_px * (1 - float(settings.paper_t_down_full)):
                         budget = cash * 0.95

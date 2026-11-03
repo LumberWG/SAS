@@ -302,6 +302,10 @@ class Settings(BaseSettings):
     # 买单只允许在开盘后 N 分钟内成交（0=不限）。回测按「次日开盘价」成交，
     # 实盘此前在盘中分析时刻（如 13:01）按实时价一把买入 → 系统性买高
     paper_buy_open_window_minutes: int = 5
+    # 开盘后 N 分钟内**禁止自动买入**（含轮动换入、做T买回/加仓），让隔夜外围利空导致的
+    # 开盘跳空先消化；0=不延迟（默认，维持现状）。只拦买入、不拦卖出。与「跳空护栏」
+    # （paper_t_crash_guard 扩展到买入端）共同构成开盘保护。见 sas_formulas §开盘保护。
+    paper_buy_open_delay_minutes: int = 0
 
     # ---------- 通知管道（可选） ----------
     # Webhook 机器人地址（企业微信/飞书/钉钉均兼容，POST JSON）

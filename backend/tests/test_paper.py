@@ -25,6 +25,11 @@ def _disable_pool_gate(monkeypatch):
     同理关闭「大盘择时买入闸门」：它依赖本机真实的上证指数缓存，
     弱市时会把全部买单改成 skip，让仓位/轮动断言失去意义；
     闸门本身由 ``tests/test_exec_rules.py`` 与回测 regime 用例覆盖。
+
+    2026-11-03 扩展：一并关闭「开盘跳空护栏」复用的 ``paper_t_crash_guard``、
+    ``paper_circuit_breaker_enabled``、``paper_dynamic_exposure``——它们同样是
+    依赖真实指数/回撤的择时闸门，真实弱势日会把这批「执行规则」用例的真实买入
+    全部 skip；跳空护栏与开盘延迟由 ``tests/test_exec_rules.py`` 新增用例覆盖。
     """
     from app.config import get_settings
     from app.paper import engine as paper_engine
@@ -33,6 +38,9 @@ def _disable_pool_gate(monkeypatch):
     monkeypatch.setattr(settings, "paper_pool_top_n", 0, raising=False)
     monkeypatch.setattr(settings, "paper_regime_ma", 0, raising=False)
     monkeypatch.setattr(settings, "paper_regime_weak_pause", False, raising=False)
+    monkeypatch.setattr(settings, "paper_t_crash_guard", 0.0, raising=False)
+    monkeypatch.setattr(settings, "paper_circuit_breaker_enabled", False, raising=False)
+    monkeypatch.setattr(settings, "paper_dynamic_exposure", False, raising=False)
     # 同理关闭「大盘股过滤」：它读本机真实快照的 total_mv，用例里的票（000001/600036 等）
     # 在真实市值下都会被判成大盘股而跳过。规则本身由 tests/test_exec_rules.py 覆盖。
     monkeypatch.setattr(paper_engine, "large_cap_rule", lambda: (False, 0.0))
@@ -1463,3 +1471,80 @@ class TestRegimeGateState:
         pos = db.get_paper_position("600001")
         assert pos is not None
         assert pos["shares"] * 10.0 <= 30000 + 1e-6
+
+
+class TestOpenProtection:
+    """开盘保护：跳空护栏 + 开盘延迟（仅拦买入，卖出照常）。
+
+    与 ``TestRegimeGateState`` 同构：默认闸门在 autouse ``_disable_pool_gate`` 里已关，
+    这里显式开启以验证护栏触发；普通市场（护栏不触发）下买入照旧成功。
+    """
+
+    def test_crash_guard_pauses_buying(self, engine, monkeypatch):
+        eng, db, prices = engine
+        eng.ensure_account()
+        # 开启跳空护栏（复用做T 的 crash guard 阈值），模拟大盘开盘跌幅超阈值
+        monkeypatch.setattr(eng.settings, "paper_t_crash_guard", 0.01, raising=False)
+        monkeypatch.setattr(eng, "_idx_open_drop", lambda: 0.05)
+        recs = [FakeRec("600004", "测试A", "buy", 60.0, "突破")]
+        results = asyncio.run(eng.execute_recommendations(recs))
+        assert results[0].side == "skip"
+        assert "开盘跳空护栏" in results[0].reason
+        # 跌幅不足 / 取不到指数时不拦
+        monkeypatch.setattr(eng, "_idx_open_drop", lambda: None)
+        results = asyncio.run(eng.execute_recommendations(recs))
+        assert results[0].side == "buy"
+
+    def test_open_delay_pauses_buying(self, engine, monkeypatch):
+        eng, db, prices = engine
+        eng.ensure_account()
+        monkeypatch.setattr(eng.settings, "paper_buy_open_delay_minutes", 15, raising=False)
+        monkeypatch.setattr(eng, "_open_delayed", lambda now=None: True)
+        recs = [FakeRec("600004", "测试A", "buy", 60.0, "突破")]
+        results = asyncio.run(eng.execute_recommendations(recs))
+        assert results[0].side == "skip"
+        assert "开盘延迟" in results[0].reason
+        monkeypatch.setattr(eng, "_open_delayed", lambda now=None: False)
+        results = asyncio.run(eng.execute_recommendations(recs))
+        assert results[0].side == "buy"
+
+    def test_open_delay_skips_buy_not_sell(self, engine, monkeypatch):
+        """开盘延迟只拦买入，卖出照常（T+1 可卖批次）。"""
+        eng, db, prices = engine
+        eng.ensure_account()
+        db.add_paper_lot("600004", "测试A", 1000, 10.0, "2020-01-01", "突破")
+        db.update_paper_cash(90000.0)
+        monkeypatch.setattr(eng.settings, "paper_buy_open_delay_minutes", 15, raising=False)
+        monkeypatch.setattr(eng, "_open_delayed", lambda now=None: True)
+        recs = [
+            FakeRec("600004", "测试A", "sell", 10.0, "卖出信号"),
+            FakeRec("600001", "测试B", "buy", 50.0, "突破"),
+        ]
+        results = asyncio.run(eng.execute_recommendations(recs))
+        assert "sell" in [r.side for r in results]
+        assert all(r.side != "buy" for r in results)
+
+    def test_open_delay_only_on_gap_down(self, engine, monkeypatch):
+        """开盘延迟只在大盘向下跳空时生效；利好（大盘上涨）日不延迟、正常买入。"""
+        import app.paper.engine as E
+        from datetime import datetime as _dt
+        from unittest.mock import MagicMock
+
+        eng, db, prices = engine
+        eng.ensure_account()
+        monkeypatch.setattr(eng.settings, "paper_buy_open_delay_minutes", 15, raising=False)
+        # 固定时间落在延迟窗内（09:35）；用 wraps 保留 datetime 其余行为
+        fixed = _dt(2026, 11, 3, 9, 35)
+        fake_dt = MagicMock(wraps=_dt)
+        fake_dt.now = lambda: fixed
+        monkeypatch.setattr(E, "datetime", fake_dt)
+        recs = [FakeRec("600004", "测试A", "buy", 60.0, "突破")]
+        # 利好：大盘上涨（idx_open_drop<0）→ 不延迟，正常买入
+        monkeypatch.setattr(eng, "_idx_open_drop", lambda: -0.02)
+        results = asyncio.run(eng.execute_recommendations(recs))
+        assert results[0].side == "buy"
+        # 利空：大盘向下跳空（idx_open_drop>0）→ 延迟窗内暂停买入
+        monkeypatch.setattr(eng, "_idx_open_drop", lambda: 0.03)
+        results = asyncio.run(eng.execute_recommendations(recs))
+        assert results[0].side == "skip"
+        assert "开盘延迟" in results[0].reason

@@ -293,6 +293,21 @@ def main() -> None:
     _write(lines, today)
     print(f"[daily_review] {today}: {len(codes)} 只标的，基准 {bench_note}，价格源 {src}")
 
+    # 同步刷新「每只股票从买入到清仓的真实盈亏」总览（FIFO 口径 + 账户每日盈亏曲线）。
+    # 独立于当日复盘、幂等重跑安全；失败不影响当日复盘落地。
+    try:
+        from scripts.position_pnl import main as _pnl_main
+        _pnl_main()
+    except Exception as exc:  # noqa: BLE001
+        print(f"[daily_review] 刷新 position_pnl 总览失败（不影响当日复盘）：{exc}")
+
+    # 同步刷新「每日参数体检 / 调参候选清单」（滚动窗口指标，不自动改值）。
+    try:
+        from scripts.param_advisor import main as _adv_main
+        _adv_main()
+    except Exception as exc:  # noqa: BLE001
+        print(f"[daily_review] 刷新 param_advisor 体检失败（不影响当日复盘）：{exc}")
+
 
 def _write(lines: list[str], today: str) -> None:
     """追加当日复盘；若当日已存在则先移除旧节（幂等，支持重跑）。"""

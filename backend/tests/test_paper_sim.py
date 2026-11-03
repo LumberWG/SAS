@@ -14,6 +14,26 @@ from app.data.cache import Database, ledger_scope
 from app.paper.ledger import OverlaySettings, profile_overrides, sim_specs
 
 
+@pytest.fixture(autouse=True)
+def _disable_timing_gates(monkeypatch):
+    """隔离依赖真实指数/回撤的择时闸门（弱市/跳空护栏/熔断/动态），让 sim 账本测试专注隔离逻辑；
+
+    否则真实弱势日（如 2026-11-03）``paper_t_crash_guard`` 默认 2% 会把真实买入全部 skip，
+    断言失去意义。闸门本身由 ``tests/test_exec_rules.py`` 与回测 regime 用例覆盖。
+    """
+    from app.config import get_settings
+    from app.paper import engine as paper_engine
+
+    settings = get_settings()
+    monkeypatch.setattr(settings, "paper_pool_top_n", 0, raising=False)
+    monkeypatch.setattr(settings, "paper_regime_ma", 0, raising=False)
+    monkeypatch.setattr(settings, "paper_regime_weak_pause", False, raising=False)
+    monkeypatch.setattr(settings, "paper_t_crash_guard", 0.0, raising=False)
+    monkeypatch.setattr(settings, "paper_circuit_breaker_enabled", False, raising=False)
+    monkeypatch.setattr(settings, "paper_dynamic_exposure", False, raising=False)
+    monkeypatch.setattr(paper_engine, "large_cap_rule", lambda: (False, 0.0))
+
+
 @pytest.fixture()
 def db(tmp_path, monkeypatch):
     """独立库 + 把各模块里 ``from app.data.cache import db`` 的引用一起换掉。"""
