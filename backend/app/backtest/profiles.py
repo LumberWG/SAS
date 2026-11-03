@@ -623,6 +623,13 @@ PROFILES: dict[str, dict] = {
     "chase15": {"entry_max_chase": 0.015},
     "chase30": {"entry_max_chase": 0.03},
     "chase50": {"entry_max_chase": 0.05},
+    # ---- #99 配对验收：集中持仓 vs 分散持仓（纯持仓数效应；轮动都关，对齐 #70§5 线上现状）----
+    # cur10 = 线上现状（max_positions=10, rotation_enabled=False）；conc4 = 集中 4 只；
+    # conc4_rot = 集中 4 只 + 轮动开（看轮动在集中下的净影响）。三者出场结构同 default（裸版），
+    # 配对差值只反映持仓数/轮动的净效应（记录 #104）。
+    "cur10": {"max_positions": 10, "rotation_enabled": False},
+    "conc4": {"max_positions": 4, "rotation_enabled": False},
+    "conc4_rot": {"max_positions": 4, "rotation_enabled": True},
 }
 
 # ---- E48：成交价随机扰动（稳健性检验，BACKTEST_LOG #67 §8）----
