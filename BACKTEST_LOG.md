@@ -7093,3 +7093,27 @@ True（关掉后 `t_tick` 仍返回空）；`TestRotation` 新增 `test_rotation
 
 ### 7. 下轮计划
 无。#99 闭环。若未来出现"弱市有中等质量票可分散"的新选股口径（如放宽 `pass_filters` 或新因子），可重开此方向，但当前数据不支持。
+
+## 记录 #108 — 2026-11-04 · 新增"开盘冷静期"：实盘与回测入场口径同步为开盘+5min
+
+### 1. 触发
+使用者观察恩威医药在 09:30:01 开盘瞬间被买入（23.30），买价远高于当日开盘价，认为开盘瞬间波动/跳空不可控，要求：杜绝开盘就交易、按实际情况随时交易、但避免开盘 5 分钟之内交易。与既有"回测次日开盘价 vs 实盘开盘成交"口径（#19）冲突，使用者拍板：**实盘改 + 回测也改**，保持两边可比。
+
+### 2. 实盘落地（engine + live）
+- `config.py`：`paper_open_cooldown_minutes: int = 0`（默认关）。**无条件**禁止各交易时段（09:30 / 13:00）开盘后 N 分钟内自动买入（含轮动换入、做T买回/加仓），仅拦买入不拦卖出。
+- 区别于既有 `paper_buy_open_delay_minutes`：后者仅在大盘向下跳空时才延迟（怕利好日踏空），冷静期是**无条件**的。
+- `engine.py`：新增 `_open_cooldown`，并入 `buy_paused`（初建仓+轮动）、`t_tick`（做T买回/加仓）、买入暂停原因（"开盘冷静期暂停买入"）与日志。
+- `live.py`：`tick` 与 `_tick_sim` 的买入网关加入 `open_guard = _open_delayed or _open_cooldown`，冷却期内买单**留队列**等冷却结束（同窗口外逻辑，不丢弃）。
+- 实盘经 `POST /api/settings` 即时设 5（app_state）+ `.env PAPER_OPEN_COOLDOWN_MINUTES=5`（两处都写），回读 value=5 / source=app_state / restart_required=False。
+
+### 3. 回测对齐（pipeline）
+- `pipeline.py`：`PipelineParams` 新增 `entry_open_delay_minutes`；新增 `_open_delay_price`（取 `get_minute_day_bars` 第 `(N-1)//5` 根 5 分钟 bar 收盘，≈open+N 分钟价）；`exec_open_price` 优先用延迟价，否则 VWAP/开盘价。
+- 基准 `cur10`（=`max_positions=10, rotation_enabled=False`，实盘镜像）已加 `entry_open_delay_minutes=5`，回测入场从"次日开盘价"改为"开盘+5min"，与实盘冷静期口径可比（#19 对齐）。
+- 该参数为增量、默认 None/0 不影响其他 profile 与历史回测（#99~#107 均为相对配对结论，不受影响）。
+
+### 4. 校验
+- 单测：`test_open_cooldown_pauses_buying`（冷静期无条件、利好日仍拦买入、窗外正常买）、`test_open_delay_price_picks_open_plus_n_minutes`（N=5→第0根收盘、N=10→第1根收盘、N=0→None、无数据→None）通过。
+- lint 干净。
+
+### 5. 下轮计划
+无。`cur10` 基准入场模型自此偏移，后续回测绝对数字需按"开盘+5min"重新基线；若需与历史开盘价基准对照，临时把 `entry_open_delay_minutes` 置 0 即可。

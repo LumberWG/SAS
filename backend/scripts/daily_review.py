@@ -219,7 +219,8 @@ def main() -> None:
             f"{excess:+.2f}pp |" if excess is not None else
             f"| {code} | {ts[0]['name']} | {sig} | {wprice:.2f} | {shares} | "
             f"{close:.2f} | {kl['pct']:+.2f}% | {kl['amp']:.2f}% | {float_pct:+.2f}% | — |")
-        if kl and main_bench is not None:
+        # #bugfix：当日已清仓的票（pos is None）不计入「当前持仓」市值，否则会按成交股数虚增
+        if kl and main_bench is not None and pos is not None:
             w = mv
             combo_mv += mv
             combo_cost += cost_mv

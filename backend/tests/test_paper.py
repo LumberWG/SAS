@@ -1548,3 +1548,27 @@ class TestOpenProtection:
         results = asyncio.run(eng.execute_recommendations(recs))
         assert results[0].side == "skip"
         assert "开盘延迟" in results[0].reason
+
+    def test_open_cooldown_pauses_buying(self, engine, monkeypatch):
+        """开盘冷静期：开盘后 N 分钟内**无条件**暂停买入，与大盘涨跌无关。"""
+        import app.paper.engine as E
+        from datetime import datetime as _dt
+        from unittest.mock import MagicMock
+
+        eng, db, prices = engine
+        eng.ensure_account()
+        monkeypatch.setattr(eng.settings, "paper_open_cooldown_minutes", 5, raising=False)
+        fixed = _dt(2026, 11, 3, 9, 33)  # 冷静期（09:30~09:35，不含整点）内
+        fake_dt = MagicMock(wraps=_dt)
+        fake_dt.now = lambda: fixed
+        monkeypatch.setattr(E, "datetime", fake_dt)
+        recs = [FakeRec("600004", "测试A", "buy", 60.0, "突破")]
+        # 利好日（大盘上涨）冷静期仍生效 → 暂停买入（区别于仅跳空延迟）
+        monkeypatch.setattr(eng, "_idx_open_drop", lambda: -0.02)
+        results = asyncio.run(eng.execute_recommendations(recs))
+        assert results[0].side == "skip"
+        assert "开盘冷静期" in results[0].reason
+        # 冷静期外（10:00）正常买入
+        fake_dt.now = lambda: _dt(2026, 11, 3, 10, 0)
+        results = asyncio.run(eng.execute_recommendations(recs))
+        assert results[0].side == "buy"

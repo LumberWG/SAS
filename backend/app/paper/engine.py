@@ -958,7 +958,8 @@ class PaperEngine:
             and idx_open_drop >= crash_guard_th
         )
         open_delayed = self._open_delayed(datetime.now())
-        buy_paused = weak_pause_all or crash_pause_buy or open_delayed
+        open_cooldown = self._open_cooldown(datetime.now())
+        buy_paused = weak_pause_all or crash_pause_buy or open_delayed or open_cooldown
         if crash_pause_buy and not weak_pause_all:
             logger.warning(
                 "开盘跳空护栏：大盘开盘跌幅 %.1f%% ≥ %.1f%%，暂停自动买入/轮动（仅卖出）",
@@ -968,6 +969,11 @@ class PaperEngine:
             logger.info(
                 "开盘延迟：开盘后 %d 分钟内暂停自动买入/轮动（仅卖出）",
                 int(getattr(self.settings, "paper_buy_open_delay_minutes", 0) or 0),
+            )
+        if open_cooldown:
+            logger.info(
+                "开盘冷静期：开盘后 %d 分钟内暂停自动买入/轮动（仅卖出）",
+                int(getattr(self.settings, "paper_open_cooldown_minutes", 0) or 0),
             )
 
         # ---- 总仓位上限（轮动与买入共用，故提前算） ----
@@ -1116,6 +1122,7 @@ class PaperEngine:
                 why = (
                     "开盘跳空护栏暂停买入" if crash_pause_buy
                     else "开盘延迟暂停买入" if open_delayed
+                    else "开盘冷静期暂停买入" if open_cooldown
                     else "大盘弱势暂停买入"
                 )
                 results.append(TradeResult(
@@ -1420,6 +1427,23 @@ class PaperEngine:
                 return True
         return False
 
+    def _open_cooldown(self, now: datetime | None = None) -> bool:
+        """是否仍处于「开盘冷静期」：各交易时段（09:30 / 13:00）开始后
+        ``paper_open_cooldown_minutes`` 分钟内，**无条件**禁止自动买入
+        （含轮动换入、做T买回/加仓）。仅拦买入、不拦卖出。
+        区别于 ``_open_delayed``（仅大盘向下跳空时才延迟）。用途：避开开盘瞬间
+        波动/跳空，按使用者要求"开盘后 N 分钟才交易"（本轮）。"""
+        delay = int(getattr(self.settings, "paper_open_cooldown_minutes", 0) or 0)
+        if delay <= 0:
+            return False
+        if now is None:
+            now = datetime.now()
+        cur = now.hour * 60 + now.minute
+        for start in (9 * 60 + 30, 13 * 60):
+            if start <= cur < start + delay:
+                return True
+        return False
+
     # ------------------------------------------------------------------
     # 做T引擎（真实 tick，严格 T+1）
     # ------------------------------------------------------------------
@@ -1439,8 +1463,8 @@ class PaperEngine:
             return []
         today = datetime.now().strftime("%Y-%m-%d")
         now = datetime.now()
-        # 开盘延迟：开盘后 N 分钟内禁止做T买入（买回/加仓），卖出照常
-        open_delayed = self._open_delayed(now)
+        # 开盘延迟/冷静期：开盘后 N 分钟内禁止做T买入（买回/加仓），卖出照常
+        open_delayed = self._open_delayed(now) or self._open_cooldown(now)
         self.ensure_account()  # 确保 lots migrate + 刷新可卖股数（T+1 跨日生效）
 
         # 每日重置：只清「下跌加仓已触发」，使每票每日最多加一次。

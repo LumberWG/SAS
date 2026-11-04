@@ -52,6 +52,8 @@ RUNTIME_KEYS: frozenset[str] = frozenset({
     "paper_circuit_breaker_dd",
     "paper_circuit_breaker_release",
     "paper_circuit_breaker_target",
+    # 开盘冷静期：无条件禁止开盘后N分钟买入，风险偏好类，盘中切换要立刻生效
+    "paper_open_cooldown_minutes",
 })
 
 #: 设置页布局：**分组（左侧导航）→ 子分组（组内小节）→ 参数键**。
@@ -603,6 +605,7 @@ _DESC_OVERRIDES: dict[str, str] = {
     "paper_sim_enabled": "同一份信号按不同处置参数并行记账，盘中实时对比各账本净值",
     "paper_sim_profiles": "逗号分隔的方案名，取自回测方案库，只支持止损/仓位/择时这类处置参数",
     "paper_sim_capital": "每个并行账本的初始资金；0 = 跟随模拟盘本金",
+    "paper_open_cooldown_minutes": "开盘冷静期(分钟)：开盘后N分钟内禁止自动买入(含轮动/做T买回)，仅拦买入不拦卖出；0=不限制",
 }
 
 

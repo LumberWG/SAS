@@ -306,6 +306,10 @@ class Settings(BaseSettings):
     # 开盘跳空先消化；0=不延迟（默认，维持现状）。只拦买入、不拦卖出。与「跳空护栏」
     # （paper_t_crash_guard 扩展到买入端）共同构成开盘保护。见 sas_formulas §开盘保护。
     paper_buy_open_delay_minutes: int = 0
+    # 开盘冷静期：开盘后 N 分钟内**无条件禁止自动买入**（含轮动换入、做T买回/加仓），
+    # 让开盘瞬间波动/跳空先过去；0=不限制（默认）。仅拦买入、不拦卖出。
+    # 区别于 paper_buy_open_delay_minutes（仅大盘向下跳空时才延迟）。见本轮"避免开盘5分钟交易"。
+    paper_open_cooldown_minutes: int = 0
 
     # ---------- 通知管道（可选） ----------
     # Webhook 机器人地址（企业微信/飞书/钉钉均兼容，POST JSON）

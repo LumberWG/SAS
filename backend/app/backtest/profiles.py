@@ -627,7 +627,7 @@ PROFILES: dict[str, dict] = {
     # cur10 = 线上现状（max_positions=10, rotation_enabled=False）；conc4 = 集中 4 只；
     # conc4_rot = 集中 4 只 + 轮动开（看轮动在集中下的净影响）。三者出场结构同 default（裸版），
     # 配对差值只反映持仓数/轮动的净效应（记录 #104）。
-    "cur10": {"max_positions": 10, "rotation_enabled": False},
+    "cur10": {"max_positions": 10, "rotation_enabled": False, "entry_open_delay_minutes": 5},
     "conc4": {"max_positions": 4, "rotation_enabled": False},
     "conc4_rot": {"max_positions": 4, "rotation_enabled": True},
     # ---- #106：市况自适应持仓数（强市集中 4 只 / 弱市分散 10 只，regime_ma=60 判定强弱势）----

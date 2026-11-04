@@ -225,6 +225,10 @@ class PipelineParams:
     #: ``entry_pullback>0`` 时要求**窗口内曾回踩**到 ``信号价×(1-pullback)``，以首次触及价成交；
     #: 未触及则放弃（当天不买）。线上对应「tick 累积最低价、触及回踩线后放开买入」。
     entry_window_minutes: int | None = None
+    #: ⑤ 开盘冷静期（与线上 ``paper_open_cooldown_minutes`` 对齐）：入场成交价从「开盘价」
+    #: 改为「开盘后 N 分钟那根 5 分钟 bar 的收盘价」，模拟实盘「开盘后 N 分钟才允许买入」。
+    #: 0/None = 不改（仍用开盘价，历史口径）；设 N 后实盘与回测入场口径可比（#19 对齐）。
+    entry_open_delay_minutes: int | None = None
     #: ⑤ 分钟级**强势确认**（与 ``entry_window_minutes`` 的「等回踩」方向相反）：
     #: 需同时开 ``intraday_minutes``。开盘后只观察前 N 分钟，满足 ``entry_confirm_mode``
     #: 的条件才以**观察窗最后一根的收盘价**成交，不满足则当天不买。
@@ -372,6 +376,22 @@ def _open_window_fill(
         value = float(raw)
         if value > 0 and value < limit:
             return value
+    return None
+
+
+def _open_delay_price(code: str, date: str, delay: int) -> float | None:
+    """开盘后 delay 分钟的成交价：取第 ``(delay - 1) // 5`` 根 5 分钟 bar 的收盘
+    （约 ``open + delay`` 分钟时刻的价），模拟实盘冷静期后首笔可成交价。
+    无分钟数据返回 ``None``（由 ``exec_open_price`` 回落到开盘价 / VWAP）。"""
+    if delay <= 0:
+        return None
+    bars = get_minute_day_bars(code, date)  # 默认 5 分钟线
+    if not bars:
+        return None
+    closes = bars.get("close") or []
+    idx = max(0, (int(delay) - 1) // 5)
+    if idx < len(closes):
+        return float(closes[idx])
     return None
 
 
@@ -914,7 +934,12 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
         return float(value) if value == value and value > 0 else None
 
     def exec_open_price(code: str, date: str) -> float | None:
-        """开盘段的成交基准价：``exec_fill="vwap1m"`` 时用开盘后 N 分钟 1m VWAP，否则开盘价。"""
+        """开盘段成交基准价：``entry_open_delay_minutes>0`` 时取「开盘后 N 分钟价」（对齐
+        线上冷静期），否则 ``exec_fill="vwap1m"`` 用开盘后 N 分钟 1m VWAP，再否则开盘价。"""
+        if params.entry_open_delay_minutes:
+            dpx = _open_delay_price(code, date, int(params.entry_open_delay_minutes))
+            if dpx is not None:
+                return dpx
         if params.exec_fill == "vwap1m":
             vw = _vwap_1m(code, date, int(params.exec_fill_minutes or 30))
             if vw is not None:

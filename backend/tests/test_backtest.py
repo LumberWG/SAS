@@ -235,6 +235,29 @@ def test_open_window_fill_returns_first_opened_price(monkeypatch):
     assert pl._open_window_fill("600000", "2026-10-30", 10.0, 30) is None
 
 
+def test_open_delay_price_picks_open_plus_n_minutes(monkeypatch):
+    """开盘后 N 分钟价：取第 (N-1)//5 根 5 分钟 bar 收盘；无数据回落 None。"""
+    import app.backtest.pipeline as pl
+
+    def bars(prices):
+        return {
+            "open": [prices[0]] * len(prices), "close": list(prices),
+            "high": list(prices), "low": list(prices),
+            "volume": [1.0] * len(prices), "amount": [1.0] * len(prices),
+        }
+
+    # 5 分钟 bar 收盘序列：10.0(09:35) 10.2(09:40) 10.4(09:45) 10.6(09:50)
+    monkeypatch.setattr(
+        pl, "get_minute_day_bars", lambda code, date: bars([10.0, 10.2, 10.4, 10.6])
+    )
+    assert pl._open_delay_price("600000", "2026-10-30", 5) == 10.0   # idx=(5-1)//5=0
+    assert pl._open_delay_price("600000", "2026-10-30", 10) == 10.2  # idx=(10-1)//5=1
+    assert pl._open_delay_price("600000", "2026-10-30", 0) is None   # 不延迟
+    # 无分钟数据 → None（由 exec_open_price 回落到开盘价 / VWAP）
+    monkeypatch.setattr(pl, "get_minute_day_bars", lambda code, date: None)
+    assert pl._open_delay_price("600000", "2026-10-30", 5) is None
+
+
 def test_slippage_cost_sign_convention():
     """成交偏离的符号约定：cost_bps > 0 一律表示"比开盘价吃亏"。"""
     from scripts.slippage_audit import bucket_of, cost_bps

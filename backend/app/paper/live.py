@@ -610,6 +610,8 @@ class LiveTrader:
         if not self._sim:
             return {}
         in_window = self._in_buy_window(now)
+        open_guard = run.engine._open_delayed(now) or run.engine._open_cooldown(now)
+        buy_open = in_window and not open_guard
         keep_reasons = (*_BACKLOG_REASONS, "取价失败", "等待回踩")
         out: dict[str, int] = {}
         for tag, run in self._sim.items():
@@ -624,7 +626,7 @@ class LiveTrader:
                         key=lambda s: (s.action != "sell", -s.score),
                     )
                     # 买入只在开盘窗口成交（与主账本、与回测的「次日开盘」同口径）
-                    if not in_window:
+                    if not buy_open:
                         ordered = [s for s in ordered if s.action != "buy"]
                     recs = [
                         SimpleNamespace(
@@ -639,7 +641,7 @@ class LiveTrader:
                         if recs else []
                     )
                     for code in list(run.pending):
-                        if not in_window and run.pending[code].action == "buy":
+                        if not buy_open and run.pending[code].action == "buy":
                             continue
                         hit = next((r for r in results if r.code == code), None)
                         if hit is None or hit.side != "skip":
@@ -701,17 +703,20 @@ class LiveTrader:
         # 回测按「次日开盘价」成交，实盘此前在盘中分析时刻（如 13:01）按实时价
         # 一把买入，系统性买高 —— 2 天 17 笔成交 vs 回测同区间 3 笔（记录 #19）。
         in_window = self._in_buy_window(now)
+        # 开盘保护（跳空延迟 / 冷静期）：冷却期内禁止买入，买单留队列等冷却结束（同窗口外逻辑）
+        open_guard = self.engine._open_delayed(now) or self.engine._open_cooldown(now)
+        buy_open = in_window and not open_guard
         # ⑤ 回踩确认：用 tick 价累积最低价，触及回踩线即放开买入
         self._mark_armed(prices)
         ordered = sorted(
             self._pending.values(),
             key=lambda s: (s.action != "sell", -s.score),
         )
-        if not in_window:
+        if not buy_open:
             ordered = [s for s in ordered if s.action != "buy"]
         kept_buys = {
             c for c, s in self._pending.items() if s.action == "buy"
-        } if not in_window else set()
+        } if not buy_open else set()
         recs = [
             SimpleNamespace(
                 code=s.code, name=s.name, action=s.action, reason=s.reason,
@@ -723,7 +728,7 @@ class LiveTrader:
             for s in ordered
         ]
         # 候补队列：仅在有剩余名额时补位（按评分从高到低），同样受开盘窗口约束
-        if self.settings.paper_backlog_enabled and self._backlog and in_window:
+        if self.settings.paper_backlog_enabled and self._backlog and buy_open:
             held = {p["code"] for p in db.list_paper_positions()}
             slots = self.settings.paper_max_positions - len(held)
             if slots > 0:
@@ -743,7 +748,7 @@ class LiveTrader:
         # 只在开盘窗口内传：窗口外的买单要等下一个开盘，轮动必须跟着等，
         # 否则会「立刻卖 + 立刻买」，偏离「次日开盘价」口径（BACKTEST_LOG #19）。
         rotation_candidates: list[SimpleNamespace] = []
-        if in_window and self.settings.paper_rotation_enabled and self._backlog:
+        if buy_open and self.settings.paper_rotation_enabled and self._backlog:
             held_codes = {p["code"] for p in db.list_paper_positions()}
             rotation_candidates = [
                 SimpleNamespace(

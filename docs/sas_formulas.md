@@ -532,7 +532,7 @@ day_open = 首根 5m 的开盘（缺失用首根收盘）
   做T 这一族据此不建议**调细采样**；线上 `paper_t_active` 自 2026-11-02 起默认开（记录 #92，
   属模拟盘取舍），因此归因时要把「做T 成交」与「基础策略成交」分开看。
 
-### 4.9.1 开盘保护（跳空护栏 + 开盘延迟，2026-11-03，记录 #98）
+### 4.9.1 开盘保护（跳空护栏 + 开盘延迟 + 开盘冷静期，2026-11-03 / 2026-11-04，记录 #98 / #108）
 
 **起因（使用者提）**：开盘就交易，若隔夜外围利空导致开盘大盘猛跌，开盘瞬间买入会「接刀」；
 原系统仅 `paper_t_crash_guard` 护做T，普通买入（队列撮合、轮动换入）无开盘跳空保护，
@@ -547,8 +547,9 @@ day_open = 首根 5m 的开盘（缺失用首根收盘）
    仅拦买入、不拦卖出。**利好日（外围出利好、大盘上涨）不延迟、不暂停**——保护只针对下行风险，
    不对上行收益设障，否则会踏空误伤（使用者 2026-11-03 指出「外围也可能利好」）。方向判定
    复用 `_idx_open_drop`（最弱主要指数当日涨跌幅），与跳空护栏同口径。
+3. **开盘冷静期 `paper_open_cooldown_minutes`（2026-11-04 新增，默认 0=不改行为）**：**无条件**禁止各交易时段（09:30 / 13:00）开盘后 N 分钟内自动买入（含轮动换入、做T 买回/加仓），避开开盘瞬间波动/跳空（恩威 09:30:01 开盘即买、买价远高于开盘价）。不同于 ① ② 的「只对下行风险生效」，**冷静期对利好日也生效**——它是「不机械开盘买」的硬约束，与延迟互补。仅拦买入、不拦卖出。
 
-**实现**：`engine.execute_recommendations` 计算 `buy_paused = weak_pause_all ∨ crash_pause_buy ∨ open_delayed`，
+**实现**：`engine.execute_recommendations` 计算 `buy_paused = weak_pause_all ∨ crash_pause_buy ∨ open_delayed ∨ open_cooldown`，
 统一控制轮动分支与买入入口（含准确 skip 原因，区分「开盘跳空护栏 / 开盘延迟 / 大盘弱势」，
 避免误归因）；`engine.t_tick` 的做T 买入（买回、下跌加仓）也受 `open_delayed` 约束，卖出（倒T/涨停卖半）不受影响。
 **不采纳**：把延迟做成「只在开盘窗口内买」——那是 `paper_buy_open_window_minutes` 的语义（线上已置 0），
@@ -772,6 +773,7 @@ peak = max(历史峰值总资产, 当前总资产)；dd = 1 − 总资产 / peak
 | `paper_tick_interval` | 5 | 撮合周期（秒） | live |
 | `paper_buy_open_window_minutes` | 5（**本机线上 0**） | 开盘买入窗口（分钟，0=不限）。线上 2026-11-02 起置 0 → 交易时段全时段可买，与回测「次日开盘」口径不一致 | live |
 | `paper_buy_open_delay_minutes` | 0 | **开盘延迟**：仅在大盘**向下跳空**时，开盘后 N 分钟内禁止自动买入（含轮动换入、做T 买回/加仓），让外围利空导致的开盘跳空消化；0=不延迟。利好日（大盘上涨）不延迟、不暂停，避免踏空误伤 | engine |
+| `paper_open_cooldown_minutes` | 0 | **开盘冷静期**：各交易时段（09:30 / 13:00）开盘后 N 分钟内**无条件**禁止自动买入（含轮动换入、做T 买回/加仓），避开开盘瞬间波动/跳空；0=不限制。仅拦买入、不拦卖出。区别于 `paper_buy_open_delay_minutes`（仅大盘向下跳空才延迟）。回测同口径见 `entry_open_delay_minutes` | engine |
 | `paper_signal_ttl_minutes` | 30 | 信号有效期 | live |
 | `scan_auto_watch_limit` | 10 | **二选**：从股票池按技术面评分取前 N 加自选（一选=signals 全量） | scanner |
 | `paper_entry_max_chase` | **0（关闭）** | **⑤ 不追高**：现价高于信号价超此比例不买。2026-11-01 由 0.015 改为 0，依据 BACKTEST_LOG #89（6 段配对三条线全不过，且是买差不是少买） | engine |
@@ -827,6 +829,7 @@ peak = max(历史峰值总资产, 当前总资产)；dd = 1 − 总资产 / peak
 | `intraday_entry_times` | 09:45/10:30/11:15/13:30/14:30 | 上述重算/尝试时点（`HH:MM`）。午休不产生 bar，`_intraday_bar_count` 按交易分钟折算（13:30 = 第 30 根） |
 | `intraday_entry_top_n` | 10 | 每个时点最多重算多少只候选（按昨收评分降序），用于控制 CPU 成本 |
 | `open_fill_minutes` | 0 | 开盘窗口「开板补单」：开盘一字涨停时，窗口内某根 5m 收盘 < 前收×1.095 就以它成交（对应线上窗口内每 5 秒撮合）。0=只用开盘价（历史口径）。无分钟数据返回 None（保守判买不到） |
+| `entry_open_delay_minutes` | None | ⑤ **开盘冷静期（回测侧）**：入场成交价从「开盘价」改为「开盘后 N 分钟那根 5m bar 收盘」（≈ open+N 分钟价），模拟实盘 `paper_open_cooldown_minutes`（记录 #108）。None/0=不延迟（历史开盘价口径）；设 N 后实盘与回测入场可比。无分钟数据回落 VWAP/开盘价 | pipeline |
 | `breakeven_trigger / trail_pct / trail_arm` | None | 保本止损 / 移动止损（回测侧） |
 
 `_intraday_first_trigger(series, stop, tp, partial)` 返回首个触发的 `(type, price)`，
