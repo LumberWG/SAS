@@ -82,6 +82,14 @@ class PipelineParams:
     end_date: str
     initial_capital: float | None = None   # 缺省取 settings.paper_initial_capital
     max_positions: int | None = None       # 缺省取 settings.paper_max_positions
+    # ---- #106：市况自适应持仓数（强市集中 / 弱市分散）----
+    # 需配合 ``regime_ma`` 使用：强市（大盘在 MA 上方）取 ``max_pos_bull``、弱市取 ``max_pos_bear``；
+    # 两者均 None 时退化为固定 ``max_positions``（原行为，无副作用）。
+    max_pos_bull: int | None = None        # 强市持仓数上限
+    max_pos_bear: int | None = None        # 弱市持仓数上限
+    # #107：弱市放宽买入门槛（配合 max_pos_bear 实现"弱市真分散"）。仅弱市且设为非 None 时生效；
+    # 弱市候选不再要求 action=="buy"，只看 score>=bear_half_score。默认 None = 原行为。
+    bear_half_score: float | None = None   # 弱市买入分数门槛（放宽用）
     universe_size: int = 500               # 每日成交额 TopN 股票池
     #: 只在这些代码前缀里选股（None=全市场，即线上行为）。
     #: 过滤发生在**排序取 TopN 之前**，所以池子容量不会因为剔除板块而缩水。
@@ -1420,6 +1428,15 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
         # E13：大盘走弱时把总仓位上限压低（组合层面防守，不砍个股）
         # E32：分档优先——按快慢均线给出 4 档总仓位上限
         day_exposure = exposure
+        # #106：市况自适应持仓数（强市集中 / 弱市分散），复用 regime 信号、无未来函数。
+        # 仅当 regime_ma 启用时生效；弱市取 max_pos_bear、强市取 max_pos_bull，否则原固定值。
+        day_max_positions = max_positions
+        if params.regime_ma is not None:
+            _weak = regime.get(date, True)
+            if _weak and params.max_pos_bear is not None:
+                day_max_positions = int(params.max_pos_bear)
+            elif (not _weak) and params.max_pos_bull is not None:
+                day_max_positions = int(params.max_pos_bull)
         if params.regime_tiers is not None:
             state = tiers_state.get(date, 3)
             day_exposure = exposure * float(params.regime_tiers[min(max(state, 0), 3)])
@@ -1439,12 +1456,16 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
         mv_open = market_value(date, "open")
         total_asset = cash + mv_open
         pool_budget = max(0.0, total_asset * day_exposure - mv_open)
-        slots = max_positions - len(positions)
+        slots = day_max_positions - len(positions)
         ranked = sorted(pending_buys, key=lambda b: -b["score"])
         if params.queue_top_m is not None and int(params.queue_top_m) > 0:
             ranked = ranked[: int(params.queue_top_m)]   # ③ 交易队列容量 topM
         pending_buys = []
-        eligible = [b for b in ranked if b["score"] >= half_score][:slots]
+        # #107：弱市放宽买入门槛时，eligible 也用 bear_half_score，否则原 half_score
+        _hs = (params.bear_half_score
+               if (params.regime_ma is not None and params.bear_half_score is not None and regime.get(date, True))
+               else half_score)
+        eligible = [b for b in ranked if b["score"] >= _hs][:slots]
         weights = {
             b["code"]: b["score"] * (1.0 if b["score"] >= full_score else 0.5)
             for b in eligible
@@ -1455,7 +1476,7 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
             code = b["code"]
             weight = weights.pop(code)
             weight_total = weight + sum(weights.values())
-            if len(positions) >= max_positions or code in positions:
+            if len(positions) >= day_max_positions or code in positions:
                 continue
             px = price_on(code, date, "open")
             pc = prev_close(code, date)
@@ -1705,6 +1726,10 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
                 if close_px is not None and close_px <= p["stop"]:
                     pending_sells.setdefault(code, "止损(收盘确认)")
 
+        # #107：弱市放宽买入门槛（配合 max_pos_bear 实现"弱市真分散"）。
+        # 弱市（regime）且 bear_half_score 设了时，候选不再要求 action=="buy"，只看 score>=bear_half_score。
+        _weak_now = regime.get(date, True) if params.regime_ma is not None else False
+        _bear_relax = _weak_now and params.bear_half_score is not None
         # 买入池：分位数门槛优先（权重可比），否则按绝对分档（线上行为）
         if not rebalance:
             buys = []   # 非调仓日不生成买入委托（卖出/风控照常）
@@ -1712,6 +1737,12 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
             buys = [
                 s for s in _top_pct(scored, params.buy_top_pct)
                 if pass_filters(s["code"], date)
+            ]
+        elif _bear_relax:
+            buys = [
+                s for s in scored
+                if s["score"] >= params.bear_half_score
+                and pass_filters(s["code"], date)
             ]
         else:
             buys = [

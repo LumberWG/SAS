@@ -630,6 +630,14 @@ PROFILES: dict[str, dict] = {
     "cur10": {"max_positions": 10, "rotation_enabled": False},
     "conc4": {"max_positions": 4, "rotation_enabled": False},
     "conc4_rot": {"max_positions": 4, "rotation_enabled": True},
+    # ---- #106：市况自适应持仓数（强市集中 4 只 / 弱市分散 10 只，regime_ma=60 判定强弱势）----
+    # adapt4_10：仅切换持仓数（总仓恒 80%）；adapt4_10_w：弱市同时降总仓到 30%（与线上 weak_exposure 一致）
+    "adapt4_10": {"regime_ma": 60, "max_pos_bull": 4, "max_pos_bear": 10},
+    "adapt4_10_w": {"regime_ma": 60, "weak_exposure": 0.30, "max_pos_bull": 4, "max_pos_bear": 10},
+    # ---- #107：弱市放宽买入门槛，让 max_pos_bear 真正铺满（弱市"真分散"）----
+    # adapt4_10_relax：弱市放宽到 score>=0 且上限 10；adapt4_10_w_relax：再叠弱市降总仓到 30%
+    "adapt4_10_relax": {"regime_ma": 60, "bear_half_score": -100.0, "max_pos_bull": 4, "max_pos_bear": 10},
+    "adapt4_10_w_relax": {"regime_ma": 60, "weak_exposure": 0.30, "bear_half_score": -100.0, "max_pos_bull": 4, "max_pos_bear": 10},
 }
 
 # ---- E48：成交价随机扰动（稳健性检验，BACKTEST_LOG #67 §8）----
