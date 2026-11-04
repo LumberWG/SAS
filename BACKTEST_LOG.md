@@ -7205,3 +7205,20 @@ True（关掉后 `t_tick` 仍返回空）；`TestRotation` 新增 `test_rotation
   （`_max_drawdown_pct` 3 例 + `ledger_interpretation` 1 例）。`test_paper.py` 现 98 例 + `test_ledger.py` 4 例全绿
   （共 102 例，0 失败）。复盘见 `LIVE_REVIEW_2026-11-04.md` §P2（已修复 #113）/ §P3（已澄清 #113）。
 - 至此实盘复盘 P0/P1/P2/P3 全部收口（仅差管理员重启 SAS 让代码线上生效）。
+
+#114 · 2026-11-04（晚）· 配置生效铁律：`.env` 被 `app_state` 覆盖层压住（stop_tighten 0.0≠0.6）
+- #113 末尾「仅差管理员重启 SAS 让代码线上生效」**判断不完整**——重启后（PID 40172→1768）`GET /api/settings`
+  回读发现 `paper_regime_stop_tighten = 0.0`，而 `.env` 写的是 `0.6`。机制层止损收紧**整整一个会话都没生效**。
+- 根因：`config.py` 的 `get_settings()` 是 lru 单例 + **`app_state` 持久覆盖层**。凡是经设置页 / `POST /api/settings`
+  调过的参数会写进 `app_state`（DB 键 `cfg:<key>`），**启动时重放、优先级高于 `.env`**。即：只改 `.env` 不动 `app_state`，
+  该键永远不生效，重启也清不掉（这正是 `#63`/`#70` 当年也踩过的坑，这次又踩一次）。
+- 修复（纯运行时落库，无代码改动）：`POST /api/settings {"changes":{"paper_regime_stop_tighten":0.6}}`
+  → 回读 `value=0.6` / `source=app_state` / `restart_required=False`，已落库、重启保留。
+- 全量审计：23 个 `RUNTIME_KEYS` 与 `.env` 逐项比对，**除已修的 stop_tighten 外 0 处不一致**。
+  唯一一个运行值≠代码默认且有意的覆盖：`paper_weak_exposure=0.3`（设置页单独调过、非 `.env` 键，按「只对齐 `.env`、
+  不动别的调参」原则保留未动——若想改回弱市全暂停，设回 0.0 即可）。
+- 效果：shock/crisis 态新建仓止损距离 = `max(8%×0.6=4.8%, 下限 3%)` = **4.8%**（原 8%）。
+- 铁律（已固化进 README「系统设置」顶部）：改 SAS 配置的正确姿势 =
+  ① 走设置页 / `POST /api/settings`（即时生效 + 落库 + 重启保留）；② 或单键「还原」重读 `.env`；
+  ③ 改完必 `GET /api/settings` 回读确认。光改 `.env` + 重启在多数参数上不够。
+- 本修复为运行时落库，无需改代码 → 无新 commit；文档（本记录 + README 铁律）随下次提交入库。

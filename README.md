@@ -79,6 +79,14 @@ npm run dev                                        # → http://localhost:5173
 
 `/settings` 页把散在四处的配置拉成一张表：`.env`/`config.py`（107 项）、`app_state` 运行时覆盖、页面上各业务开关、以及少量硬编码常量（可交易板块前缀、巨无霸黑名单、回测默认止损止盈、整手股数）。
 
+> ⚠️ **配置生效铁律（改任何参数前先读这一条）**：本系统**不是「改 `.env` + 重启」就万事大吉**。
+> 运行时存在一层 **`app_state` 持久覆盖层**（存于数据库）：凡经「设置页 / `POST /api/settings`」调过的参数会写入
+> `app_state`，并在**每次启动时重放、优先级高于 `.env`**（来源胶囊显示 `运行时`）。结果：某个键一旦被页面调过，
+> 你之后只在 `.env` 里改它，就会被旧覆盖值压住、**重启也清不掉**（真实踩坑见 `BACKTEST_LOG.md` #114）。
+> - **正确改法**：走设置页 / `POST /api/settings`（立即生效 + 落库 + 重启保留），或对单键「还原」重读 `.env`；**不要只改 `.env` 然后指望重启**。
+> - **改完必做**：`GET /api/settings` 回读该键的 `value` 与 `source`，确认已变为预期（别只信 `.env` 写了什么）。
+> - **只读项**（`db_path` / `kline_dir` / `cors_origins` / `app_name` / `debug` 等）只能改 `.env` 后重启，页面/接口不接收其改动。
+
 页面上**只列可编辑的 97 项**。以下 10 项都**完全不显示**（`READONLY_KEYS`）：`api_token`（访问令牌，回显等于把钥匙挂在门上）、`db_path`、`kline_dir`、`cors_origins`、`data_no_proxy_domains`、`auto_scan_strategies` 与 `app_name`（只在启动时用于 `FastAPI(title=)`，改它连前端标题都不变）、`debug`（全仓库无人读取的历史字段）、`disclaimer`（接口 JSON 统一注入的文案常量，不是配置）、`notify_email`（`EmailNotifier` 目前只打日志并返回 False，开了反而多记一条渠道失败），以及剩余硬编码常量（`LOT_SIZE`、板块前缀、巨无霸名单、回测默认止盈止损）。理由一致：改不了或改了没效果，展示了只会让人以为能调。
 
 > 评分阈值（`factor_buy_threshold` / `factor_sell_threshold`）与四项费率（`trade_fee_*`）**已从硬编码挪进配置**：前者决定 buy/sell 判级，后者被回测与实盘共用。整手股数（`LOT_SIZE=100`）仍固定——改了会下出非法委托。
