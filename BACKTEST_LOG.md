@@ -7117,3 +7117,91 @@ True（关掉后 `t_tick` 仍返回空）；`TestRotation` 新增 `test_rotation
 
 ### 5. 下轮计划
 无。`cur10` 基准入场模型自此偏移，后续回测绝对数字需按"开盘+5min"重新基线；若需与历史开盘价基准对照，临时把 `entry_open_delay_minutes` 置 0 即可。
+
+---
+
+### 6. P0 净值落库修复（记录 #108，2026-11-04）
+- 现象：实盘分析时 `paper_equity` 0 行，初判为落库逻辑损坏。实测定位后更正——
+  实盘 2026-11-04 才首批成交，净值原只在每日 15:40 收盘结算落一条；分析在 14:27（收盘前）
+  进行，当日快照尚未生成 → **设计内行为，非插入逻辑坏**。表名映射 `_SIM_TABLES` 仅在影子账本
+  才指向 `sim_equity`，线上盘正确走 `paper_equity`。
+- 真实缺口：净值每天只落一次，若 15:40 前重启/异常则当天永久丢失 → 12-01 判读曲线会断。
+- 修复：`engine.record_equity_snapshot()`（失败静默、同日 upsert）；`live.py tick()` 每笔成交后
+  调用、`place_order` 手动买卖后调用；`settle()` 复用之。回填今日行（total=100194.70,+0.19%）。
+- 测试：新增 `test_record_equity_snapshot_upserts_same_day` / `..._silent_on_failure`；`test_paper.py`
+  全绿（88 例）。复盘见 `D:/Backup/SAS/LIVE_REVIEW_2026-11-04.md` §P0。
+
+## #109 · P1 分数优先轮动（弱市全暂停档也能腾名额）
+- 现象：`paper_*` 实盘 8 持仓含 3 只 ≤42 分弱票（29/33/42），同时 15+ 只 75~95 分候选在待买未进；
+  触顶时不轮出弱票换强票 → 组合质量被低分票拖累。
+- 根因：`paper_rotation_enabled=True` 默认开，但轮动闸门 `if paper_rotation_enabled and not buy_paused`；
+  弱市全暂停档（`paper_weak_exposure=0.0` + `paper_regime_weak_pause=True` → `weak_pause_all` →
+  `buy_paused=True`）下**整个轮动被冻结**，弱票永远换不出、强票排队过期。降仓档（exposure>0）其实能跑，
+  实盘恰好踩在全暂停档默认上。
+- 修复：`engine.py` 新增 `rotation_paused`（仅 `open_delayed`/`open_cooldown`/`crash_pause_buy` 冻结，
+  **不含弱市暂停**）；轮动闸门改用 `not rotation_paused`；弱市全暂停档下若待买池有更强候选
+  （`_pool_has_stronger(pool, weak_score)` 命中）→ 走新 `_rotation_liquidate()` **纯卖清仓腾名额**
+  （不换新，避免违反暂停档不增仓）；`open_drop` 护栏（≥3%）仍全冻、连轮动也停。
+- 测试：新增 `TestRotationWeakMarket`（3 例：弱市强票排队→清仓腾名额 / 无更强候选→不动 / 跳空护栏冻结）；
+  `test_paper.py` 全绿（91 例，原 88 + 3）。复盘见 `LIVE_REVIEW_2026-11-04.md` §P1（已标已修复）。
+- 注：纯卖清仓会即时释放名额，下一 tick 待买池可按分数补入强票；不改变"暂停档不净买入"的纪律。
+
+## #110 · P1 待买不过期（过期买入信号降级进观察名单）
+- 现象：实盘 31 笔待买挂单里大量 75~95 分高分候选未成交；`paper_pending.expire_at` 仅创建后 30 分钟。
+- 根因：`_purge`（tick 开头调用）对过期的 pending **买入**信号直接 `pop` 丢弃。窗口外的买单靠 `kept_buys`
+  留 pending 等下个买入窗口，但 30 分钟 TTL 会让它在轮到成交前被静默丢弃——高分候选排队过期丢失。
+- 修复：`live.py _purge` 中过期 pending 买入信号降级进候补队列（观察名单）：`expire_at` 顺延到
+  `next_open + 5h30m`（~次日 11:00），reason 追加"过期转入观察名单"；下游 tick 的"名额释放补位"与
+  `rotation_candidates` 已自动消费候补，腾出名额/下一窗口/次日优先回补。守"只降不升"（不主动净买入）；
+  候补满（`paper_backlog_max`）/ 关闭（`paper_backlog_enabled`）或卖出信号仍按原逻辑丢弃。
+  顺带修复：原 `_purge` 改动后不落库，现于确有变化时 `_persist_pending()`，避免降级结果重启即丢。
+- 测试：新增 `TestBacklog` 4 例（买入降级 / 卖出丢弃 / 候补满丢弃 / 候补关丢弃）；`test_paper.py` 全绿（95 例，原 91 + 4）。
+- 复盘见 `LIVE_REVIEW_2026-11-04.md` §P1（已标已修复）。
+
+## #111 · P2 盘内错峰（每 tick 买入节奏节流）
+- 现象：实盘 8 只同秒买入（13:54:42），单点择时风险。用户疑惑"好票不可能一起出现"——正确，是撮合
+  节奏的"积压-爆发"：信号分散重生，但买入只在 5 分钟窗口内成交、窗口外积压，窗口一开单 tick 内全成交。
+- 根因：`engine.execute_recommendations` 买入循环（遍历 `eligible`）无 per-tick 节流，`paper_tick` 默认 5s。
+- 修复：新增 `paper_buys_per_tick`（默认 0=关闭、保持原行为；可热切，已入 `RUNTIME_KEYS` + 设置页"买入节奏"分组）。
+  单 tick 最多成交 N 只买入，其余返回「本tick买入节奏已达上限(等待下轮)」skip；`live.tick` 的 `retry` 判断
+  识别"买入节奏"关键词保留其在 pending，下一 tick 重试。`eligible` 已按分数降序，故每 tick 优先成交最高分；
+  卖出不受限。这是「盘内错峰」，积压信号仍在买入窗口内分批；跨时段分散需进一步拆窗口（后续）。
+- 测试：新增 `TestBuyPace` 3 例（默认全成交 / per_tick=1 只成交最高分且其余节流 / 节流只限买入不影响卖出）；
+  `test_paper.py` 全绿（98 例，原 95 + 3）。复盘见 `LIVE_REVIEW_2026-11-04.md` §P2（已标已修复）。
+
+#112 · 全时段买入窗口（按用户 2026-11-04 "9:35-上午收盘 / 13:05-下午收盘 随时可成交，不一定要买全10只"）
+- 根因：旧设计 `paper_buy_open_window_minutes=5` 是"正向窗口"——只在开盘后 5 分钟内可成交，窗口外买单全积压，
+  窗口一开一次性爆发（P2 批量买入的根）。用户要的是"全时段可成交 + 只拦开盘前 5 分钟"，即冷静期语义。
+- 改动：
+  - `config.py`：`paper_buy_open_window_minutes: int = 0`（0=全时段可成交，仅受冷静期约束）；
+    `paper_open_cooldown_minutes: int = 5`（开盘后 5 分钟内禁止买入，09:30 与 13:00 两个时段分别生效）；
+    `paper_buys_per_tick: int = 2`（盘内错峰默认开，避免一秒买全 10 只）。
+  - `param_specs.py`：把 `paper_buy_open_window_minutes` 加入 RUNTIME_KEYS（页面可热切）；设值页标签改为
+    "开盘成交窗口(分钟)：0=全时段可成交(仅受开盘冷静期约束)；>0=只限开盘后N分钟内可成交"。
+  - `live.py`：更新两处过时注释（原"买入只在开盘窗口成交/收敛到开盘那一刻"），如实反映全时段模型与
+    回测「次日开盘价」口径的偏离（记录 #19）。
+  - `.env.example`：补 `PAPER_BUY_OPEN_WINDOW_MINUTES=0` / `PAPER_OPEN_COOLDOWN_MINUTES=5`，`PAPER_BUYS_PER_TICK=2`。
+- 测试：新增 `TestOpenProtection::test_session_wide_window_with_cooldown`（9:33 拦 / 10:00 买 / 11:00 买 /
+  13:03 拦 / 14:30 买）；原 `test_intraday_no_exposure_cap` / `test_pool_split_only_among_available_slots` 显式关节流以保全意。
+  `test_paper.py` 全绿（98 例）。复盘见 `LIVE_REVIEW_2026-11-04.md` §P2（已扩展 #111+#112）。
+- 注：此举让实盘成交偏离回测「次日开盘价」口径（#19），后续回测/实盘对照需改用统一「成交时点」口径。
+
+#113 · 2026-11-04（P2-2 机制层→止损收紧 + P3 并行账本判读口径）
+- 背景：`regime.py` 已识别 shock/crisis 态，但从未驱动止损；并行 sim 账本常被误读成「独立策略对比」。
+- P2-2 机制层止损收紧：
+  - `config.py`：新增 `paper_regime_stop_tighten`（默认 0=关；建议 0.6）+ `paper_regime_stop_min`（下限 0.03）。
+  - `engine.py`：新增 `_stop_distance_for_buy(code, regime_state)`；`execute_recommendations` 买入前算一次
+    `_dynamic_regime(today)`，shock/crisis 态新建仓止损距离 × 系数（8%×0.6=4.8%），距离不低于下限；
+    **仅新建仓生效**（已有持仓止损建仓时定死、不回溯改）；指数缺失→normal→不收紧，零风险。
+  - 注：原提议"收紧 paper_atr_stop_mult"改为独立系数——ATR 倍数是"放宽"语义，与"风险态收紧"方向相反，混用会打架。
+  - `param_specs.py`：两项加入 RUNTIME_KEYS + 设置页"机制层止损收紧"分组 + 短标签。
+  - `.env.example`：补 `PAPER_REGIME_STOP_TIGHTEN=0` / `PAPER_REGIME_STOP_MIN=0.03`。
+- P3 并行账本判读口径：
+  - `ledger.py`：`ledger_overview()` 每账本加 `role`（=参数敏感性对照，非独立策略）与 `max_drawdown_pct`
+    （由净值序列算最大回撤，熊市里比绝对收益更有意义）；新增 `LEDGER_ROLE` / `LEDGER_INTERPRETATION_TEXT`
+    / `ledger_interpretation()`（角色 + 三条判读口径）。
+  - `api/paper.py`：`/sim` 接口返回加 `interpretation` 字段，把判读口径直接下发给前端/复盘。
+- 测试：新增 `TestRegimeStopTighten`（4 例：默认关不收紧/shock 收紧/calm 不收紧/下限保护）+ `tests/test_ledger.py`
+  （`_max_drawdown_pct` 3 例 + `ledger_interpretation` 1 例）。`test_paper.py` 现 98 例 + `test_ledger.py` 4 例全绿
+  （共 102 例，0 失败）。复盘见 `LIVE_REVIEW_2026-11-04.md` §P2（已修复 #113）/ §P3（已澄清 #113）。
+- 至此实盘复盘 P0/P1/P2/P3 全部收口（仅差管理员重启 SAS 让代码线上生效）。

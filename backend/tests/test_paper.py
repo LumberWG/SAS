@@ -414,6 +414,7 @@ class TestExecute:
         monkeypatch.setattr(eng, "_latest_price", fake_price)
         eng.settings.paper_max_positions = 10
         eng.ensure_account()
+        monkeypatch.setattr(eng.settings, "paper_buys_per_tick", 0, raising=False)  # 本测试聚焦暴露上限，关掉盘内错峰
         codes = [f"6000{i:02d}" for i in range(6)]
         results = asyncio.run(eng.execute_recommendations(
             [FakeRec(c, f"股票{c}", "buy", 45.0, "突破") for c in codes]))
@@ -435,6 +436,7 @@ class TestExecute:
         monkeypatch.setattr(eng, "_latest_price", fake_price)
         eng.settings.paper_max_positions = 3
         eng.ensure_account()
+        monkeypatch.setattr(eng.settings, "paper_buys_per_tick", 0, raising=False)  # 本测试聚焦池子分配，关掉盘内错峰
         codes = [f"6000{i:02d}" for i in range(5)]
         results = asyncio.run(eng.execute_recommendations(
             [FakeRec(c, f"股票{c}", "buy", 45.0, "突破") for c in codes]))
@@ -557,6 +559,34 @@ class TestSettle:
         # 总资产 = 现金100000 + 市值1000×10 = 110000
         assert detail["total_asset"] == pytest.approx(110000, abs=0.01)
         assert detail["return_pct"] == pytest.approx(10.0, abs=0.01)
+
+    def test_record_equity_snapshot_upserts_same_day(self, engine):
+        """净值快照同日多次写入应 upsert（不重复成多行）。"""
+        from datetime import datetime
+
+        eng, db, _ = engine
+        eng.ensure_account()
+        db.upsert_paper_position("600004", "测试A", 1000, 10.0, "2020-01-01", "t")
+
+        asyncio.run(eng.record_equity_snapshot())
+        asyncio.run(eng.record_equity_snapshot())  # 同日再写一次 → 仍是 1 行
+        rows = db.list_paper_equity()
+        assert len(rows) == 1
+        assert rows[0]["date"] == datetime.now().strftime("%Y-%m-%d")
+        assert rows[0]["total_asset"] == pytest.approx(110000, abs=0.01)
+
+    def test_record_equity_snapshot_silent_on_failure(self, engine, monkeypatch):
+        """account_detail 抛错时快照静默失败，不向上传播。"""
+        eng, db, _ = engine
+        eng.ensure_account()
+
+        def boom(*a, **k):
+            raise RuntimeError("no market data")
+
+        monkeypatch.setattr(eng, "account_detail", boom)
+        # 不应抛异常
+        asyncio.run(eng.record_equity_snapshot())
+        assert db.list_paper_equity() == []
 
     def test_settle_records_regime_snapshot(self, engine):
         """结算顺带落一行择时快照：弱市但没信号的日子也要留痕（#70 §8）。"""
@@ -1359,6 +1389,79 @@ class TestBacklog:
         assert len(deferred) == 1
         assert len(trader._backlog) == 1
 
+    def test_expired_pending_buy_downgrades_to_watchlist(self, monkeypatch, tmp_path):
+        """过期的 pending 买入信号不丢，降级进观察名单（候补队列）。
+
+        「待买不过期」核心修复：高分候选在等到下一个买入窗口前不会被
+        30 分钟 TTL 静默丢弃。
+        """
+        from datetime import datetime, timedelta
+
+        trader, live_module = self._trader(monkeypatch, tmp_path)
+        past = datetime.now() - timedelta(minutes=31)
+        sig = self._signal(live_module, "600004", 95.0)
+        sig.expire_at = past
+        trader._pending["600004"] = sig
+
+        trader._purge(datetime.now())
+
+        assert "600004" not in trader._pending
+        assert "600004" in trader._backlog
+        # 观察名单有效期远长于 TTL，足以撑过下一个买入窗口
+        assert trader._backlog["600004"].expire_at > datetime.now()
+        assert "观察名单" in trader._backlog["600004"].reason
+
+    def test_expired_pending_sell_is_discarded(self, monkeypatch, tmp_path):
+        """过期的卖出信号仍直接丢弃（不进观察名单）。"""
+        from datetime import datetime, timedelta
+
+        trader, live_module = self._trader(monkeypatch, tmp_path)
+        past = datetime.now() - timedelta(minutes=31)
+        sell = live_module.PendingSignal(
+            code="600005", name="600005", action="sell", reason="止盈",
+            created_at=past, expire_at=past, score=50.0,
+        )
+        trader._pending["600005"] = sell
+
+        trader._purge(datetime.now())
+
+        assert "600005" not in trader._pending
+        assert "600005" not in trader._backlog
+
+    def test_expired_pending_discarded_when_backlog_full(self, monkeypatch, tmp_path):
+        """候补已满时，过期 pending 买入信号降级失败、仍丢弃（守容量上限）。"""
+        from datetime import datetime, timedelta
+
+        trader, live_module = self._trader(monkeypatch, tmp_path)
+        monkeypatch.setattr(trader.settings, "paper_backlog_max", 1)
+        trader._backlog["600001"] = self._signal(live_module, "600001", 30.0)
+        past = datetime.now() - timedelta(minutes=31)
+        sig = self._signal(live_module, "600004", 95.0)
+        sig.expire_at = past
+        trader._pending["600004"] = sig
+
+        trader._purge(datetime.now())
+
+        assert "600004" not in trader._pending
+        assert "600004" not in trader._backlog
+        assert set(trader._backlog) == {"600001"}
+
+    def test_expired_pending_discarded_when_backlog_disabled(self, monkeypatch, tmp_path):
+        """候补关闭时，过期 pending 买入信号直接丢弃（退回原行为）。"""
+        from datetime import datetime, timedelta
+
+        trader, live_module = self._trader(monkeypatch, tmp_path)
+        monkeypatch.setattr(trader.settings, "paper_backlog_enabled", False)
+        past = datetime.now() - timedelta(minutes=31)
+        sig = self._signal(live_module, "600004", 95.0)
+        sig.expire_at = past
+        trader._pending["600004"] = sig
+
+        trader._purge(datetime.now())
+
+        assert "600004" not in trader._pending
+        assert "600004" not in trader._backlog
+
     def test_manual_position_not_rotated(self, engine):
         """手动建仓的持仓不被自动轮动卖出。"""
         eng, db, _ = engine
@@ -1572,3 +1675,233 @@ class TestOpenProtection:
         fake_dt.now = lambda: _dt(2026, 11, 3, 10, 0)
         results = asyncio.run(eng.execute_recommendations(recs))
         assert results[0].side == "buy"
+
+    def test_session_wide_window_with_cooldown(self, engine, monkeypatch):
+        """按用户 2026-11-04 要求：9:35-上午收盘 / 13:05-下午收盘 全时段可成交，
+        仅拦开盘前 5 分钟（开盘冷静期）。验证多时点成交，而非只在开盘窗口批量爆发。"""
+        import app.paper.engine as E
+        from datetime import datetime as _dt
+        from unittest.mock import MagicMock
+
+        eng, db, _ = engine
+        eng.ensure_account()
+        monkeypatch.setattr(eng.settings, "paper_buy_open_window_minutes", 0, raising=False)
+        monkeypatch.setattr(eng.settings, "paper_open_cooldown_minutes", 5, raising=False)
+        monkeypatch.setattr(eng, "_buy_allowed", lambda code, name: (True, ""))
+        monkeypatch.setattr(eng, "_idx_open_drop", lambda: -0.02)  # 利好日：开盘延迟不触发
+        fake_dt = MagicMock(wraps=_dt)
+        monkeypatch.setattr(E, "datetime", fake_dt)
+
+        cases = [
+            (_dt(2026, 11, 3, 9, 33), "skip", "开盘冷静期"),   # 早盘冷静期内
+            (_dt(2026, 11, 3, 10, 0), "buy", None),            # 上午盘中
+            (_dt(2026, 11, 3, 11, 0), "buy", None),            # 上午收盘前
+            (_dt(2026, 11, 3, 13, 3), "skip", "开盘冷静期"),   # 午后冷静期内
+            (_dt(2026, 11, 3, 14, 30), "buy", None),           # 下午盘中
+        ]
+        for i, (t, expect_side, expect_reason) in enumerate(cases):
+            fake_dt.now = lambda: t
+            code = "60010%d" % i
+            rec = FakeRec(code, "票%d" % i, "buy", 60.0, "突破")
+            results = asyncio.run(eng.execute_recommendations([rec], prices={code: 10.0}))
+            assert results[0].side == expect_side, (t, results[0])
+            if expect_reason:
+                assert expect_reason in results[0].reason, (t, results[0].reason)
+
+
+class TestRotationWeakMarket:
+    """P1：弱市全暂停档下轮动不再被一刀切冻结，能清出最弱票腾名额（强票排队时）。"""
+
+    @pytest.fixture(autouse=True)
+    def _enable_rotation(self, monkeypatch):
+        from app.config import get_settings
+
+        monkeypatch.setattr(
+            get_settings(), "paper_rotation_enabled", True, raising=False)
+
+    def _gate_full_pause(self, eng, monkeypatch):
+        """打开弱市闸门，固定判为弱市、价格 10 元，weak_exposure=0（全暂停档）。"""
+        monkeypatch.setattr(eng.settings, "paper_regime_ma", 60, raising=False)
+        monkeypatch.setattr(eng.settings, "paper_regime_weak_pause", True, raising=False)
+        monkeypatch.setattr(eng.settings, "paper_weak_exposure", 0.0, raising=False)
+
+        async def _weak(today: str) -> bool:
+            return True
+
+        async def _price(code: str, quotes=None):
+            return 10.0
+
+        monkeypatch.setattr(eng, "_index_is_weak", _weak)
+        monkeypatch.setattr(eng, "_latest_price", _price)
+
+    def test_liquidates_weak_when_stronger_queued(self, engine, monkeypatch):
+        """弱市全暂停 + 有更强候选排队 → 清出最弱票（只卖不买，强票待补位）。"""
+        eng, db, _ = engine
+        eng.ensure_account()
+        db.upsert_paper_position(
+            "600004", "弱票", 1000, 10.0, "2026-10-20", "test", score=29.0)
+        db.update_paper_cash(90000.0)
+        self._gate_full_pause(eng, monkeypatch)
+
+        results = asyncio.run(eng.execute_recommendations(
+            [], rotation_candidates=[FakeRec("600001", "强票", "buy", 95.0, "突破")]))
+
+        sells = [r for r in results if r.side == "sell"]
+        assert len(sells) == 1 and sells[0].code == "600004"
+        assert "轮动清仓腾名额" in sells[0].reason
+        assert all(r.side != "buy" for r in results)        # 全暂停档不换入
+        assert db.get_paper_position("600004") is None
+        assert db.get_paper_position("600001") is None
+
+    def test_no_liquidate_when_no_stronger(self, engine, monkeypatch):
+        """弱市全暂停但队列里只有更弱候选 → 不无谓清仓。"""
+        eng, db, _ = engine
+        eng.ensure_account()
+        db.upsert_paper_position(
+            "600004", "弱票", 1000, 10.0, "2026-10-20", "test", score=29.0)
+        db.update_paper_cash(90000.0)
+        self._gate_full_pause(eng, monkeypatch)
+
+        results = asyncio.run(eng.execute_recommendations(
+            [], rotation_candidates=[FakeRec("600001", "更弱票", "buy", 25.0, "突破")]))
+
+        assert all(r.side != "sell" for r in results)
+        assert db.get_paper_position("600004") is not None
+
+    def test_rotation_frozen_on_crash_guard(self, engine, monkeypatch):
+        """跳空护栏（开盘利空）触发时连轮动也冻结，不接刀。"""
+        eng, db, _ = engine
+        eng.ensure_account()
+        db.upsert_paper_position(
+            "600004", "弱票", 1000, 10.0, "2026-10-20", "test", score=29.0)
+        db.update_paper_cash(90000.0)
+        self._gate_full_pause(eng, monkeypatch)
+        monkeypatch.setattr(eng.settings, "paper_t_crash_guard", 0.03, raising=False)
+
+        def _open_drop():
+            return 0.05   # 大盘开盘跌 5% ≥ 护栏 3%
+
+        monkeypatch.setattr(eng, "_idx_open_drop", _open_drop)
+
+        results = asyncio.run(eng.execute_recommendations(
+            [], rotation_candidates=[FakeRec("600001", "强票", "buy", 95.0, "突破")]))
+
+        assert all(r.side != "sell" for r in results)
+        assert db.get_paper_position("600004") is not None
+
+
+class TestBuyPace:
+    """P2 盘内错峰：每 tick 最多成交 paper_buys_per_tick 只买入，避免积压信号一秒全打。"""
+
+    @staticmethod
+    def _run(eng, recs, per_tick, prices):
+        eng.ensure_account()
+        # 绕过真实交易池过滤（大市值/名称校验），聚焦测试盘内错峰节流逻辑
+        eng._buy_allowed = lambda code, name: (True, "")
+        eng.settings.paper_buys_per_tick = per_tick
+        return asyncio.run(eng.execute_recommendations(recs, prices=prices))
+
+    def test_default_no_throttle_buys_all(self, engine):
+        """默认 paper_buys_per_tick=0：积压的多只买入一个 tick 内全成交（原行为）。"""
+        eng, _, _ = engine
+        recs = [
+            FakeRec("600004", "票A", "buy", 80.0, "突破"),
+            FakeRec("600001", "票B", "buy", 60.0, "突破"),
+        ]
+        results = self._run(
+            eng, recs, 0, {"600004": 10.0, "600001": 50.0})
+        buys = [r for r in results if r.side == "buy"]
+        assert len(buys) == 2
+
+    def test_per_tick_one_limits_to_top_score(self, engine):
+        """paper_buys_per_tick=1：每 tick 只成交 1 只（最高分优先），其余返回「买入节奏」skip。"""
+        eng, _, _ = engine
+        recs = [
+            FakeRec("600004", "票A", "buy", 80.0, "突破"),
+            FakeRec("600001", "票B", "buy", 60.0, "突破"),
+        ]
+        results = self._run(
+            eng, recs, 1, {"600004": 10.0, "600001": 50.0})
+        buys = [r for r in results if r.side == "buy"]
+        skips = [r for r in results if r.side == "skip"]
+        assert len(buys) == 1
+        assert buys[0].code == "600004"          # 最高分优先成交
+        assert any("买入节奏" in r.reason for r in skips)  # 其余被节流、由 live 保留重试
+
+    def test_throttle_only_limits_buys(self, engine):
+        """节流只限买入；同日多笔卖出照常执行，不受 per_tick 影响。"""
+        eng, db, _ = engine
+        eng.ensure_account()
+        db.upsert_paper_position("600004", "票A", 1000, 10.0, "2026-10-20", "test", score=30.0)
+        db.upsert_paper_position("600001", "票B", 1000, 50.0, "2026-10-20", "test", score=30.0)
+        recs = [
+            FakeRec("600004", "票A", "sell", -4.0, "死叉"),
+            FakeRec("600001", "票B", "sell", -4.0, "死叉"),
+            FakeRec("600002", "票C", "buy", 60.0, "突破"),
+        ]
+        results = self._run(
+            eng, recs, 1, {"600004": 10.0, "600001": 50.0, "600002": 20.0})
+        sells = [r for r in results if r.side == "sell"]
+        buys = [r for r in results if r.side == "buy"]
+        assert len(sells) == 2          # 卖出不受 per_tick 限制
+        assert len(buys) == 1          # 买入被限到 1 只
+
+
+class TestRegimeStopTighten:
+    """P2-2 机制层止损收紧：shock/crisis 态新建仓用更紧的止损距离（仅限新建仓）。
+
+    新建仓时读当日 regime 状态；非风险态 / 系数为 0 / 指数缺失 → 不收紧（原行为）。
+    已有持仓的止损在建仓时定死，不回溯改。
+    """
+
+    @staticmethod
+    def _run(eng, recs, tighten, regime_state, prices):
+        eng.ensure_account()
+        eng._buy_allowed = lambda code, name: (True, "")
+        # 关掉 ATR 放宽，让 _stop_distance 确定等于 paper_stop_loss
+        eng.settings.paper_atr_stop_mult = 0.0
+        eng.settings.paper_stop_loss = 0.08
+        eng.settings.paper_regime_stop_tighten = tighten
+        # 强制当日 regime 状态（绕过指数文件依赖）
+        async def fake_regime(today):
+            return {"state": regime_state, "exposure_cap": 0.8,
+                    "pause_all": False, "reason": "test", "metrics": {}}
+        eng._dynamic_regime = fake_regime
+        return asyncio.run(eng.execute_recommendations(recs, prices=prices))
+
+    def _stop_of(self, db, code):
+        pos = db.get_paper_position(code)
+        return float(pos["cost_price"]), float(pos["stop_price"])
+
+    def test_default_off_no_tighten(self, engine):
+        """系数为 0（默认）：即便 shock 态也不收紧，距离 = 固定止损 8%。"""
+        eng, db, _ = engine
+        recs = [FakeRec("600004", "票A", "buy", 80.0, "突破")]
+        self._run(eng, recs, 0.0, "shock", {"600004": 10.0})
+        cost, stop = self._stop_of(db, "600004")
+        assert abs(stop - cost * (1 - 0.08)) < 1e-3
+
+    def test_shock_tightens_new_position(self, engine):
+        """shock 态 + 系数 0.6：新建仓止损距离 = 8% × 0.6 = 4.8%。"""
+        eng, db, _ = engine
+        recs = [FakeRec("600004", "票A", "buy", 80.0, "突破")]
+        self._run(eng, recs, 0.6, "shock", {"600004": 10.0})
+        cost, stop = self._stop_of(db, "600004")
+        assert abs(stop - cost * (1 - 0.048)) < 1e-3
+
+    def test_calm_not_tightened(self, engine):
+        """calm/normal 态：即便开了收紧系数，新建仓仍用固定 8%（只风险态收紧）。"""
+        eng, db, _ = engine
+        recs = [FakeRec("600004", "票A", "buy", 80.0, "突破")]
+        self._run(eng, recs, 0.6, "calm", {"600004": 10.0})
+        cost, stop = self._stop_of(db, "600004")
+        assert abs(stop - cost * (1 - 0.08)) < 1e-3
+
+    def test_floor_respected(self, engine):
+        """收紧后距离不低于下限：8%×0.1=0.8% < 下限 3% → 取 3%。"""
+        eng, db, _ = engine
+        recs = [FakeRec("600004", "票A", "buy", 80.0, "突破")]
+        self._run(eng, recs, 0.1, "crisis", {"600004": 10.0})
+        cost, stop = self._stop_of(db, "600004")
+        assert abs(stop - cost * (1 - 0.03)) < 1e-3
+

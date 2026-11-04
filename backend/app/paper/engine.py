@@ -448,6 +448,20 @@ class PaperEngine:
             return base
         return max(base, min(dist, float(getattr(self.settings, "paper_atr_stop_max", 0.2))))
 
+    def _stop_distance_for_buy(self, code: str, regime_state: str) -> float:
+        """建仓时的止损距离，叠加机制层收紧：shock/crisis 态把距离乘以收紧系数。
+
+        仅对**新建仓**生效（已有持仓的止损在建仓时一次定死，不回溯改，便于复盘当时定的止损）；
+        regime 缺失 / 非风险态 / 系数为 0 时退化为 :meth:`_stop_distance`（原行为）。
+        距离不低于 ``paper_regime_stop_min``，防止过度收紧变成噪声止损。
+        """
+        base = self._stop_distance(code)
+        tight = float(getattr(self.settings, "paper_regime_stop_tighten", 0.0) or 0.0)
+        if tight > 0 and regime_state in ("shock", "crisis"):
+            base = base * tight
+        floor = float(getattr(self.settings, "paper_regime_stop_min", 0.03) or 0.03)
+        return max(base, floor)
+
     async def _index_is_weak(self, today: str) -> bool:
         """大盘择时：上证指数前一交易日收盘 < MA(N) 即判弱势（与回测 regime 同口径，无未来函数）。
 
@@ -799,6 +813,43 @@ class PaperEngine:
             return rec, score, float(price)
         return None
 
+    def _pool_has_stronger(self, rot_pool: list, weak_score: float) -> bool:
+        """``rot_pool`` 里是否存在「可换入级」的更强候选（分数明显高于最弱持仓）。
+
+        用于弱市全暂停档：只有确实有更强票在排队时，才清出最弱票腾名额（降风险），
+        避免无谓清仓（P1：弱票占位、强票排队）。判定只比分数，不过交易池——
+        弱市全暂停档反正买不进，清出弱票只是腾名额。
+        """
+        min_s = float(self.settings.paper_rotation_min_score)
+        half = float(self.settings.paper_half_score)
+        gap = float(self.settings.paper_rotation_gap)
+        for rec in rot_pool:
+            sc = _rec_score(rec)
+            if sc >= min_s and sc >= half and sc - weak_score >= gap:
+                return True
+        return False
+
+    async def _rotation_liquidate(
+        self, weak_code: str, weak_pos: dict, weak_price: float, today: str, reason: str,
+    ):
+        """轮动退化路径：只卖最弱票、不换入（弱市全暂停档腾名额/降风险）。
+
+        严格 T+1：只卖可卖批次；卖不掉返回 ``None``（由调用方决定是否继续）。
+        """
+        sold = db.reduce_paper_sellable(weak_code, int(weak_pos["shares"]), today)
+        if sold <= 0:
+            return None
+        amount = weak_price * sold
+        fee = self.calc_fee("sell", amount)
+        db.insert_paper_trade(
+            weak_code, weak_pos.get("name", ""), "sell", weak_price,
+            sold, amount, fee, reason, today,
+        )
+        return TradeResult(
+            weak_code, weak_pos.get("name", ""), "sell", sold,
+            weak_price, amount, fee, reason,
+        )
+
     # ------------------------------------------------------------------
     # 信号执行（核心）
     # ------------------------------------------------------------------
@@ -831,6 +882,9 @@ class PaperEngine:
         cash = float(account["cash"])
         total_asset = await self.total_asset(prices)
         today = datetime.now().strftime("%Y-%m-%d")
+        # 机制层止损收紧：shock/crisis 态新建仓用更紧的止损（仅限新建仓，已有持仓不动）。
+        # 指数缺失 → regime=normal → 不收紧，零风险；按日缓存，开销极低。
+        _regime_state = (await self._dynamic_regime(today)).get("state", "normal")
 
         results: list[TradeResult] = []
         buy_candidates = [r for r in recommendations if r.action == "buy"]
@@ -960,6 +1014,9 @@ class PaperEngine:
         open_delayed = self._open_delayed(datetime.now())
         open_cooldown = self._open_cooldown(datetime.now())
         buy_paused = weak_pause_all or crash_pause_buy or open_delayed or open_cooldown
+        # 轮动冻结只认「开盘保护」（跳空护栏/延迟/冷静期）；弱市全暂停档不冻结轮动，
+        # 让轮动能「清出弱票腾名额」（P1）。开盘利空/刚开盘不操作，连轮动也停。
+        rotation_paused = open_delayed or open_cooldown or crash_pause_buy
         if crash_pause_buy and not weak_pause_all:
             logger.warning(
                 "开盘跳空护栏：大盘开盘跌幅 %.1f%% ≥ %.1f%%，暂停自动买入/轮动（仅卖出）",
@@ -1008,7 +1065,10 @@ class PaperEngine:
         # 为什么循环：一次 API 调用里可以连换多只（含全换），不必等下一个 tick；
         #   每轮重新取「当前最弱」，被换掉的票即退出候选池（sold_codes 防回转买入）。
         sold_codes: set[str] = set()
-        if self.settings.paper_rotation_enabled and not buy_paused:
+        # 轮动不受「弱市全暂停档」冻结（否则弱票占位、强票排队过期，P1）：
+        # 只在开盘保护（延迟/冷静期/跳空护栏）时冻结——开盘利空/刚开盘不操作。
+        # 弱市全暂停档下轮动退化为「清出最弱票腾名额」（见下面两个分支），不换入。
+        if self.settings.paper_rotation_enabled and not rotation_paused:
             used = db.count_paper_trades("轮动替换", today, side="sell")
             max_rot = int(self.settings.paper_rotation_max_per_day)
             rot_pool = [*buy_candidates, *(rotation_candidates or [])]
@@ -1043,6 +1103,23 @@ class PaperEngine:
                     exclude=sold_codes | consumed,
                 )
                 if target is None:
+                    # 弱市全暂停档下选不到可直接换入的强票，但 rot_pool 里确有明显更强的票
+                    # 在排队 —— 清出最弱票腾名额（降风险），强票待弱市解除后由 backlog 补位
+                    # （P1）。非弱市则保持不动（避免白付摩擦）。
+                    if weak_pause_all and self._pool_has_stronger(rot_pool, weak_score):
+                        res = await self._rotation_liquidate(
+                            weak_code, weak_pos, weak_price, today,
+                            f"轮动清仓腾名额(弱市全暂停,建仓{weak_score:.0f}分)")
+                        if res is not None:
+                            cash += res.amount - res.fee
+                            positions.pop(weak_code, None)
+                            sold_codes.add(weak_code)
+                            used += 1
+                            results.append(res)
+                            logger.info(
+                                "轮动清仓腾名额：卖出 %s（建仓 %.0f 分），弱市解除后强票补位",
+                                weak_code, weak_score)
+                            continue
                     break
                 target_rec, target_score, target_price = target
                 # 「换股」必须真能把钱投回去：换入票能吸收的金额受三重约束——
@@ -1054,6 +1131,22 @@ class PaperEngine:
                     0.0, exposure_cap - max(0.0, total_asset - (cash + proceeds)))
                 deployable = min(proceeds, total_asset * single_max, available_after)
                 if deployable < proceeds or deployable < target_price * LOT_SIZE:
+                    # 换入投不回（弱市全暂停 exposure 压到 0 / 降仓档封顶）：弱市全暂停档且有
+                    # 更强票排队 → 纯卖清仓腾名额；否则维持原「不卖」语义（卖了也买不回来）。
+                    if weak_pause_all and self._pool_has_stronger(rot_pool, weak_score):
+                        res = await self._rotation_liquidate(
+                            weak_code, weak_pos, weak_price, today,
+                            f"轮动清仓腾名额(弱市全暂停,建仓{weak_score:.0f}分)")
+                        if res is not None:
+                            cash += res.amount - res.fee
+                            positions.pop(weak_code, None)
+                            sold_codes.add(weak_code)
+                            used += 1
+                            results.append(res)
+                            logger.info(
+                                "轮动清仓腾名额：卖出 %s（建仓 %.0f 分），弱市解除后强票补位",
+                                weak_code, weak_score)
+                            continue
                     logger.info(
                         "不轮动 %s（市值 %.0f 元）：换入 %s 最多只投回 %.0f 元"
                         "（单票上限 %.0f / 仓位剩余 %.0f），卖了也买不回来",
@@ -1171,7 +1264,17 @@ class PaperEngine:
             or SINGLE_POSITION_MAX_RATIO
         )
 
+        per_tick = int(getattr(self.settings, "paper_buys_per_tick", 0) or 0)
+        buys_this_tick = 0
         for _score, rec, price, weight in eligible:
+            # P2 盘内错峰：每 tick 最多成交 paper_buys_per_tick 只买入，其余留后续 tick
+            # （live 的 retry 会保留），避免单 tick 把积压信号一秒全打出去造成单点择时暴露。
+            # 0/未设 = 不限制（原行为）。eligible 已按分数降序，故每 tick 优先成交最高分。
+            if per_tick > 0 and buys_this_tick >= per_tick:
+                results.append(TradeResult(
+                    rec.code, getattr(rec, "name", ""), "skip", 0, price,
+                    0.0, 0.0, "本tick买入节奏已达上限(等待下轮)"))
+                continue
             weights.pop(rec.code, None)
             weight_total = weight + sum(weights.values())
             if len(positions) >= max_positions:
@@ -1209,9 +1312,9 @@ class PaperEngine:
             cash -= amount + fee
             available_budget = max(0.0, available_budget - amount)
             name = getattr(rec, "name", "") or rec.code
-            # 止损线在建仓时一次定死（固定 8% 或 max(8%, 2×ATR)），
+            # 止损线在建仓时一次定死（固定 8% 或 max(8%, 2×ATR)，shock/crisis 态再叠加收紧），
             # 避免高波动票被固定 8% 的噪声打掉、也便于复盘「当时定的止损是多少」
-            stop_price = round(cost_price * (1 - self._stop_distance(rec.code)), 3)
+            stop_price = round(cost_price * (1 - self._stop_distance_for_buy(rec.code, _regime_state)), 3)
             db.add_paper_lot(
                 rec.code, name, shares, cost_price, today,
                 getattr(rec, "reason", "买入信号"), score=_rec_score(rec),
@@ -1222,6 +1325,7 @@ class PaperEngine:
                 getattr(rec, "reason", "买入信号"), today,
             )
             positions[rec.code] = {"code": rec.code, "name": name}
+            buys_this_tick += 1
             results.append(TradeResult(
                 rec.code, name, "buy", shares, price, amount, fee,
                 getattr(rec, "reason", "买入信号")))
@@ -1291,6 +1395,7 @@ class PaperEngine:
             )
             db.update_paper_cash(round(cash, 2))
             logger.info("手动卖出 %s %d 股（可卖）@ %.2f", code, sold, price)
+            await self.record_equity_snapshot()
             return TradeResult(code, pos["name"], "sell", sold, price, amt, fee, reason)
 
         # ---- 买入 ----
@@ -1315,6 +1420,7 @@ class PaperEngine:
         # 持仓纳入自选：保证后续卖出建议能覆盖到这只股票
         db.add_watch(code, name, note="持仓自动加入", source="auto")
         logger.info("手动买入 %s %d 股 @ %.2f", code, qty, price)
+        await self.record_equity_snapshot()
         return TradeResult(code, name, "buy", qty, price, amt, fee, reason)
 
     # ------------------------------------------------------------------
@@ -1834,6 +1940,25 @@ class PaperEngine:
             "positions": positions,
         }
 
+    async def record_equity_snapshot(self, detail: dict | None = None) -> None:
+        """落一条当日净值快照（同日 upsert）。
+
+        挂在每笔成交之后（实时撮合 tick / 手动下单）与每日收盘结算，确保净值曲线
+        **不依赖每日单次结算**：即使 15:40 收盘结算未跑（服务重启 / 异常），
+        曲线也有最新点；多次写入同日覆盖，不会重复成多行。
+
+        失败静默处理，绝不阻断交易或下单。
+        """
+        try:
+            if detail is None:
+                detail = await self.account_detail()
+            today = datetime.now().strftime("%Y-%m-%d")
+            db.save_paper_equity(
+                today, detail["total_asset"], detail["cash"], detail["market_value"]
+            )
+        except Exception as exc:  # noqa: BLE001 - 净值快照失败不影响主流程
+            logger.warning("净值快照写入失败（不影响交易）: %s", exc)
+
     async def settle(self, *, record_regime: bool = True) -> dict:
         """每日收盘结算：止盈止损检查 + 记录净值快照 + 记录当日择时状态。
 
@@ -1843,9 +1968,7 @@ class PaperEngine:
         await self.check_stop_loss_target()
         detail = await self.account_detail()
         today = datetime.now().strftime("%Y-%m-%d")
-        db.save_paper_equity(
-            today, detail["total_asset"], detail["cash"], detail["market_value"]
-        )
+        await self.record_equity_snapshot(detail)
         if record_regime:
             await self._save_regime_snapshot(today, detail)
         logger.info("模拟盘收盘结算：总资产 %.2f（%+.2f%%）",

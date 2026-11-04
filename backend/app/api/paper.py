@@ -12,7 +12,7 @@ from app.api.utils import with_disclaimer
 from app.config import get_settings
 from app.data.cache import db, ledger_scope
 from app.paper.engine import PaperEngine
-from app.paper.ledger import ledger_equity, ledger_overview, sim_specs
+from app.paper.ledger import ledger_equity, ledger_overview, ledger_interpretation, sim_specs
 from app.paper.live import live_trader
 
 logger = logging.getLogger("sas.api.paper")
@@ -169,6 +169,7 @@ def paper_sim() -> dict:
         "profiles": str(getattr(settings, "paper_sim_profiles", "") or ""),
         "accounts": ledger_overview(),
         "skipped": skipped,
+        "interpretation": ledger_interpretation(),
     })
 
 

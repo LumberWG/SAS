@@ -54,6 +54,13 @@ RUNTIME_KEYS: frozenset[str] = frozenset({
     "paper_circuit_breaker_target",
     # 开盘冷静期：无条件禁止开盘后N分钟买入，风险偏好类，盘中切换要立刻生效
     "paper_open_cooldown_minutes",
+    # 开盘成交窗口：0=全时段可成交（仅受冷静期约束）；>0=只限开盘后N分钟。配合冷静期用。
+    "paper_buy_open_window_minutes",
+    # P2 盘内错峰：每 tick 最多成交几只买入，积压信号错峰（0=不限制，回到旧行为）
+    "paper_buys_per_tick",
+    # 机制层止损收紧：shock/crisis 态新建仓收紧止损距离（仅新建仓），风险偏好类，盘中切换即时生效
+    "paper_regime_stop_tighten",
+    "paper_regime_stop_min",
 })
 
 #: 设置页布局：**分组（左侧导航）→ 子分组（组内小节）→ 参数键**。
@@ -177,6 +184,11 @@ _LAYOUT: tuple[tuple[str, str, tuple[tuple[str, str, tuple[str, ...]], ...]], ..
             ),
             ("候补队列", "满仓时把高分票先存着", ("paper_backlog_enabled", "paper_backlog_max")),
             (
+                "买入节奏",
+                "每 tick 最多成交几只买入，积压信号盘内错峰（0=不限制）",
+                ("paper_buys_per_tick",),
+            ),
+            (
                 "收盘减仓",
                 "80% 是收盘目标（盘中允许满仓），收盘前把超出部分按最弱优先卖掉",
                 ("paper_eod_trim_enabled", "paper_eod_trim_minutes"),
@@ -207,6 +219,11 @@ _LAYOUT: tuple[tuple[str, str, tuple[tuple[str, str, tuple[str, ...]], ...]], ..
                     "paper_trail_pct",
                     "paper_trail_arm",
                 ),
+            ),
+            (
+                "机制层止损收紧",
+                "shock/crisis 态新建仓自动收紧止损距离",
+                ("paper_regime_stop_tighten", "paper_regime_stop_min"),
             ),
         ),
     ),
@@ -492,7 +509,7 @@ _SHORT_LABELS: dict[str, str] = {
     "paper_scan_autotrade": "扫描后自动交易",
     "paper_scan_autotrade_top_n": "自动交易上限",
     "paper_scan_autotrade_overnight": "盘后信号入队",
-    "paper_buy_open_window_minutes": "开盘成交窗口",
+    "paper_buy_open_window_minutes": "开盘成交窗口(分钟)：0=全时段可成交(仅受开盘冷静期约束)；>0=只限开盘后N分钟内可成交",
     # ---- 机制层：政策托底 / 熔断 ----
     "paper_policy_floor_enabled": "托底强度检测",
     "paper_policy_floor_min_score": "托底收割阈值",
@@ -530,6 +547,8 @@ _SHORT_LABELS: dict[str, str] = {
     "paper_breakeven_pct": "保本触发",
     "paper_trail_pct": "移动止损回撤",
     "paper_trail_arm": "移动止损启用",
+    "paper_regime_stop_tighten": "机制层止损收紧",
+    "paper_regime_stop_min": "收紧后下限",
     # ---- 大盘择时 ----
     "paper_regime_ma": "择时均线",
     "paper_regime_weak_pause": "弱市暂停买入",

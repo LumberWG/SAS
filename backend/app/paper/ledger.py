@@ -210,6 +210,39 @@ async def settle_ledgers(settings: Any, log: Any = None) -> dict[str, float]:
     return out
 
 
+# 并行账本的判读口径（P3，2026-11-04 澄清）：这 9 个账户是**同一 alpha 的参数敏感性
+# 沙盘**，不是相互独立的策略。熊市里它们都会跌，比绝对收益毫无意义；正确读法见
+# :func:`ledger_interpretation`。前端 / 复盘都应按此口径，避免「哪个账本赚得多」这类误读。
+LEDGER_ROLE = "参数敏感性对照（同 alpha，不同处置参数），非独立策略"
+
+LEDGER_INTERPRETATION_TEXT = (
+    "9 个并行账本是同一 alpha 的参数敏感性沙盘，不是相互独立的策略。\n"
+    "1) 熊市里绝对收益都负，比不出优劣，看「相对最大回撤」谁扛跌最好；\n"
+    "2) 单窗口（如 3 日）样本太小，不下结论；等 12-01 用 live_ml 前向超额(#88) 对照；\n"
+    "3) 主曲线是 paper_equity（真实盘），sim_* 只是处置参数的沙盘推演。"
+)
+
+
+def ledger_interpretation() -> dict:
+    """并行账本的判读口径，供前端 / 复盘直接消费，避免误读成「独立策略对比」。"""
+    return {"role": LEDGER_ROLE, "note": LEDGER_INTERPRETATION_TEXT}
+
+
+def _max_drawdown_pct(equity: list[dict]) -> float:
+    """由净值序列算最大回撤(%)；空序列返回 0.0。"""
+    peak = None
+    mdd = 0.0
+    for row in equity:
+        v = float(row.get("total_asset") or 0.0)
+        if v <= 0:
+            continue
+        if peak is None or v > peak:
+            peak = v
+        if peak > 0:
+            mdd = max(mdd, (peak - v) / peak)
+    return round(mdd * 100, 2)
+
+
 def ledger_overview() -> list[dict]:
     """各账本概览（初始资金 / 现金 / 最新净值 / 累计收益 / 持仓数 / 参数）。"""
     from app.data.cache import db, ledger_scope
@@ -244,6 +277,8 @@ def ledger_overview() -> list[dict]:
             "equity_days": len(equity),
             "as_of": as_of,
             "overrides": account_overrides(acct),
+            "role": LEDGER_ROLE,
+            "max_drawdown_pct": _max_drawdown_pct(equity),
         })
     return rows
 

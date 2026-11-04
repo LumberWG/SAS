@@ -200,6 +200,13 @@ class Settings(BaseSettings):
     # 0 = 不限制（回到旧行为）。超出的买单不入队，原因记在 /api/paper/live 的 queue_rejected。
     paper_trade_queue_top_m: int = 5
 
+    # ---------- P2：盘内错峰（每 tick 买入节奏） ----------
+    # 单 tick 最多成交几只买入（其余留后续 tick，自然错峰）。解决「积压信号在 5 分钟
+    # 买入窗口内被一秒全打出去」的单点择时风险。0 = 不限制（回到旧行为）。
+    # 依赖 live 的 retry 保留机制：被节流的买入返回「买入节奏」skip，下一 tick 重试。
+    # 注：这是「盘内错峰」，积压信号仍在买入窗口内分批；若要「跨时段分散」需进一步拆窗口。
+    paper_buys_per_tick: int = 2  # 盘内错峰：单 tick 最多成交几只买入（默认 2，避免一秒买全 10 只）
+
     # ---------- 五段式⑤：切入点（排队不等于成交） ----------
     # 1) 不追高：现价高于「信号价」超过此比例就不买（0 = 不限，照价买）。
     #    2026-11-01 由 0.015 改为 0（关闭），依据 BACKTEST_LOG 记录 #89：6 段配对
@@ -240,6 +247,11 @@ class Settings(BaseSettings):
     paper_breakeven_pct: float = 0.10   # 浮盈达此比例后止损上移到成本（保本）
     paper_trail_pct: float = 0.10       # 从持仓期最高价回撤此比例即卖出（移动止损）
     paper_trail_arm: float = 0.0        # 移动止损启用门槛：浮盈达此比例后才跟踪
+    # 机制层止损收紧：shock/crisis 态新建仓用更紧的止损距离（距离 × 此系数），
+    # 只限新建仓（已有持仓止损在建仓时定死，不回溯改）。0=关闭（原行为，保守默认）。
+    # 风险态下宁可早点砍、少亏；指数数据缺失 → regime=normal → 不收紧，零风险。
+    paper_regime_stop_tighten: float = 0.0
+    paper_regime_stop_min: float = 0.03   # 收紧后止损距离下限（防止过度收紧成噪声止损）
     # ---- 模拟盘大盘择时买入闸门（弱市暂停自动买入） ----
     paper_regime_ma: int = 60           # 上证指数 MA 周期，<=0 关闭
     paper_regime_weak_pause: bool = True  # 弱市（指数在 MA 下）暂停自动买入
@@ -299,17 +311,20 @@ class Settings(BaseSettings):
     paper_t_rebound_sell: float = 0.02     # 反弹至跌幅小于此减仓
     paper_t_limit_sell_half: bool = True   # 涨停弱封板卖 1/2（F 组合开启）
     paper_t_crash_guard: float = 0.02      # 大盘当日跌幅超此暂停做T
-    # 买单只允许在开盘后 N 分钟内成交（0=不限）。回测按「次日开盘价」成交，
-    # 实盘此前在盘中分析时刻（如 13:01）按实时价一把买入 → 系统性买高
-    paper_buy_open_window_minutes: int = 5
+    # 买单成交时段：0=全时段可成交（仅受开盘冷静期约束）；>0=只在开盘后 N 分钟内可成交。
+    # 旧设计把成交收敛到开盘那一刻以对齐回测「次日开盘价」口径，但实盘会系统性买高、
+    # 且造成「积压到开盘窗口一次性爆发」的批量成交。按用户 2026-11-04 要求改为全时段可成交，
+    # 配合 paper_open_cooldown_minutes 只拦开盘前 N 分钟（见本轮"9:35-上午收盘/13:05-下午收盘随时可成交"）。
+    paper_buy_open_window_minutes: int = 0
     # 开盘后 N 分钟内**禁止自动买入**（含轮动换入、做T买回/加仓），让隔夜外围利空导致的
     # 开盘跳空先消化；0=不延迟（默认，维持现状）。只拦买入、不拦卖出。与「跳空护栏」
     # （paper_t_crash_guard 扩展到买入端）共同构成开盘保护。见 sas_formulas §开盘保护。
     paper_buy_open_delay_minutes: int = 0
     # 开盘冷静期：开盘后 N 分钟内**无条件禁止自动买入**（含轮动换入、做T买回/加仓），
-    # 让开盘瞬间波动/跳空先过去；0=不限制（默认）。仅拦买入、不拦卖出。
-    # 区别于 paper_buy_open_delay_minutes（仅大盘向下跳空时才延迟）。见本轮"避免开盘5分钟交易"。
-    paper_open_cooldown_minutes: int = 0
+    # 让开盘瞬间波动/跳空先过去；0=不限制。仅拦买入、不拦卖出。对 09:30 与 13:00 两个时段分别生效。
+    # 配合 paper_buy_open_window_minutes=0 → 全时段可成交、只拦开盘前 N 分钟（本轮用户要求）。
+    # 区别于 paper_buy_open_delay_minutes（仅大盘向下跳空时才延迟）。
+    paper_open_cooldown_minutes: int = 5
 
     # ---------- 通知管道（可选） ----------
     # Webhook 机器人地址（企业微信/飞书/钉钉均兼容，POST JSON）

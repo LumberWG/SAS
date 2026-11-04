@@ -411,15 +411,36 @@ class LiveTrader:
         self._persist_pending()
 
     def _purge(self, now: datetime) -> None:
-        """丢弃过期信号（价格已漂移，执行没有意义）。"""
+        """丢弃过期信号（价格已漂移，执行没有意义）。
+
+        买入信号过期不再直接丢弃，而是降级进候补队列（观察名单持久化）：
+        腾出名额 / 下一个买入窗口 / 次日都能优先回补，避免高分候选在轮到成交前
+        就被 30 分钟 TTL 静默丢弃（LIVE_REVIEW §P1「待买不过期」）。守「只降不升」——
+        观察名单只用于补位，不主动净买入；券源（容量/开关）不足时仍丢弃。
+        """
+        changed = False
         for code in [c for c, s in self._pending.items() if s.expire_at <= now]:
             signal = self._pending.pop(code)
+            changed = True
+            if (signal.action == "buy"
+                    and self.settings.paper_backlog_enabled
+                    and len(self._backlog) < self.settings.paper_backlog_max):
+                signal.expire_at = self._backlog_expiry(now)
+                if "观察名单" not in (signal.reason or ""):
+                    signal.reason = f"{signal.reason or ''}｜过期转入观察名单".strip("｜")
+                self._backlog[code] = signal
+                logger.info("买入信号过期降级进观察名单 %s %s", code, signal.name)
+                continue
             logger.info("信号过期丢弃 %s %s（%s）", code, signal.name, signal.action)
         for code in [c for c, s in self._backlog.items() if s.expire_at <= now]:
             self._backlog.pop(code, None)
+            changed = True
         for run in self._sim.values():
             for code in [c for c, s in run.pending.items() if s.expire_at <= now]:
                 run.pending.pop(code, None)
+                changed = True
+        if changed:
+            self._persist_pending()
 
     def _rotation_target_from_reason(self, reason: str) -> float:
         """从轮动卖出原因里取「当初换入那只票」的分数。
@@ -699,9 +720,12 @@ class LiveTrader:
         t_trades = await self.engine.t_tick(prices)
 
         # 2) 队列信号：第 3 次排序——卖出优先，其余按评分从高到低
-        # 买入只在开盘窗口成交：窗口外只跑卖出，买单继续挂着等下一个开盘（不出队）。
-        # 回测按「次日开盘价」成交，实盘此前在盘中分析时刻（如 13:01）按实时价
-        # 一把买入，系统性买高 —— 2 天 17 笔成交 vs 回测同区间 3 笔（记录 #19）。
+        # 买入成交时段：默认全时段可成交（paper_buy_open_window_minutes=0），仅受开盘冷静期
+        # （paper_open_cooldown_minutes，默认拦开盘前 5 分钟）约束；冷静期内只跑卖出，
+        # 买单挂着等冷静期结束（不出队）。按用户 2026-11-04 要求改为「全时段随时可成交」，
+        # 配合盘内错峰（paper_buys_per_tick）把积压信号自然摊开，不再「开盘窗口一次性爆发」。
+        # 注：此举偏离回测「次日开盘价」口径（记录 #19），换取更真实的盘中成交；
+        # 回测/实盘对照需用统一的「成交时点」口径，而非默认对齐到开盘。
         in_window = self._in_buy_window(now)
         # 开盘保护（跳空延迟 / 冷静期）：冷却期内禁止买入，买单留队列等冷却结束（同窗口外逻辑）
         open_guard = self.engine._open_delayed(now) or self.engine._open_cooldown(now)
@@ -745,8 +769,8 @@ class LiveTrader:
 
         # 轮动候选：满仓时 backlog 不会被塞进 recs（只在有剩余名额时补位），
         # 单独传给引擎，轮动才能用上「今天没买到、分还很高」的票。
-        # 只在开盘窗口内传：窗口外的买单要等下一个开盘，轮动必须跟着等，
-        # 否则会「立刻卖 + 立刻买」，偏离「次日开盘价」口径（BACKTEST_LOG #19）。
+        # 只在可成交时段内传：冷静期内不传轮动候选（避免「立刻卖 + 立刻买」），
+        # 冷静期结束后轮动照常工作。成交时点已不再收敛到开盘，故不强制等下一个开盘。
         rotation_candidates: list[SimpleNamespace] = []
         if buy_open and self.settings.paper_rotation_enabled and self._backlog:
             held_codes = {p["code"] for p in db.list_paper_positions()}
@@ -775,9 +799,21 @@ class LiveTrader:
         # 「等待回踩」也保留重试：回踩确认是 tick 累积出来的，早晚可能满足
         retry = {
             r.code for r in results
-            if r.side == "skip" and (r.reason == "取价失败" or r.reason.startswith("等待回踩"))
+            if r.side == "skip" and (
+                r.reason == "取价失败"
+                or r.reason.startswith("等待回踩")
+                or "买入节奏" in r.reason
+            )
         }
         executed = [r for r in results if r.side != "skip"]
+
+        # 实时净值快照：本 tick 只要发生任何成交（止盈止损 / 做T / 队列 / 减仓），
+        # 就 upsert 当日净值，使净值曲线在 15:40 收盘结算未跑（服务重启 / 异常）时也有点。
+        if stop_trades or t_trades or executed or trim_trades:
+            try:
+                await self.engine.record_equity_snapshot()
+            except Exception:  # noqa: BLE001 - 净值快照失败不影响主流程
+                pass
 
         # 五段式④⑤的可观测性：本轮被判定规则/切入点拒掉的买入原因
         self._entry_rejected = [
