@@ -1,11 +1,14 @@
 # AGENTS.md — 给任何 AI 编码工具的入场须知
 
 本文件是**跨工具交接约定**。不管是 CodeBuddy、WorkBuddy 还是别的工具，进仓库先读这里，
-再读 `README.md`（功能）/ `docs/flow.md`（全链路流程与参数）/ `WORKLOG.md`（策略）/ `BACKTEST_LOG.md`（实验）。
+再读 `docs/README.md`（**文档统一入口**）/ `docs/overview.md`（**代码全景地图**）/ `README.md`（功能）/
+`docs/flow.md`（全链路流程与参数）/ `WORKLOG.md`（策略）/ `BACKTEST_LOG.md`（实验）。
+**文档统一目录**：参考/说明类文档都在 `docs/`（研究/历史报告在 `docs/analysis/`）；根目录只保留
+`README/AGENTS/CONTRIBUTING/LICENSE/WORKLOG/BACKTEST_LOG` 这 6 个必须在根的文件。
 **对外贡献规则**（含从第 4 节提升为硬约束的口径红线）见 `CONTRIBUTING.md`；
 本仓库以 [MIT](LICENSE) 授权。
 
-最后更新：2026-11-02
+最后更新：2026-11-04
 
 ## 0. 根目录脚本不要随便搬
 
