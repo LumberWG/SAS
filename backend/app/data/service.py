@@ -53,6 +53,11 @@ _pool_cache: tuple[float, pd.DataFrame, float] | None = None  # (时刻, 池, TT
 #: 股票池磁盘缓存：重启后首个请求不必等待 8-15 秒的翻页拉取
 _POOL_FILE = Path(__file__).resolve().parent / "cache" / "pool_latest.parquet"
 _POOL_FILE_MAX_AGE = 12 * 3600.0
+#: 全A股（沪深京）约 5500 只。任何来源低于此值都视为**残缺**，不能当成
+#: 正常股票池缓存/落盘：2026-11-05 东财列表被钳成 100 只/页 + 上交所只回
+#: 科创板 405 只，池子被缩成 505 只并缓存 1 小时 → 降级快照只剩 505 条 →
+#: 账户估值一直停留在旧收盘价。阈值取 4000 留足北交所/新股波动的余量。
+_POOL_MIN_ROWS = 4000
 #: 磁盘缓存只在进程内首次取池时用作快速引导；之后 TTL 到期一律回源刷新，
 #: 避免进程长期运行时一直吃磁盘里的旧股票池
 _pool_bootstrapped = False
@@ -83,13 +88,30 @@ def get_stock_pool() -> pd.DataFrame:
     ttl = _POOL_TTL
     if pool is None:
         try:
-            pool = get_data_source().get_stock_pool()
+            candidate = get_data_source().get_stock_pool()
         except DataSourceError:
-            logger.warning("股票池主源不可用，降级为持久化快照代码表")
-            pool = _pool_from_snapshot()
-            ttl = _POOL_FALLBACK_TTL
-            if pool is None:
-                raise
+            candidate = None
+        if candidate is not None and len(candidate) >= _POOL_MIN_ROWS:
+            pool = candidate
+        elif candidate is not None:
+            logger.warning(
+                "akshare 股票池仅 %d 只（<%d），判为残缺", len(candidate), _POOL_MIN_ROWS
+            )
+    if pool is None:
+        logger.warning("股票池主源不可用，降级为持久化快照代码表")
+        pool = _pool_from_snapshot()
+        ttl = _POOL_FALLBACK_TTL
+        if pool is None:
+            raise DataSourceError("股票池所有来源均不可用")
+    if len(pool) < _POOL_MIN_ROWS:
+        # 快照代码表本身也可能残缺：短 TTL 尽快重试，且**不写磁盘**，
+        # 避免把残缺池固化成下次启动的引导数据
+        logger.warning(
+            "股票池规模异常（%d 只 < %d），短缓存 %.0fs 且不写磁盘",
+            len(pool), _POOL_MIN_ROWS, _POOL_FALLBACK_TTL,
+        )
+        _pool_cache = (now, pool, _POOL_FALLBACK_TTL)
+        return pool
     _pool_cache = (now, pool, ttl)
     _save_pool_to_disk(pool)
     return pool
@@ -104,6 +126,13 @@ def _load_pool_from_disk() -> pd.DataFrame | None:
             return None
         df = pd.read_parquet(_POOL_FILE)
         if df is None or df.empty or "code" not in df.columns:
+            return None
+        if len(df) < _POOL_MIN_ROWS:
+            # 残缺池（实测 505 只）不能拿来引导：宁可多花十几秒重建
+            logger.warning(
+                "股票池磁盘缓存仅 %d 只（<%d），判为残缺并重新构建",
+                len(df), _POOL_MIN_ROWS,
+            )
             return None
         return _finalize_pool(df)
     except Exception as exc:  # noqa: BLE001 - 缓存损坏不影响主流程
@@ -133,8 +162,14 @@ def _pool_from_http() -> pd.DataFrame | None:
         except Exception as exc:  # noqa: BLE001 - 换下一个来源
             logger.warning("%s接口不可用: %s", label, exc)
             continue
-        if raw is not None and not raw.empty:
-            return _merge_with_sse(_finalize_pool(raw))
+        if raw is None or raw.empty:
+            continue
+        if len(raw) < _POOL_MIN_ROWS:
+            logger.warning(
+                "%s只返回 %d 只（<%d），判为残缺，继续降级", label, len(raw), _POOL_MIN_ROWS
+            )
+            continue
+        return _merge_with_sse(_finalize_pool(raw))
     return None
 
 

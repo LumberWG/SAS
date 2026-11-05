@@ -1506,7 +1506,10 @@ class PaperEngine:
                     for r in indices.itertuples(index=False)
                 ]
                 if vals:
-                    return -min(vals)
+                    # peek_indices() 的 pct_change 单位是「百分点」（如 -0.47 表示 -0.47%），
+                    # 先换算成小数（-0.0047）再与 paper_t_crash_guard(0.02=2%) 同量纲比较；
+                    # 否则会把 -0.47% 误判成 47% 跌幅，开盘跳空护栏天天误触发（2026-11-05 实盘零成交）。
+                    return -min(vals) / 100.0
         except Exception:  # noqa: BLE001
             return None
         return None

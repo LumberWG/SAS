@@ -631,13 +631,14 @@ class LiveTrader:
         if not self._sim:
             return {}
         in_window = self._in_buy_window(now)
-        open_guard = run.engine._open_delayed(now) or run.engine._open_cooldown(now)
-        buy_open = in_window and not open_guard
         keep_reasons = (*_BACKLOG_REASONS, "取价失败", "等待回踩")
         out: dict[str, int] = {}
         for tag, run in self._sim.items():
             try:
                 with ledger_scope(run.account_id):
+                    # 开盘保护按各账本自己的参数判定（并行账本可能各有阈值）
+                    open_guard = run.engine._open_delayed(now) or run.engine._open_cooldown(now)
+                    buy_open = in_window and not open_guard
                     stops = await run.engine.check_stop_loss_target(prices)
                     # 做T引擎：与主账户一致，每个账本按各自参数各自做T
                     # （ledger_scope 已把块内 db.paper_* 调用路由到该账本的 sim_* 表）

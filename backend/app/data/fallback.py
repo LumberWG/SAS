@@ -476,43 +476,80 @@ _EM_LIST_URL = "https://push2.eastmoney.com/api/qt/clist/get"
 _EM_MARKET_FILTER = "m:0+t:6,m:0+t:80,m:1+t:2,m:1+t:23,m:0+t:81+s:2048"
 
 
+def _em_list_page(page: int, page_size: int) -> tuple[list[dict], int]:
+    """取东财列表单页，返回 ``(行, total)``。"""
+    data = _get_json(
+        _EM_LIST_URL,
+        {
+            "pn": str(page), "pz": str(page_size), "po": "0", "np": "1",
+            "fltt": "2", "invt": "2", "fid": "f12", "fs": _EM_MARKET_FILTER,
+            "fields": "f12,f14",
+        },
+        timeout=10.0,
+    )
+    payload = data.get("data") or {}
+    diff = payload.get("diff") or []
+    if isinstance(diff, dict):  # 个别版本返回 {"0": {...}, ...}
+        diff = list(diff.values())
+    rows: list[dict] = []
+    for row in diff:
+        code = str(row.get("f12") or "").strip().zfill(6)
+        name = str(row.get("f14") or "").strip()
+        if code and code.isdigit():
+            rows.append({"code": code, "name": name})
+    return rows, int(payload.get("total") or 0)
+
+
+#: 东财列表并行翻页线程数。域名节流仍是每 0.15s 一个请求，并发只用来掩盖
+#: RTT：pz 被钳到 100 时全市场要 60 页，串行 19s，并行约 10s
+_EM_PAGE_WORKERS = 6
+#: 东财列表最多翻页数（防御异常分页；按 20 只/页，300 页也够 5500+ 只）
+_EM_MAX_PAGES = 300
+
+
 def em_stock_list(page_size: int = 1000) -> pd.DataFrame:
     """东方财富 push2 全A股代码/名称（分页拉全量）。
 
     相比 akshare 的 stock_info_a_code_name（内部多次分段请求，部分网络
     会超时数分钟），该接口一次请求即可返回上千条，配合连接池几十毫秒。
     返回列: code / name（market 由上层补齐）。
+
+    **不能用「本页条数 < page_size」判断翻页结束**：东财在限流或接口变更
+    时会把 ``pz`` 钳到 20/100 却仍报 ``total`` 5500+，那样只拿到第一页
+    （实测 100 只深市）→ 股票池被截成 505 只 → 降级快照只剩 505 条 →
+    账户估值一直停在旧收盘价（2026-11-05 事故）。这里改为按 ``total`` 与
+    实际每页条数估算页数，并行取完剩余页。
     """
-    records: list[dict] = []
-    page = 1
-    total = 0
-    while True:
-        data = _get_json(
-            _EM_LIST_URL,
-            {
-                "pn": str(page), "pz": str(page_size), "po": "0", "np": "1",
-                "fltt": "2", "invt": "2", "fid": "f12", "fs": _EM_MARKET_FILTER,
-                "fields": "f12,f14",
-            },
-            timeout=10.0,
-        )
-        payload = data.get("data") or {}
-        diff = payload.get("diff") or []
-        if not diff:
-            break
-        if isinstance(diff, dict):  # 个别版本返回 {"0": {...}, ...}
-            diff = list(diff.values())
-        for row in diff:
-            code = str(row.get("f12") or "").strip().zfill(6)
-            name = str(row.get("f14") or "").strip()
-            if code and code.isdigit():
-                records.append({"code": code, "name": name})
-        total = int(payload.get("total") or 0)
-        if len(diff) < page_size or (total and len(records) >= total):
-            break
-        page += 1
-        if page > 20:  # 防御：异常分页时避免死循环
-            break
+    try:
+        first_rows, total = _em_list_page(1, page_size)
+    except Exception as exc:  # noqa: BLE001 - 首页失败交给上层换源
+        logger.warning("东财列表首页请求失败: %s", exc)
+        return pd.DataFrame(columns=["code", "name"])
+    if not first_rows:
+        return pd.DataFrame(columns=["code", "name"])
+
+    records: list[dict] = list(first_rows)
+    per_page = len(first_rows)
+    pages = min(_EM_MAX_PAGES, -(-total // per_page)) if total else 1
+    if pages > 1:
+        from concurrent.futures import ThreadPoolExecutor
+
+        def fetch(page: int) -> list[dict]:
+            for attempt in (1, 2):
+                try:
+                    rows, _ = _em_list_page(page, page_size)
+                    return rows
+                except Exception as exc:  # noqa: BLE001 - 单页失败只缺这一页
+                    if attempt == 2:
+                        logger.warning("东财列表第 %d 页失败: %s", page, exc)
+                        return []
+                    time.sleep(0.3)
+            return []
+
+        with ThreadPoolExecutor(max_workers=_EM_PAGE_WORKERS) as pool:
+            for rows in pool.map(fetch, range(2, pages + 1)):
+                records.extend(rows)
+
     if not records:
         return pd.DataFrame(columns=["code", "name"])
     return (
@@ -634,6 +671,7 @@ def sse_stock_list() -> pd.DataFrame:
             payload = json.loads(_decode_json_bytes(r.content))
         except Exception as exc:  # noqa: BLE001 - 单个板块失败不影响另一个
             errors.append(exc)
+            logger.warning("上交所官方列表 stockType=%s 请求失败: %s", stock_type, exc)
             continue
         rows = (payload.get("pageHelp") or {}).get("data") or []
         for row in rows:
@@ -642,6 +680,10 @@ def sse_stock_list() -> pd.DataFrame:
                 records.append(
                     {"code": code, "name": str(row.get("COMPANY_ABBR") or "").strip()}
                 )
+        if not rows:
+            # 单个板块整体空（实测出现过主板 2009→0、只剩科创板 405），
+            # 静默降级会让上层误以为「官方共 405 只」而据此判定覆盖完整
+            logger.warning("上交所官方列表 stockType=%s 返回空（板块缺失）", stock_type)
 
     if not records:
         if errors:
