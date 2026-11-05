@@ -1,6 +1,7 @@
 """模拟交易 API：账户、持仓、流水、净值曲线、实时撮合状态、手动下单、重置。"""
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import asdict
 from typing import Literal
@@ -137,6 +138,28 @@ def paper_trades(limit: int = 100, code: str | None = None) -> dict:
     """交易流水（按时间倒序，可按股票过滤）。"""
     trades = db.list_paper_trades(limit=limit, code=code)
     return with_disclaimer({"trades": trades})
+
+
+@router.get("/lots")
+def paper_lots(code: str | None = None) -> dict:
+    """持仓批次（lot）列表，含决策溯源 provenance。
+
+    每个 lot 在建仓时一次性写入 ``provenance``（触发信号 + regime 快照 + 决策理由），
+    便于复盘「这只票为什么在这个时点买入」。历史批次为 null（当时没存）。
+    provenance 原存 JSON 字符串，这里解析为结构化 dict 返回。
+    """
+    lots = db.list_paper_lots(code=code)
+    out = []
+    for lot in lots:
+        prov = lot.get("provenance")
+        parsed = None
+        if prov:
+            try:
+                parsed = json.loads(prov)
+            except Exception:
+                parsed = None
+        out.append({**lot, "provenance": parsed})
+    return with_disclaimer({"lots": out})
 
 
 @router.get("/equity")

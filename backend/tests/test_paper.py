@@ -193,13 +193,24 @@ class TestIndexCached:
 
 @dataclass
 class FakeRec:
-    """模拟 Recommendation（只含引擎用到的字段）。"""
+    """模拟 Recommendation（只含引擎用到的字段）。
 
-    code: str
-    name: str
-    action: str
-    score: float
-    reason: str
+    额外支持 detail（因子分项明细 JSON）/ price 等引擎读取的字段，便于溯源测试。
+    """
+
+    def __init__(self, code, name, action, score, reason, detail="", price=0.0,
+                 stop_loss=None, target_price=None, sentiment="", rank=0):
+        self.code = code
+        self.name = name
+        self.action = action
+        self.score = score
+        self.reason = reason
+        self.detail = detail
+        self.price = price
+        self.stop_loss = stop_loss
+        self.target_price = target_price
+        self.sentiment = sentiment
+        self.rank = rank
 
 
 @pytest.fixture()
@@ -1904,4 +1915,64 @@ class TestRegimeStopTighten:
         self._run(eng, recs, 0.1, "crisis", {"600004": 10.0})
         cost, stop = self._stop_of(db, "600004")
         assert abs(stop - cost * (1 - 0.03)) < 1e-3
+
+
+class TestProvenance:
+    """#115 成交决策溯源：每个 lot 挂触发信号 + regime 快照 + 决策理由。"""
+
+    def test_build_provenance_structure(self, engine):
+        """_build_provenance 产出合法 JSON，含 trigger/regime/signals/rationale。"""
+        import json as _json
+        eng, _, _ = engine
+        detail = '[{"name":"动量","score":12.3},{"name":"估值","score":-3.1}]'
+        prov_s = eng._build_provenance(
+            trigger="fresh_buy", reason="金叉突破", score=45.0, detail=detail,
+            stop_distance=0.08, stop_price=9.2, regime_state="normal",
+            effective_exposure=1.0, exposure_cap=100000.0, today="2026-11-05",
+        )
+        prov = _json.loads(prov_s)
+        assert prov["trigger"] == "fresh_buy"
+        assert prov["reason"] == "金叉突破"
+        assert prov["score"] == 45.0
+        assert prov["regime"]["state"] == "normal"
+        # 满分线默认 40：45≥40 → 标「≥满分线」
+        assert any("≥满分线" in s for s in prov["signals"])
+        # 因子明细 top 触发信号被提炼出来
+        assert any("因子[动量]" in s for s in prov["signals"])
+        assert "金叉突破" in prov["rationale"]
+        assert prov["stop_distance"] == 0.08
+
+    def test_buy_lot_carries_provenance(self, engine):
+        """自动买入落库的 lot 携带 provenance（fresh_buy + regime + 因子信号）。"""
+        import json as _json
+        eng, db, prices = engine
+        eng.ensure_account()
+        eng._buy_allowed = lambda code, name: (True, "")
+        detail = '[{"name":"动量","score":15.0},{"name":"量能","score":8.0}]'
+        recs = [FakeRec("600004", "测试A", "buy", 50.0, "金叉突破", detail=detail)]
+        results = asyncio.run(eng.execute_recommendations(recs, prices=prices))
+        assert results[0].side == "buy"
+        lots = db.list_paper_lots(code="600004")
+        assert lots, "应有建仓批次"
+        prov = _json.loads(lots[0]["provenance"])
+        assert prov["trigger"] == "fresh_buy"
+        assert prov["reason"] == "金叉突破"
+        assert prov["score"] == 50.0
+        assert prov["regime"]["state"] in ("normal", "weak", "shock", "crisis")
+        assert any("因子[动量]" in s for s in prov["signals"])
+        assert "rationale" in prov
+
+    def test_manual_buy_carries_provenance(self, engine):
+        """手动下单的 lot 触发标记为 manual 且带 regime 快照。"""
+        import json as _json
+        eng, db, _ = engine
+        eng.ensure_account()
+        eng._buy_allowed = lambda code, name: (True, "")
+        res = asyncio.run(eng.place_order(
+            "600004", "buy", amount=20000, name="测试A", price=10.0))
+        assert res.side == "buy"
+        lots = db.list_paper_lots(code="600004")
+        prov = _json.loads(lots[0]["provenance"])
+        assert prov["trigger"] == "manual"
+        assert prov["regime"]["state"] in ("normal", "weak", "shock", "crisis")
 

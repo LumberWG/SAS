@@ -853,6 +853,78 @@ class PaperEngine:
     # ------------------------------------------------------------------
     # 信号执行（核心）
     # ------------------------------------------------------------------
+    def _build_provenance(
+        self, *, trigger: str, reason: str, score: float = 0.0, detail: str = "",
+        stop_distance: float | None = None, stop_price: float | None = None,
+        regime_state: str = "normal", effective_exposure: float = 1.0,
+        exposure_cap: float = 0.0, weak_pause_all: bool = False,
+        crash_pause: bool = False, open_delayed: bool = False,
+        open_cooldown: bool = False, weak_score: float | None = None,
+        full_score: float = 40.0, today: str = "",
+    ) -> str:
+        """构造成交决策溯源 JSON：触发信号 + regime 快照 + 决策理由。
+
+        挂在 ``paper_position_lots.provenance``，便于复盘「这只票为什么在这个时点买入」。
+        ``detail`` 是 Recommendation 的因子分项明细（JSON），用来提炼 top 触发因子；
+        ``trigger`` 区分 fresh_buy / rotation_buyin / manual / t_buyback / t_add。
+        """
+        signals: list[str] = []
+        if score:
+            band = "≥满分线" if score >= full_score else "半额~满分区间"
+            signals.append(f"评分 {score:.0f}（{band}）")
+        # 因子分项明细（Recommendation.detail 是 JSON）：挑 top3 作为触发信号
+        if detail:
+            try:
+                det = json.loads(detail) if isinstance(detail, str) else detail
+                if isinstance(det, list):
+                    top = sorted(
+                        det, key=lambda x: float(x.get("score", 0) or 0), reverse=True
+                    )[:3]
+                    for f in top:
+                        nm = f.get("name") or f.get("factor") or "?"
+                        signals.append(
+                            f"因子[{nm}] {float(f.get('score', 0) or 0):+.1f}")
+            except Exception:
+                pass
+        if regime_state in ("shock", "crisis"):
+            tighten = float(getattr(self.settings, "paper_regime_stop_tighten", 0.0) or 0.0)
+            if tighten:
+                signals.append(f"机制层{regime_state}态：新建仓止损收紧×{tighten}")
+        if trigger == "rotation_buyin":
+            w = f"建仓{weak_score:.0f}分" if weak_score is not None else ""
+            signals.append(f"轮动换入（替换{w}弱票）" if w else "轮动换入")
+        if effective_exposure < 1:
+            signals.append(f"总仓位上限压到{effective_exposure:.0%}")
+        if crash_pause or open_delayed or open_cooldown:
+            signals.append("开盘保护解除后成交")
+        rationale = (
+            f"{reason or '买入信号'}；regime={regime_state}"
+            + (f"；止损距离={stop_distance:.1%}" if stop_distance is not None else "")
+            + (f"（线{stop_price}）" if stop_price is not None else "")
+            + f"；总仓位上限={effective_exposure:.0%}"
+        )
+        prov = {
+            "trigger": trigger,
+            "reason": reason,
+            "score": round(score, 2),
+            "detail": detail or "",
+            "regime": {
+                "state": regime_state,
+                "exposure_cap": round(effective_exposure, 3),
+                "weak_pause_all": weak_pause_all,
+                "crash_pause": crash_pause,
+                "open_delayed": open_delayed,
+                "open_cooldown": open_cooldown,
+            },
+            "stop_distance": round(stop_distance, 4) if stop_distance is not None else None,
+            "stop_price": stop_price,
+            "exposure_cap": round(exposure_cap, 2),
+            "signals": signals,
+            "rationale": rationale,
+            "created_at": today,
+        }
+        return json.dumps(prov, ensure_ascii=False)
+
     async def execute_recommendations(
         self,
         recommendations: list,
@@ -1065,6 +1137,8 @@ class PaperEngine:
         # 为什么循环：一次 API 调用里可以连换多只（含全换），不必等下一个 tick；
         #   每轮重新取「当前最弱」，被换掉的票即退出候选池（sold_codes 防回转买入）。
         sold_codes: set[str] = set()
+        # 轮动换入标的 -> 被替换弱票的建仓分（建仓溯源标注「轮动换入」用）
+        rotation_targets: dict[str, float] = {}
         # 轮动不受「弱市全暂停档」冻结（否则弱票占位、强票排队过期，P1）：
         # 只在开盘保护（延迟/冷静期/跳空护栏）时冻结——开盘利空/刚开盘不操作。
         # 弱市全暂停档下轮动退化为「清出最弱票腾名额」（见下面两个分支），不换入。
@@ -1169,6 +1243,7 @@ class PaperEngine:
                 positions.pop(weak_code, None)
                 sold_codes.add(weak_code)
                 consumed.add(target_rec.code)   # 该目标已用掉，下一轮必须换别的票
+                rotation_targets[target_rec.code] = weak_score
                 used += 1
                 results.append(TradeResult(
                     weak_code, weak_pos.get("name", ""), "sell", sold,
@@ -1314,11 +1389,32 @@ class PaperEngine:
             name = getattr(rec, "name", "") or rec.code
             # 止损线在建仓时一次定死（固定 8% 或 max(8%, 2×ATR)，shock/crisis 态再叠加收紧），
             # 避免高波动票被固定 8% 的噪声打掉、也便于复盘「当时定的止损是多少」
-            stop_price = round(cost_price * (1 - self._stop_distance_for_buy(rec.code, _regime_state)), 3)
+            stop_distance = self._stop_distance_for_buy(rec.code, _regime_state)
+            stop_price = round(cost_price * (1 - stop_distance), 3)
+            trigger = "rotation_buyin" if rec.code in rotation_targets else "fresh_buy"
+            prov = self._build_provenance(
+                trigger=trigger,
+                reason=getattr(rec, "reason", "买入信号"),
+                score=_score,
+                detail=getattr(rec, "detail", "") or "",
+                stop_distance=stop_distance,
+                stop_price=stop_price,
+                regime_state=_regime_state,
+                effective_exposure=effective_exposure,
+                exposure_cap=exposure_cap,
+                weak_pause_all=weak_pause_all,
+                crash_pause=crash_pause_buy,
+                open_delayed=open_delayed,
+                open_cooldown=open_cooldown,
+                weak_score=rotation_targets.get(rec.code),
+                full_score=full_score,
+                today=today,
+            )
             db.add_paper_lot(
                 rec.code, name, shares, cost_price, today,
                 getattr(rec, "reason", "买入信号"), score=_rec_score(rec),
                 stop_price=stop_price, peak_price=cost_price, today=today,
+                provenance=prov,
             )
             db.insert_paper_trade(
                 rec.code, name, "buy", price, shares, amount, fee,
@@ -1414,7 +1510,20 @@ class PaperEngine:
         if amt + fee > cash:
             return TradeResult(code, name, "skip", 0, price, 0.0, 0.0, "可用资金不足")
         cash -= amt + fee
-        db.add_paper_lot(code, name, qty, (amt + fee) / qty, today, reason, today=today)
+        cost_price = (amt + fee) / qty
+        regime_state = (await self._dynamic_regime(today)).get("state", "normal")
+        stop_distance = self._stop_distance_for_buy(code, regime_state)
+        stop_price = round(cost_price * (1 - stop_distance), 3)
+        total_asset = await self.total_asset()
+        prov = self._build_provenance(
+            trigger="manual", reason=reason, score=0.0, detail="",
+            stop_distance=stop_distance, stop_price=stop_price,
+            regime_state=regime_state,
+            effective_exposure=float(getattr(self.settings, "paper_max_total_exposure", 0.8)),
+            exposure_cap=float(getattr(self.settings, "paper_max_total_exposure", 0.8)) * float(total_asset),
+            today=today,
+        )
+        db.add_paper_lot(code, name, qty, cost_price, today, reason, today=today, provenance=prov)
         db.insert_paper_trade(code, name, "buy", price, qty, amt, fee, reason, today)
         db.update_paper_cash(round(cash, 2))
         # 持仓纳入自选：保证后续卖出建议能覆盖到这只股票
@@ -1572,6 +1681,8 @@ class PaperEngine:
             return []
         today = datetime.now().strftime("%Y-%m-%d")
         now = datetime.now()
+        # 建仓溯源用的 regime 快照（按日缓存，开销极低）
+        regime_state = (await self._dynamic_regime(today)).get("state", "normal")
         # 开盘延迟/冷静期：开盘后 N 分钟内禁止做T买入（买回/加仓），卖出照常
         open_delayed = self._open_delayed(now) or self._open_cooldown(now)
         self.ensure_account()  # 确保 lots migrate + 刷新可卖股数（T+1 跨日生效）
@@ -1685,7 +1796,13 @@ class PaperEngine:
                         fee = self.calc_fee("buy", amount)
                         if amount + fee <= cash:
                             cash -= amount + fee
-                            db.add_paper_lot(code, name, want, price, today, "做T买回", today=today, tag="t_buyback")
+                            prov = self._build_provenance(
+                                trigger="t_buyback", reason="做T买回", score=0.0, detail="",
+                                regime_state=regime_state,
+                                effective_exposure=float(getattr(self.settings, "paper_max_total_exposure", 0.8)),
+                                today=today,
+                            )
+                            db.add_paper_lot(code, name, want, price, today, "做T买回", today=today, tag="t_buyback", provenance=prov)
                             db.update_paper_t_state(code, t_t_sold=0, t_sold_date="")
                             db.insert_paper_trade(code, name, "buy", price, want, amount, fee, "做T买回", today)
                             trades.append(TradeResult(code, name, "buy", want, price, amount, fee, "做T买回"))
@@ -1776,7 +1893,13 @@ class PaperEngine:
                                 fee = self.calc_fee("buy", amount)
                             if est >= LOT_SIZE:
                                 cash -= amount + fee
-                                db.add_paper_lot(code, name, est, price, today, "做T加仓", today=today, tag="t_add")
+                                prov = self._build_provenance(
+                                    trigger="t_add", reason="做T加仓", score=0.0, detail="",
+                                    regime_state=regime_state,
+                                    effective_exposure=float(getattr(self.settings, "paper_max_total_exposure", 0.8)),
+                                    today=today,
+                                )
+                                db.add_paper_lot(code, name, est, price, today, "做T加仓", today=today, tag="t_add", provenance=prov)
                                 db.update_paper_t_state(code, t_down_armed=1)
                                 db.insert_paper_trade(code, name, "buy", price, est, amount, fee, "做T加仓", today)
                                 trades.append(TradeResult(code, name, "buy", est, price, amount, fee, "做T加仓"))

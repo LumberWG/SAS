@@ -499,6 +499,7 @@ class Database:
             self._migrate_position_peak(conn)
             self._migrate_position_lots(conn)
             self._migrate_lots_tag(conn)
+            self._migrate_lots_provenance(conn)
             self._migrate_backtest_extra(conn)
             self._dedupe_signals(conn)
 
@@ -605,6 +606,17 @@ class Database:
         cols = {row["name"] for row in conn.execute("PRAGMA table_info(paper_position_lots)")}
         if "tag" not in cols:
             conn.execute("ALTER TABLE paper_position_lots ADD COLUMN tag TEXT DEFAULT 'base'")
+
+    @staticmethod
+    def _migrate_lots_provenance(conn: sqlite3.Connection) -> None:
+        """老库补 provenance 列：每个批次挂「触发信号 + regime 快照 + 决策理由」溯源。
+
+        建仓时一次性写入 JSON；历史批次该列为 NULL，读取侧按空值降级
+        （「当时没存」而非「存了空」）。见 BACKTEST_LOG.md #115。
+        """
+        cols = {row["name"] for row in conn.execute("PRAGMA table_info(paper_position_lots)")}
+        if "provenance" not in cols:
+            conn.execute("ALTER TABLE paper_position_lots ADD COLUMN provenance TEXT")
 
     @staticmethod
     def _migrate_signal_rank(conn: sqlite3.Connection) -> None:
@@ -1010,16 +1022,21 @@ class Database:
         buy_date: str, strategy: str, score: float = 0.0,
         stop_price: float | None = None, peak_price: float | None = None,
         today: str | None = None, tag: str = "base",
+        provenance: str | None = None,
     ) -> None:
-        """新增一个买入批次（开仓 / 做T加仓 / 做T买回都走这里；buy_date=当日→次日可卖）。"""
+        """新增一个买入批次（开仓 / 做T加仓 / 做T买回都走这里；buy_date=当日→次日可卖）。
+
+        ``provenance``：建仓决策溯源 JSON（触发信号 + regime 快照 + 决策理由），
+        由 engine 在买入时构造并传入；历史/迁移补建的批次为 None。
+        """
         today = today or datetime.now().strftime("%Y-%m-%d")
         led = _scope()
         with self._lock, self._connect() as conn:
             conn.execute(
                 f"INSERT INTO {led.t('paper_position_lots')}"
-                f"({led.cols('code, shares, cost_price, buy_date, tag, created_at')})"
-                f" VALUES({led.vals(6)})",
-                led.args(code, shares, cost_price, buy_date, tag, _now()),
+                f"({led.cols('code, shares, cost_price, buy_date, tag, provenance, created_at')})"
+                f" VALUES({led.vals(7)})",
+                led.args(code, shares, cost_price, buy_date, tag, provenance, _now()),
             )
             exists = conn.execute(
                 f"SELECT 1 FROM {led.t('paper_positions')}{led.where('code=?')}",
