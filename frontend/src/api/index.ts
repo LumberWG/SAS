@@ -973,6 +973,44 @@ export function getPaperTrades(
     .then((r) => r.data)
 }
 
+/** 持仓批次（lot）建仓决策溯源（BACKTEST_LOG #115）。provenance 为 null 表示历史批次未记录。 */
+export interface PaperLotProvenance {
+  trigger: string
+  reason: string
+  score: number
+  detail: string
+  regime: {
+    state: string
+    exposure_cap: number
+    weak_pause_all: boolean
+    crash_pause: boolean
+    open_delayed: boolean
+    open_cooldown: boolean
+  }
+  stop_distance: number | null
+  stop_price: number | null
+  exposure_cap: number
+  signals: string[]
+  rationale: string
+  created_at: string
+}
+
+export interface PaperLot {
+  id: number
+  code: string
+  name?: string
+  shares: number
+  cost_price: number
+  buy_date: string
+  tag: string
+  created_at: string
+  provenance: PaperLotProvenance | null
+}
+
+export function getPaperLots(code?: string): Promise<{ lots: PaperLot[] }> {
+  return http.get('/paper/lots', { params: code ? { code } : {} }).then((r) => r.data)
+}
+
 export function getPaperEquity(): Promise<{
   equity: Array<{
     date: string

@@ -28,6 +28,7 @@ import {
   getPaperSim,
   getPaperSimEquity,
   getPaperTrades,
+  getPaperLots,
   getWatchlist,
   placePaperOrder,
   resetPaperAccount,
@@ -35,6 +36,7 @@ import {
   tickPaper,
   type PaperAccount,
   type PaperLiveStatus,
+  type PaperLot,
   type PaperSimAccount,
   type PaperTrade,
   type WatchItem,
@@ -78,6 +80,32 @@ const account = ref<PaperAccount | null>(null)
 const trades = ref<PaperTrade[]>([])
 const equity = ref<Array<{ date: string; total_asset: number }>>([])
 const live = ref<PaperLiveStatus | null>(null)
+// ---- 持仓批次建仓溯源（BACKTEST_LOG #115）：每个 lot 的触发信号 + regime 快照 + 决策理由 ----
+const lots = ref<PaperLot[]>([])
+const expandedCode = ref<string | null>(null)
+/** 按股票代码归并批次，便于在持仓行下展开该票的每笔建仓溯源 */
+const lotsByCode = computed<Record<string, PaperLot[]>>(() => {
+  const m: Record<string, PaperLot[]> = {}
+  for (const l of lots.value) (m[l.code] ??= []).push(l)
+  return m
+})
+function toggleLot(code: string) {
+  expandedCode.value = expandedCode.value === code ? null : code
+}
+/** 建仓触发类型 → 中文标签 */
+const TRIGGER_LABEL: Record<string, string> = {
+  fresh_buy: '自动买入',
+  rotation_buyin: '轮动换入',
+  manual: '手动买入',
+  t_buyback: '做T买回',
+  t_add: '做T加仓',
+}
+/** 批次标签 → 中文 */
+const TAG_LABEL: Record<string, string> = {
+  base: '底仓',
+  t_add: '做T加仓',
+  t_buyback: '做T买回',
+}
 // ---- 并行模拟账本（同一信号、不同处置参数） ----
 const simAccounts = ref<PaperSimAccount[]>([])
 const simEnabled = ref(false)
@@ -98,14 +126,16 @@ const orderOk = ref(false)
 
 async function load() {
   try {
-    const [acc, tradeData, equityData, liveData] = await Promise.all([
+    const [acc, tradeData, equityData, liveData, lotData] = await Promise.all([
       getPaperAccount(),
       getPaperTrades(100),
       getPaperEquity(),
       getPaperLive(),
+      getPaperLots(),
     ])
     account.value = acc
     trades.value = tradeData.trades
+    lots.value = lotData.lots
     equity.value = equityData.equity
       .filter((e) => isTradingDay(e.date))
       .map((e) => ({
@@ -918,30 +948,86 @@ onUnmounted(() => {
               <th class="px-3 py-2 text-right font-medium">盈亏</th>
               <th class="px-3 py-2 text-right font-medium">盈亏%</th>
               <th class="px-3 py-2 font-medium">买入原因</th>
+              <th class="px-3 py-2 font-medium">建仓溯源</th>
             </tr>
           </thead>
           <tbody>
-            <tr
-              v-for="p in account.positions"
-              :key="p.code"
-              class="cursor-pointer border-b border-base-600/30 transition-colors hover:bg-primary/10"
-              @click="router.push(`/stock/${p.code}`)"
-            >
-              <td class="font-num px-3 py-2.5 text-content-muted">{{ p.code }}</td>
-              <td class="px-3 py-2.5 font-medium text-content">{{ p.name }}</td>
-              <td class="font-num px-3 py-2.5 text-right text-content">{{ p.shares }}</td>
-              <td class="font-num px-3 py-2.5 text-right text-content-muted">{{ p.cost_price.toFixed(2) }}</td>
-              <td class="font-num px-3 py-2.5 text-right text-content">{{ p.price.toFixed(2) }}</td>
-              <td class="font-num px-3 py-2.5 text-right font-semibold" :class="pctTone(p.pnl)">
-                {{ p.pnl > 0 ? '+' : '' }}{{ p.pnl.toFixed(0) }}
-              </td>
-              <td class="font-num px-3 py-2.5 text-right font-semibold" :class="pctTone(p.pnl_pct)">
-                {{ p.pnl_pct > 0 ? '+' : '' }}{{ p.pnl_pct.toFixed(2) }}%
-              </td>
-              <td class="max-w-[260px] truncate px-3 py-2.5 text-content-faint" :title="p.strategy">
-                {{ p.strategy }}
-              </td>
-            </tr>
+            <template v-for="p in account.positions" :key="p.code">
+              <tr
+                class="cursor-pointer border-b border-base-600/30 transition-colors hover:bg-primary/10"
+                @click="router.push(`/stock/${p.code}`)"
+              >
+                <td class="font-num px-3 py-2.5 text-content-muted">{{ p.code }}</td>
+                <td class="px-3 py-2.5 font-medium text-content">{{ p.name }}</td>
+                <td class="font-num px-3 py-2.5 text-right text-content">{{ p.shares }}</td>
+                <td class="font-num px-3 py-2.5 text-right text-content-muted">{{ p.cost_price.toFixed(2) }}</td>
+                <td class="font-num px-3 py-2.5 text-right text-content">{{ p.price.toFixed(2) }}</td>
+                <td class="font-num px-3 py-2.5 text-right font-semibold" :class="pctTone(p.pnl)">
+                  {{ p.pnl > 0 ? '+' : '' }}{{ p.pnl.toFixed(0) }}
+                </td>
+                <td class="font-num px-3 py-2.5 text-right font-semibold" :class="pctTone(p.pnl_pct)">
+                  {{ p.pnl_pct > 0 ? '+' : '' }}{{ p.pnl_pct.toFixed(2) }}%
+                </td>
+                <td class="max-w-[260px] truncate px-3 py-2.5 text-content-faint" :title="p.strategy">
+                  {{ p.strategy }}
+                </td>
+                <td class="px-3 py-2.5">
+                  <button
+                    class="rounded-md border px-2 py-1 text-[12.5px] font-medium transition-colors"
+                    :class="expandedCode === p.code
+                      ? 'border-primary/50 bg-primary/15 text-primary-light'
+                      : 'border-base-600 text-content-muted hover:border-primary/40 hover:text-content'"
+                    :disabled="!lotsByCode[p.code] || lotsByCode[p.code].length === 0"
+                    :title="!lotsByCode[p.code] || lotsByCode[p.code].length === 0 ? '暂无溯源记录' : '展开建仓理由'"
+                    @click.stop="toggleLot(p.code)"
+                  >
+                    {{ expandedCode === p.code ? '收起' : (lotsByCode[p.code]?.length ? '溯源' : '—') }}
+                  </button>
+                </td>
+              </tr>
+              <tr v-if="expandedCode === p.code">
+                <td :colspan="9" class="border-b border-base-600/30 bg-base-800/40 px-4 py-3 align-top">
+                  <div class="space-y-3">
+                    <div
+                      v-for="lot in lotsByCode[p.code]"
+                      :key="lot.id"
+                      class="rounded-lg border border-base-600/60 bg-base-700/30 p-3"
+                    >
+                      <div class="mb-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-[12.5px]">
+                        <span class="rounded border border-base-600 bg-base-800/60 px-1.5 py-0.5 text-content-muted">
+                          {{ TAG_LABEL[lot.tag] || lot.tag }}
+                        </span>
+                        <span class="font-num text-content-muted">买入日 {{ lot.buy_date }}</span>
+                        <span class="font-num text-content-muted">成本 {{ lot.cost_price.toFixed(2) }}</span>
+                        <span class="font-num text-content-muted">{{ lot.shares }} 股</span>
+                      </div>
+                      <template v-if="lot.provenance">
+                        <div class="mb-1.5 flex flex-wrap items-center gap-2 text-[12.5px]">
+                          <span class="font-medium text-content">{{ TRIGGER_LABEL[lot.provenance.trigger] || lot.provenance.trigger }}</span>
+                          <span class="rounded border border-primary/40 bg-primary/10 px-1.5 py-0.5 text-primary-light">
+                            {{ REGIME_LABEL[lot.provenance.regime.state] || lot.provenance.regime.state }}
+                          </span>
+                          <span v-if="lot.provenance.stop_distance != null" class="font-num text-content-faint">
+                            止损距离 {{ (lot.provenance.stop_distance * 100).toFixed(1) }}%
+                          </span>
+                        </div>
+                        <div class="mb-1.5 flex flex-wrap gap-1.5">
+                          <span
+                            v-for="(s, i) in lot.provenance.signals"
+                            :key="i"
+                            class="rounded-full border border-base-600 bg-base-800/60 px-2 py-0.5 text-[12px] text-content-muted"
+                          >
+                            {{ s }}
+                          </span>
+                        </div>
+                        <p class="text-[12.5px] leading-relaxed text-content-faint">{{ lot.provenance.rationale }}</p>
+                      </template>
+                      <p v-else class="text-[12.5px] text-content-faint">该批次建仓时未记录溯源</p>
+                    </div>
+                  </div>
+                </td>
+              </tr>
+            </template>
           </tbody>
         </table>
       </div>
