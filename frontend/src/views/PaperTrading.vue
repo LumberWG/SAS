@@ -987,12 +987,12 @@ onUnmounted(() => {
       <div class="glass-card p-5 xl:col-span-2">
         <div class="mb-3 flex items-center justify-between">
           <h3 class="text-subheading">净值曲线</h3>
-          <span class="text-[12.5px] text-content-faint">盘后 15:40 自动结算 · {{ equity.length }} 个交易日</span>
+          <span class="text-[12.5px] text-content-faint">盘中每 30s 按最新价刷新 · 15:40 结算 · {{ equity.length }} 个交易日</span>
         </div>
         <v-chart v-if="equity.length > 0" :option="equityOption" style="height: 220px" autoresize />
         <div v-else class="flex h-[220px] flex-col items-center justify-center gap-2 text-content-faint">
           <p class="text-[14.5px]">暂无净值数据</p>
-          <p class="text-[12.5px]">每个交易日收盘后自动记录（需后端保持运行）</p>
+          <p class="text-[12.5px]">交易时段每 30 秒按最新价记录当日净值（需后端保持运行）</p>
         </div>
       </div>
     </div>
@@ -1108,7 +1108,7 @@ onUnmounted(() => {
         autoresize
       />
       <p v-else class="mt-3 text-[12.5px] text-content-faint">
-        还没有账本净值：收盘 15:40 结算后出第一条（盘中成交看各账本流水）
+        还没有账本净值：交易时段每 30 秒按最新价刷新当日点，15:40 结算后定稿
       </p>
 
       <div v-if="simSkipped.length > 0" class="mt-3 rounded-lg border border-base-600/60 p-3">

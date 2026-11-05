@@ -85,6 +85,23 @@ def test_equity_and_trades_are_per_ledger(db):
     assert len(db.list_paper_trades()) == 1
 
 
+def test_equity_limit_keeps_latest_days(db):
+    """`limit` 取的是**最近** N 个交易日（升序返回），不是最早 N 个。
+
+    旧实现 `ORDER BY date LIMIT n`：快照超过 n 行后曲线停在最早那段，
+    当天刚刷新的行反而查不到（2026-11-05 排查「盘中曲线不更新」时发现）。
+    """
+    db.init_paper_account(100000)
+    for day, asset in (
+        ("2026-01-05", 100100), ("2026-01-06", 100200), ("2026-01-07", 100300),
+    ):
+        db.save_paper_equity(day, asset, asset, 0)
+
+    rows = db.list_paper_equity(limit=2)
+    assert [r["date"] for r in rows] == ["2026-01-06", "2026-01-07"]
+    assert [r["total_asset"] for r in rows] == [100200, 100300]
+
+
 def test_reset_sim_account_does_not_touch_live(db):
     """重置单个并行账本只清它自己，主账本持仓保留。"""
     db.init_paper_account(100000)
@@ -224,3 +241,64 @@ async def test_sim_ledger_uses_its_own_position_limit(db, monkeypatch):
         assert len(db.list_paper_positions()) == 1
 
     assert len(db.list_paper_positions()) == 2
+
+
+@pytest.mark.asyncio
+async def test_intraday_equity_snapshot_is_throttled(db, monkeypatch):
+    """净值曲线盘中刷新：30s 内不重复写，有成交（force）必须立刻写。"""
+    from datetime import datetime
+
+    from app.paper import live as live_module
+
+    db.init_paper_account(100000)
+    trader = live_module.LiveTrader()
+    calls: list[int] = []
+
+    async def fake_snapshot(detail=None):
+        calls.append(1)
+
+    monkeypatch.setattr(trader.engine, "record_equity_snapshot", fake_snapshot)
+    now = datetime(2026, 11, 5, 10, 0, 0)
+
+    await trader._snapshot_equity(now)
+    await trader._snapshot_equity(now)                 # 同一时刻：节流，不重复写
+    assert len(calls) == 1
+    await trader._snapshot_equity(now, force=True)     # 本 tick 有成交：立刻写
+    assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_sim_tick_writes_intraday_equity_without_trades(db, monkeypatch):
+    """并行账本没有成交也要落当日净值，否则盘中「累计收益率」整段停在昨天。"""
+    from datetime import datetime
+
+    from app.config import get_settings
+    from app.paper import live as live_module
+    from app.paper.engine import PaperEngine
+
+    async def no_trades(*args, **kwargs):
+        return []
+
+    db.init_paper_account(100000)
+    acct = db.ensure_sim_accounts([{
+        "tag": "conc5", "profile": "conc5",
+        "overrides": {"paper_max_positions": 5}, "initial_capital": 100000,
+    }])[0]
+    engine = PaperEngine(OverlaySettings(get_settings(), {"paper_max_positions": 5}))
+    monkeypatch.setattr(engine, "check_stop_loss_target", no_trades)
+    monkeypatch.setattr(engine, "t_tick", no_trades)
+    monkeypatch.setattr(engine, "_open_delayed", lambda now: False)
+    monkeypatch.setattr(engine, "_open_cooldown", lambda now: False)
+
+    trader = live_module.LiveTrader()
+    trader._sim = {str(acct["tag"]): live_module.SimRun(
+        account_id=int(acct["account_id"]), tag=str(acct["tag"]),
+        engine=engine, pending={},
+    )}
+
+    await trader._tick_sim({}, datetime(2026, 11, 5, 10, 0, 0))
+
+    with ledger_scope(int(acct["account_id"])):
+        rows = db.list_paper_equity()
+    assert [r["date"] for r in rows] == [datetime.now().strftime("%Y-%m-%d")]
+    assert rows[0]["total_asset"] == pytest.approx(100000, abs=0.01)

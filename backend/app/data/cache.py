@@ -1259,15 +1259,20 @@ class Database:
             )
 
     def list_paper_equity(self, limit: int = 250) -> list[dict[str, Any]]:
-        """净值曲线（按日期升序，限制条数）。"""
+        """净值曲线（按日期升序，取**最近** limit 个交易日）。
+
+        必须取「最近」而不是「最早」：`ORDER BY date LIMIT n` 在快照超过 n 行后
+        会把最新的点全部截掉，曲线停在最早那一段（2026-11-05 发现——当天行明明
+        已经随 tick 刷新，接口却查不到，因为 limit 把老数据截在了前面）。
+        """
         led = _scope()
         with self._lock, self._connect() as conn:
             rows = conn.execute(
                 f"SELECT * FROM {led.t('paper_equity')}{led.where()}"
-                " ORDER BY date LIMIT ?",
+                " ORDER BY date DESC LIMIT ?",
                 led.args(limit),
             ).fetchall()
-        return [dict(r) for r in rows]
+        return [dict(r) for r in reversed(rows)]
 
     def reset_paper_account(self, initial_capital: float) -> None:
         """重置模拟账户：清空持仓/批次/流水/净值，资金恢复初始值。"""

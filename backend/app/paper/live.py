@@ -44,6 +44,12 @@ _MODE_KEY = "paper_trade_mode"
 _BACKLOG_REASONS = ("持仓已满", "总仓位已达上限", "资金不足一手")
 #: 轮动卖出原因里的「换入票分数」，格式由 engine 自己生成：`轮动替换(建仓40分→新票67分)`
 _ROT_TARGET_RE = re.compile(r"新票(\d+)分")
+#: 盘中净值快照的最小间隔（秒）。原来只在「有成交」时才 upsert 当日净值，
+#: 于是 15:40 结算之前净值曲线的最新点停在「最后一笔成交那一刻」——没成交的
+#: 交易日更是整条曲线停在昨天，盘中看盘时「累计收益率」不跟着行情走。
+#: 现改为：有成交立即写 + 没成交也每 N 秒按最新价重估一次（同日 upsert，不增行）。
+#: 取 30s（页面 15s 轮询，两轮之内必刷新一次），对 SQLite 只是一行 upsert，成本可忽略。
+_EQUITY_SNAPSHOT_SECONDS = 30
 #: 五段式④⑤：被判定规则/切入点拒掉的买入原因（前端「④ 交易池」展示，白名单避免噪音）
 _ENTRY_REJECT_REASONS = (
     "追高", "未回踩", "大盘弱势", "不在当日成交额", "不在沪深主板",
@@ -144,6 +150,11 @@ class LiveTrader:
         self._sim_skipped: list[str] = []
         #: 上一 tick 各账本成交笔数（状态接口展示用）
         self._sim_last: dict[str, int] = {}
+        #: 上一次落盘中净值快照的时间戳（主账本；0 = 本进程还没写过）
+        self._equity_ts: float = 0.0
+        #: 各并行账本上一次落快照的时间戳（tag -> ts）。放在 LiveTrader 上而不是
+        #: ``SimRun`` 里：``_ensure_sim`` 每 tick 都重建 SimRun 对象，字段会被重置。
+        self._sim_equity_ts: dict[str, float] = {}
         # 重启后从库恢复未过期的撮合队列（避免内存队列丢失）
         self._restore_pending()
 
@@ -670,12 +681,40 @@ class LiveTrader:
                             run.pending.pop(code, None)
                         elif not any(k in hit.reason for k in keep_reasons):
                             run.pending.pop(code, None)
-                out[tag] = len(stops) + len(t_trades) + len([r for r in results if r.side != "skip"])
+                    moved = len(stops) + len(t_trades) + len(
+                        [r for r in results if r.side != "skip"]
+                    )
+                    # 盘中净值快照（与主账本同口径）：有成交立即写，否则每 N 秒按最新价重估。
+                    # 并行账本的曲线原本只在 15:40 结算时才有点，盘中「累计收益率曲线」
+                    # 整段停在昨天；这里补上当日点，才能与主账本同时反映行情。
+                    if moved or now.timestamp() - self._sim_equity_ts.get(tag, 0.0) >= _EQUITY_SNAPSHOT_SECONDS:
+                        self._sim_equity_ts[tag] = now.timestamp()
+                        try:
+                            await run.engine.record_equity_snapshot()
+                        except Exception as exc:  # noqa: BLE001 - 快照失败不影响撮合
+                            logger.debug("并行账本 %s 净值快照失败: %s", tag, exc)
+                out[tag] = moved
             except Exception as exc:  # noqa: BLE001 - 单个账本失败不能拖垮其它账本
                 logger.warning("并行账本 %s 撮合失败: %s", tag, exc)
                 out[tag] = -1
         self._sim_last = out
         return out
+
+    async def _snapshot_equity(self, now: datetime, *, force: bool = False) -> None:
+        """盘中落一次主账本净值快照（同日 upsert，不新增行）。
+
+        ``force=True`` 用于「本 tick 有成交」——成交后净值必须立刻可读；
+        无成交时按 :data:`_EQUITY_SNAPSHOT_SECONDS` 节流重估，让净值曲线在
+        15:40 结算之前也跟着实时价走（含手动模式：只刷新净值、不交易）。
+        """
+        ts = now.timestamp()
+        if not force and ts - self._equity_ts < _EQUITY_SNAPSHOT_SECONDS:
+            return
+        self._equity_ts = ts
+        try:
+            await self.engine.record_equity_snapshot()
+        except Exception as exc:  # noqa: BLE001 - 净值快照失败不影响主流程
+            logger.debug("净值快照失败（不影响交易）: %s", exc)
 
     # ------------------------------------------------------------------
     # 撮合
@@ -706,8 +745,9 @@ class LiveTrader:
         self._last_error = ""
 
         # 手动模式：只刷新报价供页面参考，不执行任何买卖（含止盈止损），
-        # 由用户在模拟交易页自己下单。
+        # 由用户在模拟交易页自己下单。净值仍按最新价重估（不交易、只更新曲线）。
         if not self.auto_trade_enabled():
+            await self._snapshot_equity(now)
             return {
                 "skipped": "手动交易模式",
                 "prices": len(prices),
@@ -808,13 +848,12 @@ class LiveTrader:
         }
         executed = [r for r in results if r.side != "skip"]
 
-        # 实时净值快照：本 tick 只要发生任何成交（止盈止损 / 做T / 队列 / 减仓），
-        # 就 upsert 当日净值，使净值曲线在 15:40 收盘结算未跑（服务重启 / 异常）时也有点。
-        if stop_trades or t_trades or executed or trim_trades:
-            try:
-                await self.engine.record_equity_snapshot()
-            except Exception:  # noqa: BLE001 - 净值快照失败不影响主流程
-                pass
+        # 实时净值快照：有成交（止盈止损 / 做T / 队列 / 减仓）立即写，保证成交后
+        # 净值立刻可读；无成交也按 _EQUITY_SNAPSHOT_SECONDS 重估一次，让「累计收益率」
+        # 在盘中跟着实时价走（否则曲线停在最后一笔成交那一刻，15:40 前甚至停在昨天）。
+        await self._snapshot_equity(
+            now, force=bool(stop_trades or t_trades or executed or trim_trades)
+        )
 
         # 五段式④⑤的可观测性：本轮被判定规则/切入点拒掉的买入原因
         self._entry_rejected = [
