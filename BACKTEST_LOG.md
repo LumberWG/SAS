@@ -7222,3 +7222,44 @@ True（关掉后 `t_tick` 仍返回空）；`TestRotation` 新增 `test_rotation
   ① 走设置页 / `POST /api/settings`（即时生效 + 落库 + 重启保留）；② 或单键「还原」重读 `.env`；
   ③ 改完必 `GET /api/settings` 回读确认。光改 `.env` + 重启在多数参数上不够。
 - 本修复为运行时落库，无需改代码 → 无新 commit；文档（本记录 + README 铁律）随下次提交入库。
+
+#115 · 2026-11-05 · 成交决策溯源（每个 lot 挂「触发信号 + regime 快照 + 决策理由」）
+- 背景：借鉴 TradingAgents 的「全链路决策溯源 / 审计日志」思路（见对话调研）。原 SAS 每笔成交只存
+  `reason` 文本，复盘时无法回答「这只票为什么在这个时点买入、当时 regime/评分/信号是什么」。
+- 实现：
+  - `paper_position_lots` 表新增 `provenance TEXT` 列（迁移 `_migrate_lots_provenance`，老批次为 NULL 降级）；
+    `add_paper_lot` 增加 `provenance` 参数并写入。
+  - `engine.py` 新增 `_build_provenance()`：把触发信号（评分分档 + Recommendation.detail 因子分项 top3
+    + 机制层 shock/crisis 收紧标记 + 轮动换入标注 + 仓位压降 + 开盘保护）、regime 快照
+    （state / 仓位上限 / 各暂停标志）、止损距离与线、以及一句 human-readable `rationale` 打包成 JSON。
+  - 四处建仓全部接入：自动买入（`execute_recommendations`，区分 fresh_buy / rotation_buyin）、
+    手动下单（`place_order`→manual）、做T买回 / 做T加仓（`t_tick`→t_buyback / t_add）。
+  - 轮动换入通过 `rotation_targets` 映射「换入标的→被替换弱票建仓分」，溯源里标「轮动换入（替换建仓X分弱票）」。
+  - 新增 `GET /api/paper/lots`：返回持仓批次列表并把 provenance 解析为结构化 dict（触发信号 / regime / 理由），
+    历史批次 provenance=null 自然降级。
+- 测试：新增 `TestProvenance`（3 例：_build_provenance 结构 / 自动买入落库溯源 / 手动买入溯源）；
+  全量 test_paper(102→105 含既有) + test_ledger 共 105 例全绿。
+- 设计取舍：只存「建仓时一次性快照」，不跟踪持仓期变化（移动止损/加仓另行在 lot.tag 体现）；
+  provenance 与业务解耦，纯 JSON 文本，不影响任何交易逻辑与既有字段兼容性。
+
+#116 · 2026-11-05 · 建仓溯源前端化 + 一键导出复盘工具（延续 #115）
+- 背景：#115 已把每个 lot 的 provenance（触发信号+regime快照+决策理由）落到后端与
+  `GET /api/paper/lots`。本记录补齐「让用户真正看得见、用得上」的两块：前端持仓卡片内嵌 + 盘后导出工具。
+- 前端（frontend 为 Vue3 + Tailwind + TS，非 React）：
+  - `src/api/index.ts` 新增 `PaperLot` / `PaperLotProvenance` 类型与 `getPaperLots()`；
+  - `views/PaperTrading.vue`：持仓表新增「建仓溯源」列，每仓一个「溯源」按钮，点击在行下展开
+    该票全部批次的明细（批次标签/买入日/成本/股数 + 触发方式 + 机制态 + 止损距离 + 触发信号 chips
+    + 一句话理由）；历史批次 provenance=null 显示「该批次建仓时未记录溯源」；行点击跳个股详情的
+    行为保留（按钮 @click.stop 不触发跳转）。`load()` 已并入 `getPaperLots()`，15s 轮询与手动操作均刷新。
+  - `npm run build`（vue-tsc + vite）通过。
+- 后端导出工具：`backend/scripts/export_lot_reason.py`（纯读、不改数据）：
+  - 复用 `app.data.cache.Database.list_paper_lots`，支持 `--code`（可重复）/ `--out 文件` / `--json`；
+  - 默认把全部持仓批次渲染成 Markdown 复盘报告（按股票归并、每 lot 渲染触发方式/机制态/止损距离/
+    触发信号/理由），provenance=null 优雅降级；标签映射与前端保持一致。
+  - 用法：`.venv/Scripts/python.exe scripts/export_lot_reason.py [--code X] [--out 报告.md] [--json]`
+  - 配套 `export_lot_reason.bat`（项目根目录）：双击一键调用，按当天日期输出到 `reports/lot_reason_report_yyyyMMdd.md`，可接受 `--code` 参数
+- 注意：当前实盘持仓批次均为 2026-11-04 建仓（早于 #115），provenance 全为 null；
+  #115 部署后的新买入才会带上溯源，届时前端按钮与导出报告即生效。
+- 部署待办：#115/#116 改了后端代码（新增 /api/paper/lots 接口 + provenance 写入），需手动重启 SAS 后端
+  （schtasks /run /tn SASRestart 或管理员 Restart-Service SAS -Force）后前端「溯源」按钮才生效；
+  导出脚本直读 SQLite，无需重启即可用。
