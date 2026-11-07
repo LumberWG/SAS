@@ -279,6 +279,7 @@ CREATE TABLE IF NOT EXISTS paper_position_lots (
     cost_price  REAL NOT NULL,
     buy_date    TEXT NOT NULL,       -- 该批次买入日（T+1 可卖判断）
     tag         TEXT DEFAULT 'base', -- base=底仓 / t_add=做T加仓 / t_buyback=做T买回
+    provenance  TEXT,                -- #115 建仓溯源 JSON（触发信号 + regime + 决策理由）
     created_at  TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_lots_code ON paper_position_lots(code);
@@ -356,6 +357,7 @@ CREATE TABLE IF NOT EXISTS sim_lots (
     cost_price REAL NOT NULL,
     buy_date   TEXT NOT NULL,
     tag        TEXT DEFAULT 'base',
+    provenance TEXT,                 -- 必须与 paper_position_lots 同构：add_paper_lot 统一写这列
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_sim_lots_acct ON sim_lots(account_id, code);
@@ -613,10 +615,17 @@ class Database:
 
         建仓时一次性写入 JSON；历史批次该列为 NULL，读取侧按空值降级
         （「当时没存」而非「存了空」）。见 BACKTEST_LOG.md #115。
+
+        **两张 lots 表都要补**：`ledger_scope` 会把并行账本的 `add_paper_lot` 路由到
+        `sim_lots`。#115 只补了主账本，结果每个并行账本一建仓就抛
+        `no column named provenance`，被 `_tick_sim` 的兜底吞成一条 warning——
+        净值还在按价格刷新，看着完全正常，实际一本都没在买。
         """
-        cols = {row["name"] for row in conn.execute("PRAGMA table_info(paper_position_lots)")}
-        if "provenance" not in cols:
-            conn.execute("ALTER TABLE paper_position_lots ADD COLUMN provenance TEXT")
+        for table in ("paper_position_lots", "sim_lots"):
+            cols = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+            # 表不存在时 PRAGMA 返回空（未启用并行账本的老库），跳过即可
+            if cols and "provenance" not in cols:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN provenance TEXT")
 
     @staticmethod
     def _migrate_signal_rank(conn: sqlite3.Connection) -> None:

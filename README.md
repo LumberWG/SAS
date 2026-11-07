@@ -535,6 +535,7 @@ schtasks /run /tn SASDbBackup                              # 立即触发计划�
 - 启用：`backend/.env` 设 `PAPER_SIM_ENABLED=true`；`PAPER_SIM_PROFILES` 填方案名（逗号分隔，取自 `app/backtest/profiles.py`）；`PAPER_SIM_CAPITAL` 为各账本初始资金（0 = 跟随模拟盘本金）
 - 首批：`default,e30_a15,e30_a2,e30_a25,conc5,low_exp,reg30`（线上默认 + 三档 ATR 止损 + 少持仓 + 低敞口 + 弱市 30% 档）
 - 隔离：账本写独立表 `sim_account / sim_positions / sim_lots / sim_trades / sim_equity`（主键带 `account_id`），线上 `paper_*` 表只读不写；`db.paper_*` 由 `ledger_scope()` 路由，撮合规则**不分叉**
+- **同构约束（2026-11-07 踩坑）**：`sim_*` 表必须与 `paper_*` **列对列同构**，新增列要「DDL + 老库迁移 + 并行账本单测」三处一起改。`#115` 给批次加 `provenance` 时只补了主表，`sim_lots` 漏列 → 并行账本每次 `add_paper_lot` 抛 `no column named provenance`，被 `_tick_sim` 吞掉，**净值仍按行情刷新、看起来正常，实际一本都没在买**；已修（`cache.py` 两张表 DDL + `_migrate_lots_provenance()` 遍历补列）。判读别只看 sim 净值有没有动，那不依赖买卖成功
 - 能比：**处置侧**参数——止损/止盈/仓位上限/持仓只数/弱市档/移动止损/ATR 倍数
 - 不能比：**选股侧**参数——ML 打分（`default_ml`）、评分反转（`rev_inv`）、策略子集、买入阈值。信号是共享的，这些改不动；含这类参数的方案会被**跳过**并在接口里列出原因，不静默降级成同名曲线
 - 调度：跟随 `paper_tick`（默认 5s）撮合；**盘中同样每 30 秒 upsert 一次当日净值**（有成交立即写，无成交按最新价重估），收盘 15:40 与主账本一起结算定稿，为每个账本各写一行净值

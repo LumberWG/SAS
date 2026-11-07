@@ -85,6 +85,54 @@ def test_equity_and_trades_are_per_ledger(db):
     assert len(db.list_paper_trades()) == 1
 
 
+def test_sim_lots_keeps_provenance(db):
+    """#115 溯源列必须同步到 sim_lots：`add_paper_lot` 对两类账本用同一条 INSERT。
+
+    漏列的后果是「并行账本整本不再买入」——`_tick_sim` 吞掉异常后净值仍按价刷新，
+    界面看不出任何异常，只能靠这条测试提前挡住。
+    """
+    import json
+
+    db.init_paper_account(100000)
+    acct = db.ensure_sim_accounts([{
+        "tag": "default", "profile": "default", "overrides": {},
+        "initial_capital": 100000,
+    }])[0]
+    payload = json.dumps({"signal": {"code": "600004"}, "reason": "测试"})
+
+    with ledger_scope(int(acct["account_id"])):
+        db.add_paper_lot(
+            "600004", "白云机场", 100, 10.0, "2026-11-06", "测试",
+            provenance=payload,
+        )
+        lots = db.list_paper_lots()
+
+    assert lots[-1]["provenance"] == payload
+
+
+def test_migration_repairs_old_sim_lots(tmp_path):
+    """老库（#115 之前建的、sim_lots 没有 provenance）启动后要自动补列。"""
+    import sqlite3
+
+    from app.data.cache import Database
+
+    if sqlite3.sqlite_version_info < (3, 35):
+        pytest.skip("模拟老库需要 SQLite >= 3.35 的 DROP COLUMN")
+
+    path = tmp_path / "old_sim.db"
+    Database(path)
+    with sqlite3.connect(path) as conn:
+        assert "provenance" in {
+            r[1] for r in conn.execute("PRAGMA table_info(sim_lots)")
+        }
+        conn.execute("ALTER TABLE sim_lots DROP COLUMN provenance")
+
+    Database(path)  # 模拟服务重启跑 _init_schema
+    with sqlite3.connect(path) as conn:
+        cols = {r[1] for r in conn.execute("PRAGMA table_info(sim_lots)")}
+    assert "provenance" in cols
+
+
 def test_equity_limit_keeps_latest_days(db):
     """`limit` 取的是**最近** N 个交易日（升序返回），不是最早 N 个。
 
