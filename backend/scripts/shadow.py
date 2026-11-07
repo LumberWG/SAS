@@ -73,6 +73,9 @@ def _snapshot(name: str, result: dict, end: str) -> dict:
     return {
         "as_of": eq[-1]["date"] if eq else end,
         "run_at": time.strftime("%Y-%m-%d %H:%M:%S"),
+        # 打分层判定：没有它，default 与 default_ml 快照重合时区分不了
+        # 「OOS IC≤0 整段回退」与「ML 生效但短窗口内选股没分化」（BACKTEST_LOG #109）
+        "ml_diagnostics": result.get("ml_diagnostics") or None,
         "total_return": total,
         "benchmark_return": bench,
         "excess": round(total - bench, 2),
@@ -160,11 +163,20 @@ def run_shadow(
             s for s in series["snapshots"] if s["as_of"] != snap["as_of"]
         ] + [snap]
         series["snapshots"].sort(key=lambda s: s["as_of"])
+        diag = snap.get("ml_diagnostics") or {}
+        if not diag:
+            ml_tag = "ML判定:无记录"
+        elif diag.get("effective"):
+            ml_tag = f"ML生效(IC={diag.get('oos_rank_ic')})"
+        elif diag.get("mode") in ("ml", "ml_blend"):
+            ml_tag = f"ML回退(IC={diag.get('oos_rank_ic')})"
+        else:
+            ml_tag = "14因子"
         log(
             f"  [{name}] {snap['as_of']} 收益 {snap['total_return']:+.2f}% | "
             f"基准 {snap['benchmark_return']:+.2f}% | 超额 {snap['excess']:+.2f}% | "
             f"回撤 {snap['max_drawdown']:.2f}% | {snap['trade_count']} 笔 | "
-            f"持仓 {snap['open_positions']} 只 | {time.time() - t0:.0f}s"
+            f"持仓 {snap['open_positions']} 只 | {ml_tag} | {time.time() - t0:.0f}s"
         )
     _save(path, data)
     log(f"\n已写入 {os.path.abspath(path)}")

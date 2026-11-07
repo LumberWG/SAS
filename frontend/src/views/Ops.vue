@@ -10,6 +10,7 @@ import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { Clock3, Download, RefreshCw, Server, Users } from 'lucide-vue-next'
 
 import { csvDateTag, downloadCsv } from '../lib/csv'
+import { POLL } from '../lib/polling'
 
 import {
   getAccessLog,
@@ -41,9 +42,11 @@ const excludeDev = ref(true)
 const unique = ref(false)
 const loading = ref(false)
 const error = ref('')
+const partialError = ref('')
 const lastRefresh = ref('')
 const mlStatus = ref<MlStatus | null>(null)
 const shadow = ref<ShadowStatus | null>(null)
+const shadowMl = computed(() => shadow.value?.profiles.find((p) => p.name === 'default_ml') ?? null)
 const breadthRows = ref<BreadthRow[]>([])
 const breadthNote = ref('')
 const reviewDoc = ref<ReviewDoc | null>(null)
@@ -154,6 +157,10 @@ async function loadAll() {
   breadthRows.value = br?.rows ?? []
   breadthNote.value = br?.note ?? ''
   reviewDoc.value = rv
+  const failed = [m, d, ml, sh, br, rv, ck].filter((x) => x === null).length
+  partialError.value = failed
+    ? `${failed} 个只读接口未返回数据，下方卡片可能仍是上一次的结果`
+    : ''
   lastRefresh.value = new Date().toLocaleTimeString('zh-CN', { hour12: false })
   await loadAccess()
 }
@@ -182,7 +189,7 @@ function levelText(level: string): string {
 
 onMounted(() => {
   loadAll()
-  timer = window.setInterval(loadAll, 30_000)
+  timer = window.setInterval(loadAll, POLL.defaultMs)
 })
 onUnmounted(() => {
   if (timer) window.clearInterval(timer)
@@ -206,6 +213,9 @@ onUnmounted(() => {
 
     <p v-if="error" class="rounded-lg border border-down/30 bg-down/[0.08] px-3 py-2 text-[12.5px] text-down">
       {{ error }}
+    </p>
+    <p v-if="partialError" class="banner-warn rounded-lg px-3 py-2 text-[12.5px]">
+      {{ partialError }}（保留已取到的数据，点右上角刷新重试）
     </p>
 
     <!-- 服务与数据 -->
@@ -349,14 +359,21 @@ onUnmounted(() => {
             default_ml 超额 {{ fmtPct(shadow.ml_pair.ml_excess) }} ·
             差 <span :class="shadow.ml_pair.diff >= 0 ? 'text-up' : 'text-down'">{{ fmtPct(shadow.ml_pair.diff) }}</span>
           </div>
+          <div class="mt-2 flex flex-wrap items-center gap-2 text-[12.5px]">
+            <span
+              class="chip"
+              :class="shadow?.ml_state === 'effective' ? 'chip-up' : (shadow?.ml_state === 'fallback' || shadow?.ml_state === 'unknown') ? 'chip-warn' : 'chip-muted'"
+            >{{ shadow?.ml_note ?? 'ML 判定不可用' }}</span>
+            <span v-if="shadowMl?.ml_diagnostics_available" class="text-content-faint">
+              OOS rank-IC <span class="font-num">{{ shadowMl.ml_oos_rank_ic?.toFixed(4) ?? '—' }}</span>
+              · 预测对 <span class="font-num">{{ shadowMl.ml_pred_pairs ?? '—' }}</span>
+              · 模式 {{ shadowMl.ml_mode ?? '—' }}
+            </span>
+          </div>
           <p
-            v-if="shadow?.pair_identical && shadow.ml_pair"
-            class="mt-2 rounded-lg border border-warn/30 bg-warn/[0.08] px-2.5 py-2 text-[12.5px] text-warn"
+            class="mt-2 rounded-lg px-2.5 py-2 text-[12.5px]"
+            :class="shadow?.pair_identical ? 'border border-warn/30 bg-warn/[0.08] text-warn' : 'text-content-muted'"
           >
-            两方案最新快照完全相同（收益/成交笔数一致），通常说明 ML 本轮回退或参数未生效，
-            <b>不能据此得出「ML 无超额」</b>（#79 / #82）。
-          </p>
-          <p v-else class="mt-2 text-[12.5px] text-content-muted">
             {{ shadow?.note ?? '影子账户状态不可用' }}
           </p>
           <div v-if="shadow?.profiles.length" class="mt-2 table-wrap">

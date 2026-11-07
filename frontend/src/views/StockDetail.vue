@@ -3,6 +3,7 @@
  * 个股详情：分时图 / K线图（可切换）+ 指标面板 + LLM 决策仪表盘。
  */
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { POLL } from '../lib/polling'
 import { useRoute, useRouter } from 'vue-router'
 import { ArrowLeft, CheckCircle2, AlertTriangle, XCircle, Sparkles, Star } from 'lucide-vue-next'
 
@@ -240,7 +241,7 @@ onMounted(async () => {
     if (chartTab.value !== 'intraday' || document.hidden) return
     loadIntraday()
     loadQuote()
-  }, 60_000)
+  }, POLL.slowMs)
 })
 
 onUnmounted(() => {

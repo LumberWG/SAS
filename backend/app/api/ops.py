@@ -258,6 +258,7 @@ def shadow(tag: str = Query("live", description="影子账户标签")) -> dict:
     for name, item in profiles.items():
         snaps = (item or {}).get("snapshots") or []
         last = snaps[-1] if snaps else {}
+        diag = last.get("ml_diagnostics") or {}
         rows.append({
             "name": str(name),
             "as_of": last.get("as_of"),
@@ -268,6 +269,13 @@ def shadow(tag: str = Query("live", description="影子账户标签")) -> dict:
             "trade_count": _num(last.get("trade_count")),
             "win_rate": _num(last.get("win_rate")),
             "snapshots": len(snaps),
+            # 打分层判定（#109 后影子快照才落这个字段）；旧快照一律 unknown，
+            # 「没有字段」不能当成「ML 回退」
+            "ml_diagnostics_available": bool(diag),
+            "ml_effective": bool(diag.get("effective")) if diag else None,
+            "ml_mode": diag.get("mode") if diag else None,
+            "ml_oos_rank_ic": _num(diag.get("oos_rank_ic")) if diag else None,
+            "ml_pred_pairs": _num(diag.get("pred_pairs")) if diag else None,
         })
     rows.sort(key=lambda r: r["name"])
     base = next((r for r in rows if r["name"] == "default"), None)
@@ -279,13 +287,23 @@ def shadow(tag: str = Query("live", description="影子账户标签")) -> dict:
             "ml_excess": ml["excess"],
             "diff": round(ml["excess"] - base["excess"], 2),
         }
-    # 两方案数值一模一样时不要让人读出「ML 没超额」的结论：最常见的原因其实是
-    # OOS IC≤0 整段回退 14 因子（#79/#82），或该参数根本没被影子 pipeline 吃到。
+    # 两方案数值一模一样时不要让人读出「ML 没超额」的结论：可能是 OOS IC≤0 整段回退
+    # （#79/#82）、参数没被影子 pipeline 吃到，也可能只是窗口太短、成交路径没分化。
     pair_identical = bool(
         base and ml
         and base["total_return"] == ml["total_return"]
         and base["trade_count"] == ml["trade_count"]
     )
+    if ml is None:
+        ml_state, ml_note = "absent", "无 default_ml 方案"
+    elif not ml["ml_diagnostics_available"]:
+        ml_state, ml_note = "unknown", "历史快照无 ML 判定字段"
+    elif ml["ml_effective"]:
+        ml_state, ml_note = "effective", "ML 生效"
+    elif ml["ml_mode"] in ("ml", "ml_blend"):
+        ml_state, ml_note = "fallback", "ML 已回退 14 因子"
+    else:
+        ml_state, ml_note = "factors", "14 因子方案"
     return with_disclaimer({
         "tag": tag,
         "available": True,
@@ -294,10 +312,18 @@ def shadow(tag: str = Query("live", description="影子账户标签")) -> dict:
         "profiles": rows,
         "ml_pair": ml_pair,
         "pair_identical": pair_identical,
+        "ml_state": ml_state,
+        "ml_note": ml_note,
         "updated_at": _fmt_mtime(path),
         "note": (
             "default_ml 未在当前影子方案集内，无法做 ML 前向配对"
             if ml is None else
+            "最新快照没有 ml_diagnostics 字段（改动前的产物），无法区分 ML 回退与生效；下个交易日 16:45 重跑后补齐"
+            if ml_state == "unknown" and pair_identical else
+            "ML 本段 OOS IC ≤ 0，已整段回退 14 因子，两方案相同不能当作配对结论（#79/#82）"
+            if ml_state == "fallback" and pair_identical else
+            "ML 已生效但两方案最新快照仍完全相同：窗口内成交路径未分化，样本不足以判读，不能得出「ML 无超额」"
+            if ml_state == "effective" and pair_identical else
             "两方案最新快照完全相同（收益/成交笔数一致）：通常说明 ML 本轮回退或参数未生效，不能当作配对结论（#79/#82）"
             if pair_identical else
             "超额为相对基准，配对差 = default_ml − default"

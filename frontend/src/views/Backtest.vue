@@ -2,7 +2,7 @@
 /**
  * 回测中心：参数表单 → 提交回测 → 净值曲线 + 绩效指标 + 交易明细。
  */
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { Play, ChevronDown, RotateCcw, DatabaseZap, Download, History } from 'lucide-vue-next'
 import VChart from 'vue-echarts'
 import { use } from 'echarts/core'
@@ -13,6 +13,7 @@ import { GridComponent, TooltipComponent } from 'echarts/components'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 import { chartNarrow, chartTheme, tooltipStyle } from '../lib/chartTheme'
 import { csvDateTag, downloadCsv } from '../lib/csv'
+import { POLL } from '../lib/polling'
 import { useNotifyStore } from '../stores/notify'
 import {
   getBacktest,
@@ -444,7 +445,7 @@ async function submit() {
   error.value = ''
   elapsedSec.value = 0
   if (elapsedTimer) window.clearInterval(elapsedTimer)
-  elapsedTimer = window.setInterval(() => { elapsedSec.value += 1 }, 1000)
+  elapsedTimer = window.setInterval(() => { elapsedSec.value += 1 }, POLL.clockMs)
   try {
     result.value = await runBacktest(buildPayload() as any)
     void loadHistory()  // 新回测已落库，刷新历史列表
@@ -458,6 +459,14 @@ async function submit() {
     }
   }
 }
+
+// 回测跑途中切走页面时，秒表计时器必须一起停掉，否则会一直跑到组件销毁后
+onUnmounted(() => {
+  if (elapsedTimer) {
+    window.clearInterval(elapsedTimer)
+    elapsedTimer = undefined
+  }
+})
 
 /** 拉取历史回测列表（新回测跑完也会刷新）。 */
 async function loadHistory() {

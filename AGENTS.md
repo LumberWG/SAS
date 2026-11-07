@@ -77,12 +77,21 @@ git -c user.name=LumberWG -c user.email=663589316@qq.com commit -m "..."
   改成「开盘成交窗口」；全量顺序污染来自 `update_settings()` 就地改 Settings 单例，已在
   `tests/conftest.py` 加 autouse 快照/还原夹具。**本机全量 `pytest -q` 现在应当全绿**，
   再出现失败先当回归查，不要归因为环境。
+- **影子账户 `pair_identical` ≠「ML 无效」**：`default` 与 `default_ml` 最新快照完全相同时，
+  先看 `/api/ops/shadow` 的 `ml_state`：2026-11-07 起快照已落 `ml_diagnostics`，
+  `fallback` 才是回退，`effective` 但曲线相同只是窗口内成交路径没分化；
+  **历史 11-03~11-06 快照没有该字段，会显示 `unknown`（不是回退）**，11-09 16:45 重跑后才补齐。
+  另外还要数交易日数与平仓笔数（核对时只有 4 天、`trade_count=0`）。
+  别据此关 `live_ml_scoring`，也别据此宣称 ML 有效（`BACKTEST_LOG` #109 / #117）。
+- **第 6 节状态表是快照不是事实源**：`app_state` 覆盖层 > `.env` > `config.py` 默认，
+  判断线上真实值只看 `GET /api/settings` 的 `source`。#92 的「轮动默认开」与 #104 的
+  「维持关轮动」只隔一天，照抄状态表会得出反结论。
 
 ## 5. 常用命令
 
 ```powershell
 cd e:\Study\SAS\backend
-.\.venv\Scripts\python.exe -m pytest tests -q          # 全量单测（当前 404 例，全离线，约 35s；2026-11-07 起应全绿）
+.\.venv\Scripts\python.exe -m pytest tests -q          # 全量单测（当前 408 例，全离线，约 35s；2026-11-07 起应全绿）
 .\.venv\Scripts\python.exe -m ruff check .             # 代码检查（配置在 backend\pyproject.toml）
 .\.venv\Scripts\python.exe scripts\weekly_review.py --md   # 周度复盘（零成交归因）
 .\.venv\Scripts\python.exe scripts\live_review.py --md     # 实盘 vs 等权基准超额对账
@@ -104,22 +113,23 @@ schtasks /run /tn SASMinutesFsdb                        # 每交易日 17:30 的
 Invoke-RestMethod -Headers @{'X-API-Token'='<令牌>'} http://127.0.0.1:8000/api/settings
 ```
 
-## 6. 当前状态（2026-11-02 收盘后）
+## 6. 当前状态（2026-11-07 只读核对；判读以 `/api/settings` 的 `source` 为准）
 
-| 项 | 值 | 说明 |
+| 项 | 线上值 | 说明 |
 | --- | --- | --- |
-| `paper_t_active` | **true**（2026-11-02 开） | 用户决策强制开启（覆盖 #66 待满足条件）；`config.py` 默认、`.env`、`app_state` 覆盖层**三处一致**，还原不回退；监控见 README「做T引擎」 |
-| `live_ml_scoring` | **true**（2026-11-01 重开） | `#82` 配对 +4.55pp 超 3.5pp 线；实测 152 只 20.7s、当日 `as_of` 缓存只训练一次，见 `docs` §7.6 |
-| `paper_weak_exposure` | 0.3 | 弱市只降仓不全停（`#63`）；0 会让弱市零成交 |
-| `paper_dynamic_exposure` / `paper_policy_floor_enabled` / `paper_circuit_breaker_enabled` | 全 false | 机制层（`#84`/`#85`）已落地但**均未经配对回测**，需单开满 21 个交易日再判读 |
-| `paper_buy_open_window_minutes` | **0**（2026-11-02 起） | 线上把开盘窗口关了 → 交易时段全时段可买，**与回测「次日开盘价」口径不一致**；也是本机 `test_exec_rules` 2 例失败的来源 |
-| `paper_rotation_enabled` 等 4 项 | **true** / 40 / 20 / **10** | 2026-11-02 起默认开（`#92`）。**口径已改（`#93`）**：`max_positions` 是上限不是门槛，不满仓也能换，可连换多只；`max_per_day` 现在是「每日轮动**只数**」（10 ≈ 不限）。判读先看有没有「轮动替换」成交 |
-| `paper_max_total_exposure` / `paper_eod_trim_*` | 0.80 / true / 10 | **80% 是收盘目标**（`#93`）：盘中允许满仓（只受现金+单票 20%），收盘前 10 分钟按最弱优先压回 80%，今仓 T+1 卖不掉就跳过 |
-| 影子策略 | 11-02 起每交易日 16:45 | `default` vs `default_ml` 落 `data/logs/shadow_live.json`，是「ML 能不能开」的证据来源 |
+| `app_state` 覆盖层 | 5 项，与 `.env` 一致 | `live_ml_scoring=true` / `paper_rotation_enabled=false` / `paper_regime_stop_tighten=0.6` / `paper_t_active=true` / `paper_weak_exposure=0.3`。**覆盖层优先于 `.env` 与 `config.py` 默认值**，别只看 `.env` |
+| `paper_t_active` | **true** | 用户决策强制开启（覆盖 #66 待满足条件）；三处一致。但 11-02~11-07 周度复盘**做T 成交 0 笔**：`t_down_add/t_down_full=0.20`（config 注明 ≈ 关闭下跌加仓）、`t_up_sell=0.05`，且 `t_tick` 的 `exposure_cap` 同样被弱市 0.3 压住 → 是**条件未触发**不是机制故障；归因见 `BACKTEST_LOG` #109 |
+| `live_ml_scoring` | **true** | `#82` 配对 +4.55pp；但 11-07 核对时本进程 ML 状态是 `pending`（重启后没跑过一轮），**不能据此判断回退或生效**。11-04/11-06 买入原因里确有「ML打分 X（14因子 +Y）」 |
+| `paper_rotation_enabled` / `paper_max_positions` | **false** / **10** | `#104`/`#105`/`#107` 决策「维持现状 10 只 + 关轮动」，`.env` 与覆盖层一致。**旧版此表写的 `true / 40 / 20 / 10` 是 11-02 的 #92 快照，已作废**；「`max_positions` 是上限不是门槛」（#93）仍成立 |
+| `paper_weak_exposure` | 0.3 | 弱市只降仓不全停（#63）；11-03 起收盘仓位稳定 29~30%，周内闸门拦截 6480 次 |
+| `paper_dynamic_exposure` / `paper_policy_floor_enabled` / `paper_circuit_breaker_enabled` | 全 false | 机制层（#84/#85）已落地但**均未经配对回测**，需单开满 21 个交易日再判读 |
+| `paper_buy_open_window_minutes` / `paper_open_cooldown_minutes` | **0** / 5 | 线上全时段可买、只拦开盘前 5 分钟，**与回测「次日开盘价」口径不一致**；回测侧已用 `entry_open_delay_minutes` 对齐为 5（#108），新旧绝对收益不可直接比 |
+| `paper_max_total_exposure` / `paper_eod_trim_*` | 0.80 / true / 10 | **80% 是收盘目标**（#93）：盘中允许满仓（只受现金+单票 20%），弱市实际压到 30%，收盘前 10 分钟按最弱优先减仓 |
+| 影子策略 | 每交易日 16:45 | `SHADOW_START=2026-11-02` / `SHADOW_PROFILES=default,default_ml` / Top300。11-03~11-06 四日快照几乎一致、`pair_identical=true`：**窗口只有 4 天且 0 笔平仓，不能当作 ML 有效性结论**；2026-11-07 起 `_snapshot` 已落 `ml_diagnostics`，接口给 `ml_state` 三态，但历史快照仍是 `unknown`，首条带诊断的快照要等 11-09 16:45（#109 / #117） |
+| 实盘账本（11-07 核对） | 9 只持仓 / 11 笔成交 | 净值仅 11-04~11-06 三行、100273.7 → 99556.9（−0.71%），唯一卖出是止损。Top300 超额 +0.91pp 但**只有 2 个交易日**，脚本明确不下结论；21 日最大回撤等统计尚不可用 |
 | `API_TOKEN` | 已启用（2026-10-31） | 值只在 `backend\.env`；前端 401 时弹框输入，`/api/health` 豁免 |
-| `SASDbBackup` | 每日 15:50 | SQLite 在线 backup API → `D:\Backup\SAS\backups\`，保留 30 份 |
-| `SASMinutesFsdb` | 每交易日 17:30 | 本地 fsdb → `minute1_fsdb` / `minute5_fsdb`，只补增量；个股详情分时图的数据来源 |
-| 涨跌家数广度 | 每日 16:00 刷新，**仅观测** | `app/data/breadth.py` → `data\breadth_daily.parquet`。曾想用它区分 shock/自由落体，实测 4 年非重叠只有 5 个样本、方向还不稳（`#86`），**不进任何判定** |
+| `SASDbBackup` / `SASMinutesFsdb` | 15:50 / 17:30 | SQLite 在线 backup API 保留 30 份；分钟线只补增量 |
+| 涨跌家数广度 | 每日 16:00，**仅观测** | #86 样本不足、方向不稳，**不进任何判定** |
 
 ## 7. 数据与产物
 

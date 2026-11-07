@@ -26,6 +26,8 @@ const alerts = ref<MarketAlert[]>([])
 const loading = ref(false)       // 任意加载进行中（禁用按钮防重复点击）
 const spinning = ref(false)      // 按钮图标旋转（仅用户手动刷新时）
 const autoRefresh = ref(true)
+/** 加载失败时保留旧数据但必须可见（否则 200 与静默失败同形） */
+const staleNotice = ref('')
 let timer: number | undefined
 
 // 指数迷你走势（收盘价序列）
@@ -40,9 +42,10 @@ async function load(force = false) {
     // 后端 overview 冷启动可等十几秒，后面两段（其实与 overview 无关）会一起白等。
     const alertTask = getAlerts(20)
       .then((d) => d.alerts)
-      .catch(() => [] as typeof alerts.value)
+      .catch(() => alerts.value)  // 失败保留旧异动，别清空成「无异动」
 
     overview.value = await getOverview()
+    staleNotice.value = ''
     market.trading = overview.value.trading
 
     // 迷你走势：仅首次或用户手动刷新时拉取（后端已加 Parquet 缓存，
@@ -61,6 +64,9 @@ async function load(force = false) {
     }
 
     alerts.value = await alertTask
+  } catch (e: unknown) {
+    // 保留旧数据，但必须让人知道看到的是上一次成功加载的结果
+    staleNotice.value = e instanceof Error ? e.message : '大盘概览加载失败'
   } finally {
     loading.value = false
     spinning.value = false
@@ -225,6 +231,10 @@ const breadthOption = computed(() => {
 
 <template>
   <div class="space-y-3">
+    <div v-if="staleNotice" class="banner-warn flex items-center justify-between gap-3 rounded-lg px-4 py-2 text-[12.5px]">
+      <span>大盘概览加载失败，当前显示的是上一次成功加载的结果（{{ staleNotice }}）。</span>
+      <button class="shrink-0 rounded border border-current/30 px-2 py-0.5 hover:opacity-80" @click="load(true)">重试</button>
+    </div>
     <!-- 操作栏 -->
     <div class="flex items-center justify-between">
       <div class="flex items-center gap-2 text-[13.5px] text-content-faint">

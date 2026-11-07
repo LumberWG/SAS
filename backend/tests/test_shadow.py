@@ -36,6 +36,21 @@ def test_snapshot_fields():
     assert snap["positions"][0]["stop"] == pytest.approx(13.11)
 
 
+def test_snapshot_records_ml_diagnostics():
+    """#109：没有这个字段就分不清「ML 回退」与「ML 生效但短窗口内没分化」。"""
+    res = _result()
+    res["ml_diagnostics"] = {
+        "mode": "ml", "model": "lightgbm", "label_horizon": 5,
+        "industry_neutral": True, "oos_rank_ic": 0.0346,
+        "pred_pairs": 487163, "effective": True,
+    }
+    snap = _snapshot("default_ml", res, "2026-11-06")
+    assert snap["ml_diagnostics"]["effective"] is True
+    assert snap["ml_diagnostics"]["oos_rank_ic"] == pytest.approx(0.0346)
+    # 旧版结果没有该字段时写 None，接口按「unknown」处理而不是「回退」
+    assert _snapshot("default", _result(), "2026-11-06")["ml_diagnostics"] is None
+
+
 def test_start_is_frozen():
     _check_start({"start": "2026-11-02"}, "2026-11-02", "p")  # 同起点：放行
     _check_start({}, "2026-11-02", "p")                        # 新开：放行

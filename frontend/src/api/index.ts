@@ -1379,6 +1379,12 @@ export interface ShadowProfile {
   trade_count: number | null
   win_rate: number | null
   snapshots: number
+  /** 快照是否记录了打分层判定（改动前的历史快照没有该字段） */
+  ml_diagnostics_available?: boolean
+  ml_effective?: boolean | null
+  ml_mode?: string | null
+  ml_oos_rank_ic?: number | null
+  ml_pred_pairs?: number | null
 }
 export interface ShadowStatus {
   tag: string
@@ -1389,6 +1395,9 @@ export interface ShadowStatus {
   ml_pair: { base_excess: number; ml_excess: number; diff: number } | null
   /** 两方案最新快照完全相同：多半是 ML 回退/参数未生效，不能当作「ML 无超额」 */
   pair_identical?: boolean
+  /** unknown=历史快照无判定字段 / fallback=已回退 / effective=生效 / factors=14因子 / absent=无该方案 */
+  ml_state?: 'unknown' | 'fallback' | 'effective' | 'factors' | 'absent'
+  ml_note?: string
   updated_at?: string | null
   note: string
 }

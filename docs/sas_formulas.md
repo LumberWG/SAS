@@ -1040,6 +1040,12 @@ scoring_mode = factors   14 因子启发式（基线，即 #72 的 default）
   无论 `scoring_mode` 填的是什么——没有这个字段时二者在结果里完全无法区分。
 - **区间长度**：短区间（如 12 个交易日）只有 12 个截面，rank-IC 估不出来，几乎必然回退。
   要看 ML 至少半年；随机段评估用 `scripts/random_dist.py`（`#76` 的 18 段 × 21 天）。
+- **影子账户口径（2026-11-07 起）**：`scripts/shadow.py::_snapshot` 把同一份 `ml_diagnostics`
+  写进每条快照；`GET /api/ops/shadow` 据此给 `ml_state` —— `unknown`（改动前快照无该字段）
+  / `fallback`（IC≤0 整段回退）/ `effective` / `factors`（方案本身是 14 因子）/ `absent`（无 `default_ml`）。
+  `default` 与 `default_ml` 快照完全相同时，**必须同时看 `ml_state` 与样本长度**：ML 生效但窗口内
+  `trade_count=0`（无平仓）也会得到相同曲线，不能推出「ML 无超额」；`unknown` 也不是回退
+  （`BACKTEST_LOG` #109 / #117）。
 - **默认跟随实盘**：`/backtest/defaults` 的 `scoring_mode` 由 `live_ml_scoring` 决定
   （开 = `ml`），避免「回测中心跑 ML、实盘还在 14 因子」这种口径漂移；`universe_size`
   同理跟随 `paper_pool_top_n`（300），不再写死 500——池子不同则候选集、选中票、

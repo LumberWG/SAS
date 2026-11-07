@@ -66,11 +66,51 @@ def test_shadow_ml_pair(monkeypatch, tmp_path):
     (log_dir / "shadow_live.json").write_text(json.dumps(data), encoding="utf-8")
     same = ops.shadow("live")
     assert same["pair_identical"] is True and "回退" in same["note"]
+    # 历史快照没有 ml_diagnostics：只能判「无法区分」，不能判「ML 回退」
+    assert same["ml_state"] == "unknown"
 
     data["profiles"].pop("default_ml")
     (log_dir / "shadow_live.json").write_text(json.dumps(data), encoding="utf-8")
     r2 = ops.shadow("live")
     assert r2["ml_pair"] is None and "default_ml" in r2["note"]
+
+
+def test_shadow_ml_state_distinguishes_unknown_fallback_effective(monkeypatch, tmp_path):
+    """#109：落了 ml_diagnostics 后，「没字段 / 回退 / 生效」必须是三种不同结论。"""
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    path = log_dir / "shadow_live.json"
+    monkeypatch.setattr(
+        ops, "get_settings",
+        lambda: SimpleNamespace(kline_dir=tmp_path / "klines"),
+    )
+    base = {"as_of": "2026-11-06", "excess": 1.0, "total_return": 3.0, "trade_count": 0}
+
+    def write(diag):
+        ml_snap = dict(base)
+        if diag is not None:
+            ml_snap["ml_diagnostics"] = diag
+        path.write_text(json.dumps({
+            "tag": "live", "start": "2026-11-02", "universe": 300,
+            "profiles": {
+                "default": {"snapshots": [base]},
+                "default_ml": {"snapshots": [ml_snap]},
+            },
+        }), encoding="utf-8")
+
+    write(None)
+    r = ops.shadow("live")
+    assert r["ml_state"] == "unknown" and "无法区分" in r["note"]
+
+    write({"mode": "ml", "effective": False, "oos_rank_ic": 0.0, "pred_pairs": 0})
+    r = ops.shadow("live")
+    assert r["ml_state"] == "fallback" and "回退" in r["note"]
+
+    write({"mode": "ml", "effective": True, "oos_rank_ic": 0.0346, "pred_pairs": 487163})
+    r = ops.shadow("live")
+    assert r["ml_state"] == "effective" and "样本不足" in r["note"]
+    assert r["profiles"][1]["ml_oos_rank_ic"] == pytest.approx(0.0346)
+    assert r["profiles"][1]["ml_diagnostics_available"] is True
 
 
 def test_ml_status_distinguishes_pending_fallback_effective(monkeypatch):

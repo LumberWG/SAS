@@ -6,6 +6,7 @@
  * 「左侧 2px 色条 + 略亮的底色 + 主色文字」三重提示，hover 只提亮文字。
  */
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { DEGRADE_NOTICE_MS, POLL } from '../lib/polling'
 import { useRoute, useRouter } from 'vue-router'
 import {
   Activity,
@@ -94,6 +95,8 @@ const dataStatus = ref<DataStatus | null>(null)
 const mlStatus = ref<MlStatus | null>(null)
 const degradeNotice = ref('')
 let degradeAt = 0
+/** 状态接口本身挂了：不能把「取不到」显示成「待运行」 */
+const statusUnavailable = ref(false)
 
 async function refreshDataStatus() {
   // 两个状态接口互相独立：任一挂掉都不影响另一个（更不能假装正常）
@@ -103,17 +106,22 @@ async function refreshDataStatus() {
   ])
   dataStatus.value = s
   mlStatus.value = m
+  statusUnavailable.value = !s || !m
   // 降级提示保留至少 60s，避免一次抖动就闪一下消失
-  if (s?.level === 'ok' && Date.now() - degradeAt > 60_000) degradeNotice.value = ''
+  if (s?.level === 'ok' && Date.now() - degradeAt > DEGRADE_NOTICE_MS) degradeNotice.value = ''
 }
 
 const mlState = computed(() => mlStatus.value?.state ?? 'pending')
 const mlChipClass = computed(() => ({
   effective: 'chip-up', pending: 'chip-muted', fallback: 'chip-warn', off: 'chip-muted',
 }[mlState.value]))
-const mlChipText = computed(() => ({
-  effective: '生效', pending: '待运行', fallback: '14因子', off: '关',
-}[mlState.value]))
+const mlChipText = computed(() => {
+  // 接口挂了不能显示成「待运行」——那是另一种完全不同的状态
+  if (statusUnavailable.value && !mlStatus.value) return '状态未知'
+  return {
+    effective: '生效', pending: '待运行', fallback: '14因子', off: '关',
+  }[mlState.value]
+})
 const mlTitle = computed(() => {
   const s = mlStatus.value
   if (!s) return '线上 ML 状态不可用'
@@ -187,11 +195,11 @@ function tick() {
 
 onMounted(() => {
   tick()
-  timer = window.setInterval(tick, 1000)
+  timer = window.setInterval(tick, POLL.clockMs)
   market.fetchAnalysisStatus()
   getScopeStats().then((d) => (scopeStats.value = d)).catch(() => {})
   refreshDataStatus()
-  dataTimer = window.setInterval(refreshDataStatus, 30_000)
+  dataTimer = window.setInterval(refreshDataStatus, POLL.defaultMs)
   offDegraded = onDataDegraded((e) => {
     degradeAt = Date.now()
     degradeNotice.value = e.message || `接口 ${e.path} 返回降级数据`
@@ -358,6 +366,9 @@ const activePath = computed(() =>
             <span class="chip" :class="mlChipClass">ML: {{ mlChipText }}</span>
             <span class="chip chip-muted">市场：{{ statusText }}</span>
             <span class="chip chip-muted">LLM: {{ market.llmAvailable ? market.llmModel : '规则降级' }}</span>
+          </div>
+          <div v-if="statusUnavailable" class="rounded-lg border border-warn/30 bg-warn/[0.08] px-2 py-1.5 text-warn">
+            部分状态接口未返回数据，下面显示的可能不是最新结果
           </div>
           <div class="text-content-muted">{{ dataStatus?.message ?? '数据状态接口不可用，无法判断是否新鲜' }}</div>
           <div class="flex flex-wrap gap-x-3 gap-y-1 text-content-faint">

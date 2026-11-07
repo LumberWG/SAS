@@ -7263,3 +7263,95 @@ True（关掉后 `t_tick` 仍返回空）；`TestRotation` 新增 `test_rotation
 - 部署待办：#115/#116 改了后端代码（新增 /api/paper/lots 接口 + provenance 写入），需手动重启 SAS 后端
   （schtasks /run /tn SASRestart 或管理员 Restart-Service SAS -Force）后前端「溯源」按钮才生效；
   导出脚本直读 SQLite，无需重启即可用。
+
+## 记录 #109 — 2026-11-07 · 只读运行归因：影子 ML 配对零差异 / 做T 零成交 / 状态表校正（无参数改动）
+- 条件：周六非交易日，无法观察盘中行为。只读跑 `scripts/weekly_review.py --md`、
+  `scripts/live_review.py --md`，并核对 `/api/ops/self-check`、`/api/settings`（看 `source`）、
+  `app_state` 覆盖层、生产库（`mode=ro`）、`data/logs/shadow_live.json`、`backend.log*`。
+  线上 `SHADOW_START=2026-11-02` / `SHADOW_PROFILES=default,default_ml` / `SHADOW_UNIVERSE=300`；
+  影子起点 11-02，11-03~11-06 共 4 个快照（11-02 当天两方案都因「区间内交易日不足」失败）。
+- 结果：
+  ① 周度 11-02~11-06：净值 100273.7 → 99556.9（**−0.71%**），最大回撤 0.84%，
+     11 笔成交（买 10 / 卖 1，唯一卖出是盛洋科技 −7.3% 触及止损线 9.41），费用 60.10 元
+     （摩擦占比 0.15%），弱市闸门共拦截 **6480 次**，收盘仓位 11-02 的 96% → 11-03 起稳定 29~30%。
+     **做T 成交 0 笔**，成交原因里没有 `t_add` / `t_buyback` / `反弹减仓`。
+  ② 实盘 vs 等权基准（仅 11-05、11-06 两日）：Top300 超额 **+0.91pp**、Top500 **+0.69pp**，
+     脚本自身标注「样本仅 2 个交易日（<21），只看方向，不下结论」。
+  ③ 影子两方案 11-03~11-06 **逐日几乎完全一致**：11-06 收益 +0.48% / 超额 −0.06% /
+     0 笔平仓 / 持仓 9 只 / 净值 100482.21 全字段相同（`pair_identical=true`）；
+     仅 11-05 基准有 +3.91% vs +3.93% 的 0.02pp 微差。每天 `default_ml` 比 `default` 多耗
+     74→158s（11-06）、107→189s（11-05），说明 ML 训练环节**确实在跑**，不是方案被跳过。
+  ④ `app_state` 覆盖层 5 项与 `.env` 一致：`live_ml_scoring=true`、
+     `paper_rotation_enabled=false`、`paper_regime_stop_tighten=0.6`、`paper_t_active=true`、
+     `paper_weak_exposure=0.3`；`paper_max_positions=10`（default）。
+- 归因：
+  ① **影子配对零差异 ≠ ML 无效**。窗口只有 4 个交易日且全程 `trade_count=0`（该指标统计平仓交易），
+     两方案的持仓/成交路径没有分化机会；更要紧的是 `scripts/shadow.py::_snapshot` 只取
+     `metrics` 的收益/回撤/成交/持仓，**没把 `result["ml_diagnostics"]`（`effective` /
+     `oos_rank_ic` / `pred_pairs`）落盘**，产物里无法区分「ML 回退 14 因子」与「ML 生效但短窗口内
+     选股结果相同」。`AGENTS.md` 红线「ML 打分看 `effective`」在影子链路上无处可看。
+     `/api/ops/shadow` 现有文案只说「通常说明 ML 本轮回退或参数未生效」，归因不完整，
+     容易被读成「ML 没用」。
+  ② **做T 零成交 ≠ 机制坏**。`paper_t_down_add` / `paper_t_down_full` 都是 0.20
+     （config 注释「≈ 关闭下跌加仓」）、`paper_t_up_sell=0.05`（开盘涨超 5% 才先卖锁利），
+     弱市 4 个交易日内没有触发条件；且 `t_tick` 的 `exposure_cap` 同样被
+     `paper_weak_exposure=0.3` 压住（`app/paper/engine.py` 1734-1742），
+     29% 暴露下加仓空间几乎为零。0 笔是**参数保守 + 弱市结构性结果**，不是开关没生效。
+  ③ **轮动关是有决策的**：#104/#105/#107 明确「维持 10 只 + 关轮动」，
+     `.env` 与覆盖层均为 false；`AGENTS.md` 第 6 节仍写着 #92 的 `true / 40 / 20 / 10`，
+     是 11-02 快照未跟进 11-03 决策 → **文档滞后，不是配置错**。
+- 建议（本轮均**不采纳改动**，仅登记）：
+  - 不因 `pair_identical` 关闭 `live_ml_scoring`；也不因影子 0 差异宣称 ML 有效或无效。
+  - 不改做T 阈值、不开轮动、不动机制层三开关：本轮没有任何配对实验支持改参数。
+  - `scripts/shadow.py::_snapshot` 应落 `ml_diagnostics`（代码改动，待人工确认后单独做），
+    否则以后每轮只能靠「多耗了多少秒」猜 ML 有没有生效。
+- 人工判断：待确认 —— 是否补 `ml_diagnostics` 落盘；是否在 11-09 盘中核对顶栏 ML 灯与
+  `/api/ops/ml-status` 的 `effective`。
+- 本轮变更：**无代码 / 无参数 / 无回测重跑**。仅 `AGENTS.md` 第 6 节状态表按实测重写、
+  第 4 节补 `pair_identical` 判读红线；`WORKLOG.md` 第十一节登记文档校正；本记录。
+- 下轮计划：11-09（下个交易日）盘中看顶栏 ML 灯是否「生效」、`/api/ops/ml-status` 的
+  `effective` 与 `oos_rank_ic`；影子累积到 ≥21 个交易日后再判读 ML 前向超额；
+  `weekly_review.py --md` 持续跟踪做T 是否出现首笔成交。
+
+## 记录 #117 — 2026-11-07 · 影子快照补 ml_diagnostics：让「ML 到底生效没有」可判读（含 11-09 / 21 日跟踪清单）
+> 编号说明：文件内另有 `## #109`~`#111` 与 `#116` 等工程记录占用了 109~116，
+> 故新增 `## 记录` 从 #117 起递增；上一轮 `## 记录 #109` 及其在代码/文档中的引用保持原样。
+- 条件：承接 #109 归因 —— 影子 `default`/`default_ml` 四日快照几乎完全相同，
+  `_snapshot` 未落 `ml_diagnostics`，产物区分不了「ML 回退」与「生效但短窗口没分化」。
+  2026-11-07 周六，`/api/ops/ml-status` = `pending`（`effective=false`、`oos_rank_ic=null`）、
+  `paper/live.trading=false`，**盘中行为今天无法验证**。
+- 结果（本轮代码改动，已全量验证）：
+  ① `scripts/shadow.py::_snapshot` 落 `result["ml_diagnostics"]`
+     （`mode/model/label_horizon/industry_neutral/oos_rank_ic/pred_pairs/effective`），
+     旧格式结果写 `None`；`run_shadow` 每日日志加
+     `ML生效(IC=…)` / `ML回退(IC=…)` / `14因子` / `ML判定:无记录` 标签。
+  ② `GET /api/ops/shadow` 每方案透出 `ml_diagnostics_available / ml_effective / ml_mode /
+     ml_oos_rank_ic / ml_pred_pairs`，顶层新增 `ml_state`
+     （`unknown`/`fallback`/`effective`/`factors`/`absent`）与 `ml_note`；
+     `note` 按状态分四种判读文案，不再把「两方案相同」一律归因为「ML 回退」。
+  ③ `/ops` 影子区显示三态 chip + OOS rank-IC / 预测对 / 模式，判读文案统一由后端给出，
+     前端不再写死「通常说明 ML 回退或参数未生效」。
+  ④ 历史 11-03~11-06 快照**没有该字段** → 页面显示「历史快照无 ML 判定字段」，
+     要等下个交易日 16:45 重跑才有第一条带诊断的快照；这是预期，不是坏数据。
+- 归因：`pair_identical` 的信息量取决于是否同时有打分层诊断与足够样本；
+  本次补的是**证据链**，不改变任何选股 / 评分 / 撮合行为，也不改变 ML 是否生效。
+- 建议：
+  - 不因当前 `pending` 或历史 `unknown` 关 `live_ml_scoring`；不改任何参数。
+  - **11-09 开盘后核对入口**：`GET /api/ops/ml-status` 看 `effective` / `oos_rank_ic` /
+    `outcome`；顶栏 ML 灯看「生效 / 待运行 / 14因子 / 关」；16:45 后
+    `GET /api/ops/shadow?tag=live` 看 `ml_state` 与 `profiles[default_ml].ml_oos_rank_ic`。
+  - **21 交易日判读清单**：影子起点 11-02，按每周 5 个交易日估算约 12 月初满 21 日；
+    到点再看 `ml_pair.diff`，此前每周跑
+    `.\.venv\Scripts\python.exe scripts\weekly_review.py --md` 跟做T 首笔成交与零成交归因、
+    `live_review.py --md` 跟 Top300 超额方向，样本不足时只记录不下结论。
+- 人工判断：待确认 —— 11-09 的 ML 灯与影子首条带诊断快照；21 日样本是否够判读。
+- 本轮变更：`scripts/shadow.py`、`app/api/ops.py`、`frontend/src/api/index.ts`、
+  `frontend/src/views/Ops.vue`、`tests/test_shadow.py`、`tests/test_ops_api.py`；
+  文档 `README.md` / `docs/sas_formulas.md` §7.6 / `AGENTS.md` / `WORKLOG.md` / 本记录。
+  **无参数改动、无回测重跑**。
+- 验证：`ruff check .` All checks passed；全量 `pytest -q` **408 例全绿**；
+  `npm run build`（`vue-tsc -b` + vite）通过；`read_lints` 0 诊断。
+  后端 Python 改动需 `schtasks /run /tn SASRestart` 重载模块才生效，已执行并回查接口。
+- 下轮计划：见「人工判断」；若 11-09 影子 `ml_state=fallback` 且 `oos_rank_ic<=0`，
+  按 #79/#82 既有纪律处理（短窗口几乎必然回退，不改参数，等半年期或随机段实验），
+  不要据此关开关。
