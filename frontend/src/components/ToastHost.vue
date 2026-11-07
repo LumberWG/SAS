@@ -33,7 +33,7 @@ const toneText: Record<string, string> = {
 </script>
 
 <template>
-  <div class="pointer-events-none fixed right-4 top-4 z-[100] flex w-80 flex-col gap-2">
+  <div class="pointer-events-none fixed right-4 top-16 z-[100] flex w-[calc(100vw-2rem)] max-w-80 flex-col gap-2 sm:top-4">
     <transition-group name="toast">
       <div
         v-for="t in notify.toasts"

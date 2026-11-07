@@ -15,7 +15,7 @@ import {
   LegendComponent,
 } from 'echarts/components'
 
-import { axisLabel, chartTheme, tooltipStyle } from '../lib/chartTheme'
+import { axisLabel, chartNarrow, chartTheme, tooltipStyle } from '../lib/chartTheme'
 
 use([
   CanvasRenderer,
@@ -79,6 +79,10 @@ const option = computed(() => {
   const UP = c.up
   const DOWN = c.down
   const label = axisLabel(c)
+  // 窄屏下 52+16 的固定边距会吃掉 1/4 绘图区；5 项 legend 也放不进一行
+  const narrow = chartNarrow()
+  const gridLeft = narrow ? 36 : 52
+  const gridRight = narrow ? 8 : 16
 
   return {
   animation: false,
@@ -93,6 +97,7 @@ const option = computed(() => {
       'MA5', 'MA10', 'MA20',
       ...(hasBenchmark.value ? ['个股累计%', '上证累计%'] : []),
     ],
+    type: narrow ? 'scroll' : 'plain',
     textStyle: { color: c.textMuted, fontSize: 12 },
     top: 0,
     icon: 'roundRect',
@@ -100,9 +105,9 @@ const option = computed(() => {
     itemHeight: 3,
   },
   grid: [
-    { left: 52, right: 16, top: 28, height: hasBenchmark.value ? '46%' : '58%' },
-    { left: 52, right: 16, top: hasBenchmark.value ? '60%' : '74%', height: '14%' },
-    ...(hasBenchmark.value ? [{ left: 52, right: 16, top: '80%', height: '14%' }] : []),
+    { left: gridLeft, right: gridRight, top: 28, height: hasBenchmark.value ? '46%' : '58%' },
+    { left: gridLeft, right: gridRight, top: hasBenchmark.value ? '60%' : '74%', height: '14%' },
+    ...(hasBenchmark.value ? [{ left: gridLeft, right: gridRight, top: '80%', height: '14%' }] : []),
   ],
   xAxis: [
     {
@@ -228,7 +233,7 @@ const option = computed(() => {
 </script>
 
 <template>
-  <v-chart class="chart" :option="option" :style="{ height: height ?? '420px' }" autoresize />
+  <v-chart class="chart" :option="option" :style="{ height: chartNarrow() ? '320px' : (height ?? '420px') }" autoresize />
 </template>
 
 <style scoped>

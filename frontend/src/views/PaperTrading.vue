@@ -16,7 +16,7 @@ import {
 } from 'lucide-vue-next'
 import VChart from 'vue-echarts'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
-import { chartTheme, tooltipStyle } from '../lib/chartTheme'
+import { chartNarrow, chartTheme, tooltipStyle } from '../lib/chartTheme'
 import { csvDateTag, downloadCsv } from '../lib/csv'
 import { POLL } from '../lib/polling'
 import { useNotifyStore } from '../stores/notify'
@@ -371,7 +371,7 @@ const equityOption = computed(() => {
   const c = chartTheme()
   return {
     animation: false,
-    grid: { left: 64, right: 20, top: 20, bottom: 30 },
+    grid: { left: chartNarrow() ? 42 : 64, right: chartNarrow() ? 8 : 20, top: 20, bottom: 30 },
     tooltip: {
       trigger: 'axis',
       ...tooltipStyle(c),
@@ -458,7 +458,7 @@ const simOption = computed(() => {
 
   return {
     animation: false,
-    grid: { left: 56, right: 20, top: 34, bottom: 30 },
+    grid: { left: chartNarrow() ? 38 : 56, right: chartNarrow() ? 8 : 20, top: 34, bottom: 30 },
     legend: { top: 0, textStyle: { color: c.textFaint, fontSize: 11 } },
     tooltip: {
       trigger: 'axis',
@@ -675,7 +675,7 @@ onUnmounted(() => {
     <!-- 交易模式 / 实时撮合状态 -->
     <div
       v-if="tab === 'pool'"
-      class="glass-card flex flex-wrap items-center gap-x-6 gap-y-3 p-4"
+      class="glass-card flex flex-wrap items-center gap-x-3 gap-y-3 p-4 sm:gap-x-6"
     >
       <div class="flex items-center gap-2">
         <span class="relative flex h-2 w-2">
@@ -1000,7 +1000,7 @@ onUnmounted(() => {
         <h3 class="text-subheading">当前持仓</h3>
         <span class="text-[12.5px] text-content-faint">{{ account?.position_count ?? 0 }} 只</span>
       </div>
-      <div v-if="account && account.positions.length > 0" class="overflow-x-auto">
+      <div v-if="account && account.positions.length > 0" class="table-wrap">
         <table class="w-full text-left text-[13.5px]">
           <thead class="border-b border-base-600/60 text-content-faint">
             <tr>
@@ -1165,7 +1165,7 @@ onUnmounted(() => {
           </button>
         </div>
       </div>
-      <div v-if="trades.length > 0" class="max-h-[400px] overflow-y-auto">
+      <div v-if="trades.length > 0" class="table-wrap max-h-[400px] overflow-y-auto">
         <table class="w-full text-left text-[13.5px]">
           <thead class="sticky top-0 bg-base-800 text-content-faint">
             <tr class="border-b border-base-600/60">
@@ -1267,7 +1267,7 @@ onUnmounted(() => {
         </p>
       </details>
 
-      <div v-if="simAccounts.length > 0" class="overflow-x-auto">
+      <div v-if="simAccounts.length > 0" class="table-wrap">
         <table class="w-full text-left text-[13.5px]">
           <thead class="border-b border-base-600/60 text-content-faint">
             <tr>

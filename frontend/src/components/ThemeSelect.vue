@@ -26,8 +26,13 @@ function place() {
   const el = trigger.value
   if (!el) return
   const rect = el.getBoundingClientRect()
-  // 菜单右对齐按钮，并保证不越过视口右边
-  pos.value = { left: Math.max(8, rect.right - 208), top: rect.bottom + 6 }
+  // 菜单右对齐按钮，并保证不越过视口右边/下边（手机上按钮常靠近屏幕底部）
+  const menuW = 208
+  const menuH = 180
+  pos.value = {
+    left: Math.max(8, Math.min(rect.right - menuW, window.innerWidth - menuW - 8)),
+    top: Math.max(8, Math.min(rect.bottom + 6, window.innerHeight - menuH - 8)),
+  }
 }
 
 function toggle() {

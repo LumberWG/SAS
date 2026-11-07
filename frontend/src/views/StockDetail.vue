@@ -328,14 +328,14 @@ function statusColor(status: string) {
     <!-- 股票头部信息 -->
     <div class="glass-card flex flex-wrap items-center justify-between gap-4 p-5">
       <div class="flex flex-wrap items-center justify-between gap-4">
-        <div class="flex items-center gap-5">
+        <div class="flex flex-wrap items-center gap-3 sm:gap-5">
           <div>
             <div class="flex items-center gap-2.5">
               <h2 class="text-[23.5px] font-semibold text-content">{{ quote?.name ?? code }}</h2>
               <span class="font-num rounded-md bg-base-700 px-2 py-0.5 text-[13.5px] text-content-muted">{{ code }}</span>
             </div>
             <div class="mt-2 flex items-baseline gap-3">
-              <span class="font-num text-[34px] font-bold leading-none" :class="pctTone">
+              <span class="font-num text-[26px] font-bold leading-none sm:text-[34px]" :class="pctTone">
                 {{ quote?.price?.toFixed(2) ?? '--' }}
               </span>
               <span class="font-num text-[16.5px]" :class="pctTone">
@@ -360,7 +360,7 @@ function statusColor(status: string) {
           {{ inWatchlist ? '已自选' : '加入自选' }}
         </button>
       </div>
-      <div class="grid grid-cols-2 gap-x-8 gap-y-2 text-[13.5px] sm:grid-cols-4">
+      <div class="grid grid-cols-2 gap-x-3 gap-y-2 text-[13.5px] sm:grid-cols-4 sm:gap-x-8">
         <div><div class="text-content-faint">今开</div><div class="font-num text-content">{{ quote?.open?.toFixed(2) ?? '--' }}</div></div>
         <div><div class="text-content-faint">最高</div><div class="font-num text-up">{{ quote?.high?.toFixed(2) ?? '--' }}</div></div>
         <div><div class="text-content-faint">最低</div><div class="font-num text-down">{{ quote?.low?.toFixed(2) ?? '--' }}</div></div>
@@ -518,7 +518,7 @@ function statusColor(status: string) {
           <p class="mb-4 text-[14.5px] leading-relaxed text-content-muted">{{ dashboard.summary }}</p>
 
           <!-- 三档价格 -->
-          <div class="mb-4 grid grid-cols-3 gap-2 text-center">
+          <div class="mb-4 grid grid-cols-2 gap-2 text-center xs:grid-cols-3">
             <div class="rounded-lg border border-up/30 bg-up/10 p-2">
               <div class="text-[11.5px] text-content-faint">入场价</div>
               <div class="font-num text-[16.5px] font-semibold text-up">{{ dashboard.entry_price?.toFixed(2) ?? '--' }}</div>
@@ -553,7 +553,7 @@ function statusColor(status: string) {
           <!-- 指标明细 -->
           <div v-if="dashboard.indicators" class="mt-4 border-t border-base-600/50 pt-3">
             <div class="mb-2 text-[12.5px] font-medium text-content-muted">指标明细</div>
-            <div class="grid grid-cols-3 gap-x-3 gap-y-2">
+            <div class="grid grid-cols-2 gap-x-3 gap-y-2 xs:grid-cols-3">
               <div v-for="m in indicatorMeta" :key="m.key" class="flex flex-col">
                 <span class="text-[11px] text-content-faint">{{ m.label }}</span>
                 <span class="font-num text-[13px] text-content">

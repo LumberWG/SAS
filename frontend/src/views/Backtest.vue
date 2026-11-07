@@ -11,7 +11,7 @@ import { LineChart } from 'echarts/charts'
 import { GridComponent, TooltipComponent } from 'echarts/components'
 
 import ConfirmDialog from '../components/ConfirmDialog.vue'
-import { chartTheme, tooltipStyle } from '../lib/chartTheme'
+import { chartNarrow, chartTheme, tooltipStyle } from '../lib/chartTheme'
 import { csvDateTag, downloadCsv } from '../lib/csv'
 import { useNotifyStore } from '../stores/notify'
 import {
@@ -612,7 +612,7 @@ const equityOption = computed(() => {
   return {
     animation: false,
     backgroundColor: 'transparent',
-    grid: { left: 74, right: 20, top: 20, bottom: 40 },
+    grid: { left: chartNarrow() ? 46 : 74, right: chartNarrow() ? 8 : 20, top: 20, bottom: 40 },
     tooltip: {
       trigger: 'axis',
       ...tooltipStyle(c),
@@ -677,11 +677,11 @@ function metricTone(v: number): string {
         <div class="flex flex-wrap items-center gap-2">
           <label class="flex items-center gap-1 text-[12.5px] text-content-muted">
             开始
-            <input v-model="form.start_date" type="date" class="h-7 w-[122px] rounded border border-base-600 bg-base-700 px-1.5 font-num text-[13.5px] text-content outline-none focus:border-primary" />
+            <input v-model="form.start_date" type="date" class="h-7 w-full min-w-0 rounded sm:w-[122px] border border-base-600 bg-base-700 px-1.5 font-num text-[13.5px] text-content outline-none focus:border-primary" />
           </label>
           <label class="flex items-center gap-1 text-[12.5px] text-content-muted">
             结束
-            <input v-model="form.end_date" type="date" class="h-7 w-[122px] rounded border border-base-600 bg-base-700 px-1.5 font-num text-[13.5px] text-content outline-none focus:border-primary" />
+            <input v-model="form.end_date" type="date" class="h-7 w-full min-w-0 rounded sm:w-[122px] border border-base-600 bg-base-700 px-1.5 font-num text-[13.5px] text-content outline-none focus:border-primary" />
           </label>
         </div>
         <span class="flex-1"></span>
@@ -960,7 +960,7 @@ function metricTone(v: number): string {
       </div>
 
       <!-- 绩效指标卡 -->
-      <div class="grid grid-cols-2 gap-4 md:grid-cols-4">
+      <div class="grid grid-cols-2 gap-2 sm:gap-4 md:grid-cols-4">
         <div class="glass-card p-4">
           <div class="text-[13.5px] text-content-muted">总收益率</div>
           <div class="font-num mt-1 text-[26px] font-semibold" :class="metricTone(result.metrics.total_return)">
@@ -1061,7 +1061,7 @@ function metricTone(v: number): string {
         <p class="mt-2 text-[13.5px] text-content-muted">{{ result.review.summary }}</p>
 
         <div class="mt-4 grid grid-cols-1 gap-5 lg:grid-cols-2">
-          <div>
+          <div class="table-wrap">
             <div class="mb-2 text-[13.5px] text-content-muted">按卖出原因</div>
             <table class="w-full text-left text-[13.5px]">
               <thead class="text-[12.5px] text-content-faint">
@@ -1084,7 +1084,7 @@ function metricTone(v: number): string {
               </tbody>
             </table>
           </div>
-          <div>
+          <div class="table-wrap">
             <div class="mb-2 text-[13.5px] text-content-muted">按持有天数</div>
             <table class="w-full text-left text-[13.5px]">
               <thead class="text-[12.5px] text-content-faint">
@@ -1148,7 +1148,7 @@ function metricTone(v: number): string {
       </div>
 
       <!-- 交易明细 -->
-      <div class="glass-card overflow-auto">
+      <div class="glass-card table-wrap overflow-y-auto">
         <div class="border-b border-base-600/60 px-5 py-3">
           <h3 class="text-subheading">交易明细</h3>
         </div>

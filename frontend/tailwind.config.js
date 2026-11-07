@@ -19,6 +19,10 @@ export default {
   content: ["./index.html", "./src/**/*.{vue,js,ts,jsx,tsx}"],
   theme: {
     extend: {
+      // 默认断点 sm=640 对手机（375~430）完全不生效，补一档 480 供窄屏渐进布局使用
+      screens: {
+        xs: "480px",
+      },
       colors: {
         // 表面分层：900 页面底 / 800 卡片 / 700 悬浮与输入 / 600 边框 / 500 强调边框
         base: {

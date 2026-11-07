@@ -596,7 +596,7 @@ onMounted(load)
               列数用 auto-fill 而不是固定断点：一行塞得下几个就排几个（宽屏 3 个，
               再宽自动到 4），窄屏自动落到 1~2，不会因为写死 3 列把行撑出横向溢出。
             -->
-            <div class="grid grid-cols-[repeat(auto-fill,minmax(296px,1fr))] gap-x-2 p-1.5">
+            <div class="grid grid-cols-[repeat(auto-fill,minmax(min(296px,100%),1fr))] gap-x-2 p-1.5">
               <div
                 v-for="it in sg.items"
                 :key="it.key"

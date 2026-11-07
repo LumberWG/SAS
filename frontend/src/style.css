@@ -336,6 +336,10 @@
   }
 
   /* ---------- 表格 ---------- */
+  /* 宽表格统一套这一层：窄屏由 media 规则给 table 加 min-width，实现横向滚动 */
+  .table-wrap {
+    @apply w-full overflow-x-auto;
+  }
   .table-shell {
     @apply overflow-auto rounded-xl border border-base-600/70 bg-base-800/60;
   }
@@ -409,5 +413,86 @@
     100% {
       transform: translateX(350%);
     }
+  }
+}
+
+/* ============================================================================
+   手机窄屏适配（<= 640px）
+   ----------------------------------------------------------------------------
+   sm:/md:/lg: 是 Tailwind 默认 640/768/1024，手机上全部不生效；因此「手机上
+   该有的行为」统一在这一段兜底，避免每个页面各写一套媒体查询。桌面端不受影响。
+   ============================================================================ */
+@media (max-width: 640px) {
+  /* iOS Safari 聚焦 <16px 的输入框会自动放大整页且不会缩回。模板里的
+     text-[13.5px] 工具类特异性高于元素选择器，只能用 !important 压过。 */
+  .field,
+  input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
+  select,
+  textarea {
+    font-size: 16px !important;
+  }
+  .field,
+  input[type="text"],
+  input[type="number"],
+  input[type="password"],
+  input[type="date"],
+  input[type="search"],
+  select,
+  textarea {
+    min-height: 40px;
+  }
+  input[type="checkbox"],
+  input[type="radio"] {
+    width: 16px;
+    height: 16px;
+  }
+
+  /* 触摸目标至少 40px，表格里的小按钮在手机上也要能点中 */
+  .btn,
+  .btn-sm,
+  .btn-xs,
+  .seg-item {
+    min-height: 40px;
+  }
+  .btn,
+  .seg-item {
+    font-size: 14px;
+  }
+  .chip {
+    font-size: 12px;
+  }
+
+  /* 一行式工具条在窄屏允许换行：标题 + 若干按钮/chip 常被挤到溢出。
+     这是兜底，不替代逐页的响应式类；已显式 flex-wrap 的容器不受影响。 */
+  .app-main .flex.items-center:not(.flex-wrap):not(.flex-col) {
+    flex-wrap: wrap;
+  }
+
+  /* 宽表格统一横向滚动：配合模板里的 .table-wrap，避免多列被压成竖排文字 */
+  .table-wrap table {
+    min-width: max-content;
+    white-space: nowrap;
+  }
+  .table-wrap {
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior-x: contain;
+  }
+
+  /* 个别页面仍有固定高度区块，手机上交给内容自然撑开 */
+  .mobile-auto-height {
+    height: auto !important;
+    max-height: none !important;
+    min-height: 0 !important;
+  }
+
+  /* 兜底：任何残留溢出都不至于让整页左右拖动 */
+  html,
+  body {
+    overflow-x: hidden;
+  }
+  /* 刘海屏横屏时左右留安全区（竖屏 env() 为 0，等价于 12px） */
+  .app-main {
+    padding-left: max(12px, env(safe-area-inset-left)) !important;
+    padding-right: max(12px, env(safe-area-inset-right)) !important;
   }
 }

@@ -12,7 +12,21 @@
  *     return { tooltip: { ...tooltipStyle(c) }, series: [{ lineStyle: { color: c.primaryLight } }] }
  *   })
  */
+import { ref } from 'vue'
 import { useThemeStore } from '../stores/theme'
+
+/** 窄屏标记：ECharts 的 grid/legend/高度写在 option 里，CSS 覆盖不到。
+ *  模块级只注册一次 matchMedia；图表在 computed 里调用 chartNarrow() 就能随
+ *  视口变化 / 手机旋屏重算，不需要每个组件各写一套 resize 监听。 */
+const narrowViewport = ref(false)
+if (typeof window !== 'undefined') {
+  const mq = window.matchMedia('(max-width: 640px)')
+  narrowViewport.value = mq.matches
+  mq.addEventListener('change', (e) => { narrowViewport.value = e.matches })
+}
+export function chartNarrow(): boolean {
+  return narrowViewport.value
+}
 
 export interface ChartPalette {
   up: string

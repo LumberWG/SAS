@@ -45,8 +45,10 @@ const allSelected = computed(
 
 <template>
   <aside
-    class="glass-card flex shrink-0 flex-col overflow-hidden transition-[width,padding] duration-200 ease-out"
-    :class="collapsed ? 'w-11 items-center gap-3 py-4' : 'w-72 p-4'"
+    class="glass-card flex shrink-0 flex-col overflow-x-hidden overflow-y-auto transition-[width,max-height,padding] duration-200 ease-out"
+    :class="collapsed
+      ? 'w-full flex-row items-center gap-3 px-3 py-2 lg:w-11 lg:flex-col lg:px-0 lg:py-4'
+      : 'w-full max-h-[60vh] p-4 lg:w-72 lg:max-h-none'"
   >
     <!-- 收起态：窄条，保留展开入口 + 已选数量 + 竖向标题 -->
     <template v-if="collapsed">
@@ -63,9 +65,12 @@ const allSelected = computed(
       >
         {{ selected.length }}
       </span>
-      <div class="flex min-h-0 flex-1 items-center justify-center">
+      <div class="flex min-h-0 flex-1 items-center justify-between gap-2 lg:justify-center">
+        <span class="text-[12.5px] text-content-faint lg:hidden">
+          选股策略 · 已选 {{ selected.length }}/{{ strategies.length }}
+        </span>
         <span
-          class="select-none whitespace-nowrap text-[12.5px] tracking-wide text-content-faint"
+          class="hidden select-none whitespace-nowrap text-[12.5px] tracking-wide text-content-faint lg:inline"
           style="writing-mode: vertical-rl"
         >
           选股策略

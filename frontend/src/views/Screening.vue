@@ -52,8 +52,12 @@ const loadingStrategies = ref(true)
 const loadError = ref('')
 let poller: number | undefined
 
-// 策略面板收起状态（窄屏或看结果时腾出宽度），记忆到本地
-const panelCollapsed = ref(localStorage.getItem('screening.panelCollapsed') === '1')
+// 策略面板收起状态（窄屏或看结果时腾出宽度），记忆到本地。
+// 没存过时按屏宽决定：<lg 走上下布局，默认收起才不会一进页面就被 288px 策略面板占满。
+const savedCollapse = localStorage.getItem('screening.panelCollapsed')
+const panelCollapsed = ref(
+  savedCollapse === null ? window.innerWidth < 1024 : savedCollapse === '1',
+)
 watch(panelCollapsed, (v) => localStorage.setItem('screening.panelCollapsed', v ? '1' : '0'))
 
 const running = computed(() => task.value?.status === 'running' || task.value?.status === 'pending')
@@ -368,7 +372,9 @@ onMounted(async () => {
        可用高度 = 100dvh − 顶栏 56px − 内容区上下 padding 48px（共 6.5rem），
        多减 0.1rem 容错，避免亚像素溢出导致整页出现滚动条。
        操作栏 / 统计卡 / 工具行 / 表头固定，只有股票列表数据区滚动 -->
-  <div class="flex h-[calc(100dvh-6.6rem)] min-h-0 min-w-0 gap-5 overflow-hidden">
+  <!-- 窄屏改为上下排布 + 整页滚动（原来左右两栏 + overflow-hidden 会把结果区裁到只剩几十 px）；
+       桌面仍保持视口内固定高度、仅结果表内部滚动 -->
+  <div class="flex min-h-0 min-w-0 flex-col gap-4 overflow-x-hidden lg:h-[calc(100dvh-6.6rem)] lg:flex-row lg:gap-5 lg:overflow-hidden">
     <!-- 左侧策略面板 -->
     <StrategyPanel
       v-model:collapsed="panelCollapsed"
@@ -397,7 +403,7 @@ onMounted(async () => {
 
     <!-- 右侧扫描区：操作栏固定，仅结果表内部滚动。
          w-0 作为收缩基准，避免内部宽表格把整页横向撑开 -->
-    <section class="flex w-0 min-h-0 min-w-0 flex-1 flex-col gap-4">
+    <section class="flex w-full min-h-0 min-w-0 flex-1 flex-col gap-4 lg:w-0">
       <!-- 策略加载失败提示（含重试） -->
       <div
         v-if="loadError"

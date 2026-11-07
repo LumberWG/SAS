@@ -38,7 +38,20 @@ const market = useMarketStore()
 const scopeStats = ref<ScopeStats | null>(null)
 // 手机（经 cpolar 公网访问）没有 224px 的横向空间：侧栏默认收起，点汉堡展开
 const sidebarOpen = ref(false)
-watch(() => route.fullPath, () => { sidebarOpen.value = false })
+// 手机顶栏放不下 4 个状态灯，收进一个可点开的状态面板 —— 信息不能整块藏掉
+const statusPanelOpen = ref(false)
+watch(() => route.fullPath, () => {
+  sidebarOpen.value = false
+  statusPanelOpen.value = false
+})
+// 抽屉展开时锁住背景滚动，否则手指在遮罩上滑动会滚到页面背后
+watch(sidebarOpen, (open) => { document.body.style.overflow = open ? 'hidden' : '' })
+function onKeydown(e: KeyboardEvent) {
+  if (e.key === 'Escape') {
+    sidebarOpen.value = false
+    statusPanelOpen.value = false
+  }
+}
 
 // 按「自动交易五段式」组织导航（docs/sas_formulas.md §8）：
 // 一选池 → 二选自选 → 三选队列 → 交易池/持仓（同页两 tab），概览/回测为辅助。
@@ -183,11 +196,14 @@ onMounted(() => {
     degradeAt = Date.now()
     degradeNotice.value = e.message || `接口 ${e.path} 返回降级数据`
   })
+  window.addEventListener('keydown', onKeydown)
 })
 onUnmounted(() => {
   if (timer) window.clearInterval(timer)
   if (dataTimer) window.clearInterval(dataTimer)
   offDegraded?.()
+  window.removeEventListener('keydown', onKeydown)
+  document.body.style.overflow = ''
 })
 
 const statusText = computed(() => phase.value || (market.trading ? '交易中' : '已收盘'))
@@ -203,12 +219,12 @@ const activePath = computed(() =>
     <!-- 左侧导航（固定） -->
     <div
       v-if="sidebarOpen"
-      class="fixed inset-0 z-40 bg-black/55 lg:hidden"
+      class="fixed inset-0 z-[80] bg-black/55 lg:hidden"
       aria-hidden="true"
       @click="sidebarOpen = false"
     ></div>
     <aside
-      class="fixed left-0 top-0 z-50 flex h-full w-56 flex-col border-r border-base-600/60 bg-base-800/90 backdrop-blur-xl transition-transform duration-200 lg:translate-x-0 lg:bg-base-800/70"
+      class="fixed left-0 top-0 z-[90] flex h-full w-56 flex-col border-r border-base-600/60 bg-base-800/90 backdrop-blur-xl transition-transform duration-200 lg:translate-x-0 lg:bg-base-800/70"
       :class="sidebarOpen ? 'translate-x-0' : '-translate-x-full'"
     >
       <!-- 品牌 -->
@@ -268,7 +284,7 @@ const activePath = computed(() =>
     <div class="flex h-full flex-1 flex-col lg:ml-56">
       <!-- 顶栏（固定） -->
       <header
-        class="fixed left-0 right-0 top-0 z-30 flex h-14 items-center justify-between border-b border-base-600/60 bg-base-900/85 px-3 backdrop-blur-xl sm:px-5 lg:left-56"
+        class="fixed left-0 right-0 top-0 z-30 flex h-14 items-center justify-between gap-2 border-b border-base-600/60 bg-base-900/85 px-3 backdrop-blur-xl sm:px-5 lg:left-56"
       >
         <div class="flex min-w-0 items-center gap-2 sm:gap-3">
           <button
@@ -279,20 +295,20 @@ const activePath = computed(() =>
           >
             <Menu class="h-4 w-4" />
           </button>
-          <h1 class="truncate text-subheading tracking-tight">{{ route.meta.title ?? '大盘概览' }}</h1>
+          <h1 class="min-w-0 truncate text-subheading tracking-tight">{{ route.meta.title ?? '大盘概览' }}</h1>
           <span
-            class="chip"
+            class="chip shrink-0"
             :class="market.trading ? 'chip-up' : 'chip-muted'"
           >
             <span
               class="h-1.5 w-1.5 rounded-full"
               :class="market.trading ? 'animate-pulse-slow bg-up' : 'bg-content-faint'"
             />
-            {{ statusText }}
+            <span class="hidden xs:inline">{{ statusText }}</span>
           </span>
         </div>
-        <div class="flex items-center gap-2">
-          <span class="font-num text-[14px] text-content-muted">{{ now }}</span>
+        <div class="flex shrink-0 items-center gap-2">
+          <span class="font-num hidden text-[14px] text-content-muted sm:inline">{{ now }}</span>
           <span class="mx-1 hidden h-4 w-px bg-base-600 sm:block"></span>
           <span
             v-if="scopeStats"
@@ -317,12 +333,48 @@ const activePath = computed(() =>
           <span class="chip chip-muted hidden md:inline-flex">
             LLM: {{ market.llmAvailable ? market.llmModel : '规则降级' }}
           </span>
+          <!-- 手机上 4 个状态灯被断点全隐藏了，但「看到的是不是旧数据」不能没有入口 -->
+          <button
+            class="btn btn-ghost btn-sm shrink-0 gap-1.5 px-2 sm:hidden"
+            :aria-expanded="statusPanelOpen"
+            aria-label="查看数据状态"
+            @click="statusPanelOpen = !statusPanelOpen"
+          >
+            <span class="h-1.5 w-1.5 rounded-full" :class="dataDotClass" />
+            <Activity class="h-4 w-4" />
+          </button>
+        </div>
+
+        <!-- 移动端状态面板：窄屏顶栏放不下，口径收进这里而不是整块消失 -->
+        <div
+          v-if="statusPanelOpen"
+          class="absolute left-0 right-0 top-14 z-40 space-y-2 border-b border-base-600/60 bg-base-800/95 px-3 py-3 text-[13px] shadow-pop backdrop-blur-xl sm:hidden"
+        >
+          <div class="flex flex-wrap items-center gap-2">
+            <span class="chip" :class="dataChipClass">
+              <span class="h-1.5 w-1.5 rounded-full" :class="dataDotClass" />
+              {{ dataChipText }}
+            </span>
+            <span class="chip" :class="mlChipClass">ML: {{ mlChipText }}</span>
+            <span class="chip chip-muted">市场：{{ statusText }}</span>
+            <span class="chip chip-muted">LLM: {{ market.llmAvailable ? market.llmModel : '规则降级' }}</span>
+          </div>
+          <div class="text-content-muted">{{ dataStatus?.message ?? '数据状态接口不可用，无法判断是否新鲜' }}</div>
+          <div class="flex flex-wrap gap-x-3 gap-y-1 text-content-faint">
+            <span class="font-num">{{ now }}</span>
+            <span>快照 {{ dataStatus?.snapshot.updated_at ?? '—' }}</span>
+            <span v-if="scopeStats">范围 {{ scopeStats.in_scope }} · 创业板 {{ scopeStats.cyb }}</span>
+          </div>
+          <div class="text-content-faint">{{ mlStatus?.note ?? 'ML 状态不可用' }}</div>
+          <button class="btn btn-ghost btn-sm w-full" @click="refreshDataStatus()">
+            重新检查（保持面板打开）
+          </button>
         </div>
       </header>
 
       <!-- 页面内容（顶栏高度补偿） -->
       <main class="flex-1 overflow-y-auto pt-14">
-        <div class="mx-auto max-w-[1560px] animate-fade-in px-5 py-5 xl:px-6">
+        <div class="app-main mx-auto max-w-[1560px] animate-fade-in px-3 py-4 sm:px-5 sm:py-5 xl:px-6">
           <!-- 数据降级/陈旧：全局横幅，别让「200 但给的是旧数据」静默过去 -->
           <div
             v-if="bannerText"

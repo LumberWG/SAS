@@ -187,7 +187,7 @@ onActivated(async () => {
 <template>
   <div class="grid grid-cols-1 gap-5 xl:grid-cols-2">
     <!-- 自选股 -->
-    <section class="glass-card flex h-[calc(100vh-8rem)] flex-col p-5">
+    <section class="glass-card mobile-auto-height flex h-[calc(100dvh-8rem)] flex-col p-5">
       <div class="mb-3 flex items-center justify-between">
         <div class="flex items-center gap-2">
           <Star class="h-4 w-4 text-warn" />
@@ -331,7 +331,7 @@ onActivated(async () => {
     </section>
 
     <!-- 历史信号 -->
-    <section class="glass-card flex h-[calc(100vh-8rem)] flex-col p-5">
+    <section class="glass-card mobile-auto-height flex h-[calc(100dvh-8rem)] flex-col p-5">
       <div class="mb-4 flex items-center justify-between">
         <div class="flex items-center gap-2">
           <Bell class="h-4 w-4 text-primary-light" />

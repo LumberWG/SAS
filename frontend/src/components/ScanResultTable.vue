@@ -173,7 +173,7 @@ function exportCsv() {
 </script>
 
 <template>
-  <div class="glass-card flex min-h-0 flex-1 flex-col overflow-hidden">
+  <div class="glass-card flex min-h-0 max-h-[70vh] flex-1 flex-col overflow-hidden lg:max-h-none">
     <!-- 工具行：策略筛选 + 导出 -->
     <div class="panel-hd justify-between">
       <div class="flex items-center gap-2">

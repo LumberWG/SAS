@@ -111,13 +111,16 @@ function resetDefaults() {
 </script>
 
 <template>
+  <!-- Teleport 到 body：选股页的 overflow-hidden / backdrop-blur 会创建包含块，
+       fixed 弹窗留在原位置可能被裁切或定位错乱；z 刻度也要高于侧栏抽屉 -->
+  <Teleport to="body">
   <div
-    class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm"
+    class="fixed inset-0 z-[110] flex items-center justify-center bg-black/60 p-4 backdrop-blur-sm"
     @click.self="emit('close')"
   >
     <div class="glass-card w-full max-w-lg animate-fade-in overflow-hidden !bg-base-800">
       <!-- 标题栏 -->
-      <div class="flex items-center justify-between border-b border-base-600/60 px-5 py-4">
+      <div class="flex items-center justify-between border-b border-base-600/60 px-4 sm:px-5 py-4">
         <div class="flex items-center gap-2.5">
           <Settings2 class="h-4 w-4 text-primary-light" />
           <div>
@@ -142,7 +145,7 @@ function resetDefaults() {
 
       <!-- 策略说明 -->
       <div
-        class="border-b border-base-600/60 bg-base-700/30 px-5 py-3 text-[13.5px] leading-relaxed text-content-muted"
+        class="border-b border-base-600/60 bg-base-700/30 px-4 sm:px-5 py-3 text-[13.5px] leading-relaxed text-content-muted"
       >
         {{ strategy.description }}
         <div v-if="detail?.custom" class="mt-1.5 text-[12.5px] text-content-faint">
@@ -154,7 +157,7 @@ function resetDefaults() {
       </div>
 
       <!-- 参数表单 -->
-      <div class="max-h-[50vh] space-y-4 overflow-y-auto px-5 py-4">
+      <div class="max-h-[50vh] space-y-4 overflow-y-auto px-4 sm:px-5 py-4">
         <p v-if="!hasParams" class="py-6 text-center text-[14.5px] text-content-faint">
           该策略无可调参数
         </p>
@@ -231,9 +234,9 @@ function resetDefaults() {
       </div>
 
       <!-- 底部操作 -->
-      <div class="border-t border-base-600/60 px-5 py-4">
+      <div class="border-t border-base-600/60 px-4 sm:px-5 py-4">
         <p v-if="errorMsg" class="mb-2 text-[13.5px] text-up">{{ errorMsg }}</p>
-        <div class="flex items-center gap-2">
+        <div class="flex flex-wrap items-center gap-2">
           <input
             v-model="customName"
             type="text"
@@ -269,4 +272,5 @@ function resetDefaults() {
       </div>
     </div>
   </div>
+  </Teleport>
 </template>

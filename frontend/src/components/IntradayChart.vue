@@ -16,7 +16,7 @@ import {
   MarkPointComponent,
 } from 'echarts/components'
 
-import { chartTheme, tooltipStyle } from '../lib/chartTheme'
+import { chartNarrow, chartTheme, tooltipStyle } from '../lib/chartTheme'
 
 use([
   CanvasRenderer,
@@ -146,6 +146,9 @@ const markPointData = computed(() => {
 
 const option = computed(() => {
   const c = chartTheme()
+  const narrow = chartNarrow()
+  const gridLeft = narrow ? 38 : 56
+  const gridRight = narrow ? 8 : 14
   return {
   animation: false,
   backgroundColor: 'transparent',
@@ -164,8 +167,8 @@ const option = computed(() => {
     itemHeight: 3,
   },
   grid: [
-    { left: 56, right: 14, top: 26, height: '58%' },
-    { left: 56, right: 14, top: '74%', height: '16%' },
+    { left: gridLeft, right: gridRight, top: 26, height: '58%' },
+    { left: gridLeft, right: gridRight, top: '74%', height: '16%' },
   ],
   xAxis: [
     {
@@ -259,7 +262,7 @@ const option = computed(() => {
 </script>
 
 <template>
-  <v-chart class="chart" :option="option" :style="{ height: height ?? '360px' }" autoresize />
+  <v-chart class="chart" :option="option" :style="{ height: chartNarrow() ? '280px' : (height ?? '360px') }" autoresize />
 </template>
 
 <style scoped>

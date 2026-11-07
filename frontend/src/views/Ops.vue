@@ -282,7 +282,7 @@ onUnmounted(() => {
       <p class="mt-1 text-[12.5px] text-content-faint">
         APScheduler（后端进程内）；「下次执行」为空通常表示任务被暂停或未注册。
       </p>
-      <div class="mt-3 overflow-x-auto">
+      <div class="mt-3 table-wrap">
         <table class="w-full text-left text-[13.5px]">
           <thead class="border-b border-base-600/60 text-content-faint">
             <tr>
@@ -323,7 +323,7 @@ onUnmounted(() => {
           <div class="text-[13px] font-medium text-content">线上 ML 打分</div>
           <div class="mt-1 text-[18px] font-semibold" :class="mlTone">{{ mlStateLabel }}</div>
           <p class="mt-1 text-[12.5px] text-content-muted">{{ mlStatus?.note ?? '状态接口不可用' }}</p>
-          <dl class="mt-3 grid grid-cols-2 gap-x-3 gap-y-1 text-[12.5px]">
+          <dl class="mt-3 grid grid-cols-1 gap-x-3 gap-y-1 text-[12.5px] xs:grid-cols-2">
             <dt class="text-content-faint">开关</dt><dd class="text-content">{{ mlStatus?.enabled ? '开' : '关' }}</dd>
             <dt class="text-content-faint">数据日</dt><dd class="font-num text-content">{{ mlStatus?.as_of ?? '—' }}</dd>
             <dt class="text-content-faint">覆盖只数</dt><dd class="font-num text-content">{{ mlStatus?.codes ?? '—' }}</dd>
@@ -359,7 +359,7 @@ onUnmounted(() => {
           <p v-else class="mt-2 text-[12.5px] text-content-muted">
             {{ shadow?.note ?? '影子账户状态不可用' }}
           </p>
-          <div v-if="shadow?.profiles.length" class="mt-2 overflow-x-auto">
+          <div v-if="shadow?.profiles.length" class="mt-2 table-wrap">
             <table class="w-full text-left text-[12.5px]">
               <thead class="text-content-faint">
                 <tr>
@@ -409,7 +409,7 @@ onUnmounted(() => {
             <div class="text-[13px] font-medium text-content">涨跌家数广度（近 10 日）</div>
             <span class="text-[12px] text-content-faint">纯观测</span>
           </div>
-          <div v-if="breadthRows.length" class="overflow-x-auto">
+          <div v-if="breadthRows.length" class="table-wrap">
             <table class="w-full text-left text-[12.5px]">
               <thead class="text-content-faint">
                 <tr>
@@ -470,7 +470,7 @@ onUnmounted(() => {
         共 {{ accessTotal }} 条<span v-if="uniqueVisitors != null"> · 独立访客 {{ uniqueVisitors }} 个 IP</span>
         ，最多展示 200 条
       </p>
-      <div class="overflow-x-auto">
+      <div class="table-wrap">
         <table class="w-full text-left text-[13px]">
           <thead class="border-b border-base-600/60 text-content-faint">
             <tr>

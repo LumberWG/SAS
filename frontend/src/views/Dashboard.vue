@@ -13,7 +13,7 @@ import { GridComponent, TooltipComponent } from 'echarts/components'
 
 import { useRouter } from 'vue-router'
 import { getAlerts, getIndexKline, getOverview, type MarketAlert, type MarketOverview } from '../api'
-import { chartTheme, tooltipStyle } from '../lib/chartTheme'
+import { chartNarrow, chartTheme, tooltipStyle } from '../lib/chartTheme'
 import { POLL } from '../lib/polling'
 import { useMarketStore } from '../stores/market'
 
@@ -189,7 +189,7 @@ const breadthOption = computed(() => {
   const c = chartTheme()
   return {
     animation: false,
-    grid: { left: 48, right: 36, top: 6, bottom: 4 },
+    grid: { left: chartNarrow() ? 32 : 48, right: chartNarrow() ? 8 : 36, top: 6, bottom: 4 },
     tooltip: {
       trigger: 'axis',
       ...tooltipStyle(c),
@@ -244,7 +244,7 @@ const breadthOption = computed(() => {
     </div>
 
     <!-- 指数卡片：一行铺开 6 个，只留价格/涨跌/成交额，迷你走势压到 40px -->
-    <div class="grid grid-cols-2 gap-2 md:grid-cols-3 xl:grid-cols-6">
+    <div class="grid grid-cols-1 gap-2 xs:grid-cols-2 md:grid-cols-3 xl:grid-cols-6">
       <div
         v-for="idx in overview?.indices ?? []"
         :key="idx.symbol"
