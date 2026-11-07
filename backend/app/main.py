@@ -14,9 +14,10 @@ from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from app.accesslog import log_access
 from app.api import (
-    advisory, analysis, backtest, market, monitor, paper, scope, screening,
-    settings as settings_api, strategies, watchlist,
+    access_log, advisory, analysis, backtest, market, monitor, paper, scope,
+    screening, settings as settings_api, strategies, watchlist,
 )
 from app.config import BASE_DIR, get_settings
 
@@ -110,6 +111,30 @@ async def _token_guard(request: Request, call_next):
     return await call_next(request)
 
 
+async def _access_log_middleware(request: Request, call_next):
+    """访客访问记录：每次请求落一条（区分真实用户 / 开发者调试）。
+
+    跳过健康检查、静态资源与 API 文档这些噪声大、无业务意义的路径。
+    """
+    response = await call_next(request)
+    path = request.url.path
+    if (
+        path == "/api/health"
+        or path.startswith("/assets")
+        or path in ("/docs", "/openapi.json", "/redoc")
+    ):
+        return response
+    try:
+        log_access(
+            request=request,
+            status_code=response.status_code,
+            is_api=path.startswith("/api"),
+        )
+    except Exception:  # noqa: BLE001 - 记录失败绝不拖垮请求
+        pass
+    return response
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     """应用生命周期：后台预热股票池 + 启动调度器。
@@ -184,6 +209,9 @@ def create_app() -> FastAPI:
     # 访问令牌守卫（API_TOKEN 为空时直接放行，本机开发零配置）
     app.middleware("http")(_token_guard)
 
+    # 访客访问记录（最外层，能看到最终状态码；自身失败不影响请求）
+    app.middleware("http")(_access_log_middleware)
+
     # 路由注册（各模块统一挂 /api 前缀）
     app.include_router(market.router, prefix="/api")
     app.include_router(screening.router, prefix="/api")
@@ -196,6 +224,7 @@ def create_app() -> FastAPI:
     app.include_router(paper.router, prefix="/api")
     app.include_router(scope.router, prefix="/api")
     app.include_router(settings_api.router, prefix="/api")
+    app.include_router(access_log.router, prefix="/api")
 
     @app.get("/api/health")
     def health() -> dict:
