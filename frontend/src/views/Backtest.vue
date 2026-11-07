@@ -109,6 +109,7 @@ const groups: { name: string; items: ParamDef[] }[] = [
     { key: 'entry_max_chase', label: '不追高', type: 'number', step: 0.005, unit: '开盘溢价上限' },
     { key: 'entry_pullback', label: '回踩要求', type: 'number', step: 0.005, unit: '0=不限' },
     { key: 'entry_window_minutes', label: '分钟级切入窗口', type: 'number', min: 0, max: 240, step: 5, unit: '0=关闭，需开分钟线' },
+    { key: 'entry_open_delay_minutes', label: '入场时点(分钟)', type: 'number', min: 0, max: 60, step: 5, unit: '0=次日开盘价；>0=开盘+N分钟，跟随实盘冷静期' },
   ]},
   { name: '止损/止盈', items: [
     { key: 'stop_loss', label: '止损比例', type: 'number', min: 0.01, max: 0.5, step: 0.01, unit: '成本×' },
@@ -161,6 +162,7 @@ const groups: { name: string; items: ParamDef[] }[] = [
 const ZERO_OFF = new Set([
   'buy_top_pct', 'max_open_gain', 'max_gain_5d', 'min_volume_ratio', 'min_turnover_rate',
   'queue_top_m', 'entry_max_chase', 'entry_pullback', 'entry_window_minutes',
+  'entry_open_delay_minutes',
   'stop_atr_mult', 'partial_tp_at', 'breakeven_trigger', 'trail_pct', 'trail_arm',
   'regime_ma', 'weak_exposure', 'regime_ramp_days',
   't_size', 't_up_sell', 't_up_buyback', 't_down_add', 't_down_full', 't_rebound_sell',
@@ -187,6 +189,22 @@ function labelOfSetting(setting: string): string {
   const hit = allItems.find((it) => liveTarget(it.key) === setting)
   return hit ? hit.label : setting
 }
+
+/** 结果页「口径对照」：拿回测收益评价实盘前，先说清这次跑的是不是同一套入场口径 */
+function paramNum(v: unknown): number {
+  const n = Number(v)
+  return Number.isFinite(n) ? n : 0
+}
+const entryPriceLabel = computed(() => {
+  const n = paramNum(result.value?.params?.entry_open_delay_minutes)
+  return n > 0 ? `开盘 +${n} 分钟（取该 5m bar 收盘价）` : '次日开盘价（历史口径）'
+})
+const liveEntryLabel = computed(() => {
+  const n = paramNum(defaults.value?.entry_open_delay_minutes)
+  return n > 0 ? `全时段可买，仅拦开盘前 ${n} 分钟（冷静期）` : '全时段可买（无冷静期）'
+})
+const universeUsed = computed(() => paramNum(result.value?.params?.universe_size) || '—')
+const universeLive = computed(() => paramNum(defaults.value?.universe_size) || '—')
 
 /** 下拉落盘时被「折算」成布尔开关的项：回测键 → 把值折成开关的函数。
  *  目前只有打分层（后端 `apply.py` 把 ml / ml_blend 折成 `live_ml_scoring=True`），
@@ -967,6 +985,26 @@ function metricTone(v: number): string {
         >
           本段 OOS IC ≤ 0，已整段回退 14 因子 —— 这次结果不是 ML 的
         </span>
+      </div>
+
+      <!-- 口径对照：回测结果能不能拿来评价实盘，取决于这次跑的是不是同一套入场/选池口径 -->
+      <div class="glass-card px-5 py-3 text-[12.5px] leading-relaxed text-content-muted">
+        <div class="flex flex-wrap items-center gap-x-3 gap-y-1">
+          <span class="rounded bg-warn/15 px-2 py-0.5 text-[12px] font-medium text-warn">口径对照</span>
+          <span>本次入场：<span class="font-medium text-content">{{ entryPriceLabel }}</span></span>
+          <span>实盘：{{ liveEntryLabel }}</span>
+          <span>池 Top{{ universeUsed }}（线上 Top{{ universeLive }}）</span>
+        </div>
+        <details class="mt-2">
+          <summary class="cursor-pointer text-content-faint">已知偏差与判读门槛（点开）</summary>
+          <ul class="mt-2 list-disc space-y-1 pl-5 text-content-faint">
+            <li>实盘 paper_buy_open_window_minutes=0（全时段可买），成交时点不收敛到次日开盘或开盘+N 分钟；回测与实盘的成交时点仍不完全一致（#19 / #112）。</li>
+            <li>开盘价成交系统性乐观约 1.4~2.5pp（#67）；本地分钟数据从 2025-01-02 起，更早区间无法走分钟入场。</li>
+            <li>回测没有候补队列、盘内错峰、收盘减仓的逐 tick 行为；日 K 边界（涨跌停/停牌/日内高点低点顺序）也偏乐观。</li>
+            <li>盘中新产生的信号在回测里不可复现；机制层止损收紧、动态降暴露等默认关闭项不参与。</li>
+            <li>判读门槛（#70 §6）：超额 −1pp ~ +5pp 视为与回测一致；低于 −1pp 先查执行价与成交可行性，高于 +5pp 视为短期运气；不足 21 个交易日只报方向、不下结论。</li>
+          </ul>
+        </details>
       </div>
 
       <!-- 亏损归因与调参建议 -->

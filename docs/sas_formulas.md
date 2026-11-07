@@ -839,13 +839,19 @@ peak = max(历史峰值总资产, 当前总资产)；dd = 1 − 总资产 / peak
 | `intraday_entry_times` | 09:45/10:30/11:15/13:30/14:30 | 上述重算/尝试时点（`HH:MM`）。午休不产生 bar，`_intraday_bar_count` 按交易分钟折算（13:30 = 第 30 根） |
 | `intraday_entry_top_n` | 10 | 每个时点最多重算多少只候选（按昨收评分降序），用于控制 CPU 成本 |
 | `open_fill_minutes` | 0 | 开盘窗口「开板补单」：开盘一字涨停时，窗口内某根 5m 收盘 < 前收×1.095 就以它成交（对应线上窗口内每 5 秒撮合）。0=只用开盘价（历史口径）。无分钟数据返回 None（保守判买不到） |
-| `entry_open_delay_minutes` | None | ⑤ **开盘冷静期（回测侧）**：入场成交价从「开盘价」改为「开盘后 N 分钟那根 5m bar 收盘」（≈ open+N 分钟价），模拟实盘 `paper_open_cooldown_minutes`（记录 #108）。None/0=不延迟（历史开盘价口径）；设 N 后实盘与回测入场可比。无分钟数据回落 VWAP/开盘价 | pipeline |
+| `entry_open_delay_minutes` | None（**`/backtest/defaults` 跟随实盘 `paper_open_cooldown_minutes`**） | ⑤ **开盘冷静期（回测侧）**：入场成交价从「开盘价」改为「开盘后 N 分钟那根 5m bar 收盘」（≈ open+N 分钟价），模拟实盘 `paper_open_cooldown_minutes`（记录 #108）。None/0=不延迟（历史开盘价口径）；设 N 后实盘与回测入场可比。无分钟数据回落 VWAP/开盘价。2026-11-07 起回测中心「五段式」组可调，落盘映射 `paper_open_cooldown_minutes` | pipeline / api / 前端 |
 | `breakeven_trigger / trail_pct / trail_arm` | None | 保本止损 / 移动止损（回测侧） |
 
 `_intraday_first_trigger(series, stop, tp, partial)` 返回首个触发的 `(type, price)`，
 三者同时命中时取**序列中最先出现**者；日K 边界模式忽略返回价，改用 `min(开盘, 止损)` / `max(开盘, 目标)`。
 
 ### 7.3 已知偏差（对照时需注意）
+- **结果页常驻「口径对照」（2026-11-07 起）**：回测中心结果区显示本次入场价（`0` = 次日开盘价，
+  `>0` = 开盘 +N 分钟的 5m 收盘价）、实盘冷静期、本次池 `TopN` 与线上池，并附本节偏差摘要与
+  `#70 §6` 判读门槛（−1pp ~ +5pp、不足 21 交易日不下结论）。**为什么必须上界面**：之前
+  `entry_open_delay_minutes` 只在 `profiles.cur10` 里写死 5，`/backtest/defaults` 与
+  `BacktestRequest` 都没有它，页面跑出来的是「次日开盘价」却常被拿来评价「09:35 后才买」的实盘；
+  现在 `/defaults` 跟随 `paper_open_cooldown_minutes`，且落盘映射也指回该字段。
 - **做T护栏（已于记录 #65 修复）**：旧实现读 `idx_close[date]`（当日收盘）判跌幅 = 未来函数，
   等于「提前知道今天大跌所以全天不做T」。现改为 `指数开盘 / 前一日收盘 ≤ −t_crash_guard`（开盘时已知）。
   修正后 C 段 `t_low_min` +7.62% → +1.49%、`t_dip_min` −1.74% → −19.52%，**旧口径的做T 结论一律作废**。

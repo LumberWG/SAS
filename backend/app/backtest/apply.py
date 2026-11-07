@@ -48,6 +48,8 @@ BACKTEST_TO_SETTING: dict[str, str] = {
     "queue_top_m": "paper_trade_queue_top_m",
     "entry_max_chase": "paper_entry_max_chase",
     "entry_pullback": "paper_entry_pullback",
+    # #108：回测「开盘+N 分钟入场价」与实盘「开盘冷静期」是同一口径，改这里才会同步生效
+    "entry_open_delay_minutes": "paper_open_cooldown_minutes",
     # 做T引擎
     "t_active": "paper_t_active",
     "t_size": "paper_t_size",

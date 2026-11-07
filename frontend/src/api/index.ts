@@ -370,6 +370,8 @@ export interface BacktestRequest {
   entry_max_chase?: number
   entry_pullback?: number
   entry_window_minutes?: number
+  /** #108 开盘冷静期：>0 时入场价改取「开盘 + N 分钟」，与实盘 paper_open_cooldown_minutes 同口径；0=次日开盘价 */
+  entry_open_delay_minutes?: number
   // 做T引擎
   t_active?: boolean
   t_minute_path?: boolean

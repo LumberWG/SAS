@@ -37,6 +37,9 @@ _ZERO_MEANS_OFF: tuple[str, ...] = (
     "entry_confirm_minutes", "max_open_gain", "min_volume_ratio",
     "min_turnover_rate", "breakeven_trigger", "trail_pct", "partial_tp_at",
     "max_gain_5d", "stop_atr_mult", "queue_top_m", "t_crash_guard",
+    # 0 分钟冷静期 = 仍用「次日开盘价」的历史口径；传 0 必须还原成 None，
+    # 不能让 _open_delay_price(..., 0) 参与判定（虽然它也返回 None，但语义要统一）
+    "entry_open_delay_minutes",
 )
 
 #: 内存任务表：job_id -> {status, created, elapsed, result, error}
@@ -133,6 +136,13 @@ class BacktestRequest(BaseModel):
         None, description="开盘段成交价：open（开盘价）/ vwap1m（开盘后 N 分钟 1m 均价）"
     )
     exec_fill_minutes: int | None = Field(None, ge=1, le=240, description="VWAP 窗口分钟数")
+    #: #108：实盘有「开盘冷静期」，回测原先只能靠 profiles 里的 cur10 写死 5，
+    #: /run 与 /defaults 都表达不了这个口径 → 页面拿「次日开盘价」的结果评价实盘。
+    #: 0 = 关闭（仍用开盘价，历史口径）；>0 = 取开盘后第 (N-1)//5 根 5m bar 收盘价。
+    entry_open_delay_minutes: int | None = Field(
+        None, ge=0, le=60,
+        description="开盘冷静期(分钟)：>0 时入场价改为开盘后 N 分钟，与实盘 paper_open_cooldown_minutes 同口径；0=用开盘价",
+    )
     # ---- 稳健性检验（E48）----
     fill_noise_bps: float | None = Field(
         None, ge=0, le=200, description="成交价随机扰动 σ（bp），0=关闭；仅回测用"
@@ -268,6 +278,9 @@ def _defaults_payload() -> dict:
         "t_minute_period": "5",
         "exec_fill": "open",
         "exec_fill_minutes": 30,
+        # #108：回测入场价跟随实盘「开盘冷静期」，否则默认仍是次日开盘价、
+        # 与线上「开盘+5min 才允许买」不是一次可比实验（实盘窗口=0 的偏离另见结果页口径提示）
+        "entry_open_delay_minutes": int(getattr(s, "paper_open_cooldown_minutes", 0) or 0),
         "t_size": float(s.paper_t_size),
         "t_up_sell": float(s.paper_t_up_sell),
         "t_up_buyback": float(s.paper_t_up_buyback),

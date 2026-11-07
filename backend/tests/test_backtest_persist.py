@@ -23,6 +23,7 @@ _KEYS = (
     "paper_single_position_max",
     "paper_max_positions",
     "paper_pool_top_n",
+    "paper_open_cooldown_minutes",  # #108 回测入场时点与线上同口径，落盘用例要还原
 )
 
 
@@ -83,6 +84,23 @@ def test_defaults_follow_persisted_values():
     assert d["stop_loss"] == pytest.approx(0.11)
     assert d["take_profit"] == pytest.approx(0.44)
     assert d["single_position_ratio"] == pytest.approx(0.15)
+
+
+def test_defaults_and_persist_align_open_cooldown():
+    """#108：回测默认入场时点跟随实盘冷静期，且能从回测中心落盘改它。
+
+    之前 `entry_open_delay_minutes` 只写在 profiles 的 cur10 里，/defaults 与
+    BacktestRequest 都没有 → 界面既看不到也改不了「开盘+5min」这个真实口径。
+    """
+    key = "paper_open_cooldown_minutes"
+    before = int(getattr(get_settings(), key))
+    assert backtest_defaults()["defaults"]["entry_open_delay_minutes"] == before
+    assert BACKTEST_TO_SETTING["entry_open_delay_minutes"] == key
+
+    res = persist_backtest_rules(_req(entry_open_delay_minutes=10))
+    assert res["applied"][key] == 10
+    assert int(get_settings().paper_open_cooldown_minutes) == 10
+    assert backtest_defaults()["defaults"]["entry_open_delay_minutes"] == 10
 
 
 def test_persist_map_exposes_mapping_and_current():
