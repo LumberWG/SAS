@@ -14,6 +14,7 @@ import { GridComponent, TooltipComponent } from 'echarts/components'
 import { useRouter } from 'vue-router'
 import { getAlerts, getIndexKline, getOverview, type MarketAlert, type MarketOverview } from '../api'
 import { chartTheme, tooltipStyle } from '../lib/chartTheme'
+import { POLL } from '../lib/polling'
 import { useMarketStore } from '../stores/market'
 
 use([CanvasRenderer, BarChart, LineChart, GridComponent, TooltipComponent])
@@ -81,7 +82,7 @@ function alertBadgeClass(type: string): string {
 function toggleAuto() {
   autoRefresh.value = !autoRefresh.value
   if (autoRefresh.value) {
-    timer = window.setInterval(() => load(), 30000)
+    timer = window.setInterval(() => load(), POLL.defaultMs)
   } else if (timer) {
     window.clearInterval(timer)
   }
@@ -95,7 +96,7 @@ function goDetail(code: string) {
 onMounted(() => {
   load()
   if (autoRefresh.value) {
-    timer = window.setInterval(() => load(), 30000)
+    timer = window.setInterval(() => load(), POLL.defaultMs)
   }
 })
 onUnmounted(() => {

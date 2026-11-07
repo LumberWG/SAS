@@ -24,8 +24,14 @@ import {
   type QueueFilter,
   type RecommendationItem,
 } from '../api'
+import { POLL } from '../lib/polling'
+import { useNotifyStore } from '../stores/notify'
 
 const router = useRouter()
+const notify = useNotifyStore()
+/** 加载失败时保留旧数据，但必须让人知道看到的是上一轮结果 */
+const staleNotice = ref(false)
+let loadFailed = false
 
 const buys = ref<RecommendationItem[]>([])
 const sells = ref<RecommendationItem[]>([])
@@ -49,8 +55,19 @@ async function load() {
     focusDate.value = focusData.for_date
     summary.value = summaryData
     updatedAt.value = buyData.updated_at ?? sellData.updated_at
-  } catch {
-    // 加载失败保留旧数据
+    staleNotice.value = false
+    loadFailed = false
+  } catch (e: unknown) {
+    // 保留旧数据，但同一轮故障只弹一次 toast，并常驻一条「可能是旧数据」提示
+    staleNotice.value = true
+    if (!loadFailed) {
+      loadFailed = true
+      notify.push(
+        `智能建议加载失败，已保留上次结果：${e instanceof Error ? e.message : '未知错误'}`,
+        'warn',
+        6000,
+      )
+    }
   }
 }
 
@@ -148,7 +165,7 @@ async function toggleLargeCap() {
 onMounted(() => {
   load()
   loadFilter()
-  timer = window.setInterval(load, 30000)  // 30s 轮询
+  timer = window.setInterval(load, POLL.defaultMs)
 })
 onUnmounted(() => {
   if (timer) window.clearInterval(timer)
@@ -157,6 +174,10 @@ onUnmounted(() => {
 
 <template>
   <div class="space-y-5">
+    <div v-if="staleNotice" class="banner-warn flex items-center justify-between gap-3 rounded-lg px-4 py-2 text-[12.5px]">
+      <span>建议数据加载失败，当前显示的是上一次成功加载的结果（可能不是最新一批）。</span>
+      <button class="shrink-0 rounded border border-current/30 px-2 py-0.5 hover:opacity-80" @click="load">重试</button>
+    </div>
     <!-- 顶部：机制说明 + 三项计数 -->
     <div class="glass-card flex flex-wrap items-center justify-between gap-4 p-5">
       <div class="flex items-center gap-3">

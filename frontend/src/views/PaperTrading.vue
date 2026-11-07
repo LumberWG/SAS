@@ -18,6 +18,8 @@ import VChart from 'vue-echarts'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 import { chartTheme, tooltipStyle } from '../lib/chartTheme'
 import { csvDateTag, downloadCsv } from '../lib/csv'
+import { POLL } from '../lib/polling'
+import { useNotifyStore } from '../stores/notify'
 import { use } from 'echarts/core'
 import { CanvasRenderer } from 'echarts/renderers'
 import { LineChart } from 'echarts/charts'
@@ -45,6 +47,11 @@ import {
 } from '../api'
 
 use([CanvasRenderer, LineChart, GridComponent, LegendComponent, TooltipComponent])
+
+const notify = useNotifyStore()
+/** 加载失败时保留旧数据，但必须让人知道看到的是上一轮结果 */
+const staleNotice = ref(false)
+let loadFailed = false
 
 /** 净值只在交易日落库（结算任务 mon-fri + is_trading_day 守卫）；这里再兜底剔除非交易日，
  *  保证净值曲线横坐标不会出现周末/节假日（即便数据源偶发写入非交易日行）。 */
@@ -149,13 +156,24 @@ async function load() {
         total_asset: e.total_asset,
       }))
     live.value = liveData
+    staleNotice.value = false
+    loadFailed = false
     // 状态已与后端同步，此前的切换报错不再有意义
     if (modeError.value) modeError.value = ''
     // 手动模式下列表里的现价用于下单参考，随轮询一起刷新
     if (!liveData.auto_trade) loadWatchItems()
     void loadSim()
-  } catch {
-    // 保留旧数据
+  } catch (e: unknown) {
+    // 保留旧数据，但同一轮故障只弹一次 toast，并常驻「可能是旧数据」提示
+    staleNotice.value = true
+    if (!loadFailed) {
+      loadFailed = true
+      notify.push(
+        `模拟盘数据加载失败，已保留上次结果：${e instanceof Error ? e.message : '未知错误'}`,
+        'warn',
+        6000,
+      )
+    }
   }
 }
 
@@ -491,6 +509,16 @@ function exportTradesCsv() {
 const simNoteLines = computed(() =>
   (simInterpretation.value?.note ?? '').split('\n').filter(Boolean)
 )
+/** 盘中当日净值只是「最后一次快照」，15:40 结算才定稿；别让人当成收盘收益 */
+const equityProvisional = computed(() => {
+  const now = new Date()
+  if (now.getDay() === 0 || now.getDay() === 6) return false
+  if (now.getHours() * 60 + now.getMinutes() >= 15 * 60 + 40) return false
+  const mmdd = `${String(now.getMonth() + 1).padStart(2, '0')}-${String(now.getDate()).padStart(2, '0')}`
+  const rows = equity.value
+  return rows.length > 0 && rows[rows.length - 1].date === mmdd
+})
+
 /** 默认回撤优先；缺回撤的账本（老接口/无净值）排最后，不假装它是 0 回撤 */
 const sortedSimAccounts = computed(() => {
   const rows = [...simAccounts.value]
@@ -570,7 +598,7 @@ const floorText = computed(() => {
 onMounted(() => {
   load()
   loadWatchItems()
-  timer = window.setInterval(load, 15000)
+  timer = window.setInterval(load, POLL.paperMs)
 })
 onUnmounted(() => {
   if (timer) window.clearInterval(timer)
@@ -579,6 +607,10 @@ onUnmounted(() => {
 
 <template>
   <div class="space-y-5">
+    <div v-if="staleNotice" class="banner-warn flex items-center justify-between gap-3 rounded-lg px-4 py-2 text-[12.5px]">
+      <span>模拟盘数据加载失败，当前显示的是上一次成功加载的结果（可能不是最新）。</span>
+      <button class="shrink-0 rounded border border-current/30 px-2 py-0.5 hover:opacity-80" @click="load">重试</button>
+    </div>
     <!-- 账户总览 -->
     <div class="glass-card flex flex-wrap items-center justify-between gap-4 p-5">
       <div class="flex items-center gap-3">
@@ -597,6 +629,7 @@ onUnmounted(() => {
           <div
             class="font-num text-[23.5px] font-bold leading-none"
             :class="pctTone(account?.return_pct ?? 0)"
+            :title="equityProvisional ? '含盘中最后一次净值快照，15:40 结算后定稿' : '按最新净值计算'"
           >
             {{ account ? (account.return_pct > 0 ? '+' : '') + account.return_pct.toFixed(2) + '%' : '--' }}
           </div>
@@ -1104,7 +1137,14 @@ onUnmounted(() => {
       <div class="glass-card p-5 xl:col-span-2">
         <div class="mb-3 flex items-center justify-between">
           <h3 class="text-subheading">净值曲线</h3>
-          <span class="text-[12.5px] text-content-faint">盘中每 30s 按最新价刷新 · 15:40 结算 · {{ equity.length }} 个交易日</span>
+          <div class="flex flex-wrap items-center justify-end gap-2">
+            <span
+              v-if="equityProvisional"
+              class="chip chip-warn"
+              title="今日这一点的净值是盘中最后一次快照（每 30s 重估），不是收盘价；15:40 结算后用收盘价覆盖定稿。今日收益/最大回撤在此期间也会变。"
+            >今日未定稿</span>
+            <span class="text-[12.5px] text-content-faint">盘中每 30s 按最新价刷新 · 15:40 结算 · {{ equity.length }} 个交易日</span>
+          </div>
         </div>
         <v-chart v-if="equity.length > 0" :option="equityOption" style="height: 220px" autoresize />
         <div v-else class="flex h-[220px] flex-col items-center justify-center gap-2 text-content-faint">

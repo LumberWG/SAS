@@ -509,7 +509,7 @@ _SHORT_LABELS: dict[str, str] = {
     "paper_scan_autotrade": "扫描后自动交易",
     "paper_scan_autotrade_top_n": "自动交易上限",
     "paper_scan_autotrade_overnight": "盘后信号入队",
-    "paper_buy_open_window_minutes": "开盘成交窗口(分钟)：0=全时段可成交(仅受开盘冷静期约束)；>0=只限开盘后N分钟内可成交",
+    "paper_buy_open_window_minutes": "开盘成交窗口",
     # ---- 机制层：政策托底 / 熔断 ----
     "paper_policy_floor_enabled": "托底强度检测",
     "paper_policy_floor_min_score": "托底收割阈值",

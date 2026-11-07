@@ -25,3 +25,24 @@ def _disable_api_token():
         yield
     finally:
         settings.api_token = original
+
+
+@pytest.fixture(autouse=True)
+def _restore_settings_singleton():
+    """每个用例结束后还原 Settings 单例的所有字段，杜绝「全量顺序污染」。
+
+    `param_specs.update_settings()` 是**就地改单例**（不能清 lru 缓存，否则模块各持一份
+    行为分裂）。此前一个用例写下 `paper_max_positions=1`，后面测「主账本应买 2 只」
+    就只买到 1 只；单独跑却全绿。快照/还原只在测试夹具里，不改生产代码。
+    """
+    settings = get_settings()
+    snapshot = {
+        name: getattr(settings, name, None)
+        for name in type(settings).model_fields
+    }
+    try:
+        yield
+    finally:
+        for name, value in snapshot.items():
+            if getattr(settings, name, None) != value:
+                setattr(settings, name, value)

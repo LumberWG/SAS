@@ -641,8 +641,8 @@ export interface SettingsOverview {
   hint: string
 }
 
-export function getSettingsOverview(): Promise<SettingsOverview> {
-  return http.get('/settings').then((r) => r.data)
+export function getSettingsOverview(refresh = false): Promise<SettingsOverview> {
+  return http.get('/settings', { params: refresh ? { refresh: true } : {} }).then((r) => r.data)
 }
 
 /** 修改配置项：立即生效并落库（重启保留）。返回修改后的总览。 */
@@ -753,6 +753,24 @@ export function createCustomStrategy(payload: {
   description?: string
 }): Promise<{ created: boolean; name: string }> {
   return http.post('/strategies/custom', payload).then((r) => r.data)
+}
+
+/** 策略注册表（与 /screening/strategies 不同：这份带参数 schema 与自定义元数据） */
+export function listStrategies(): Promise<{ strategies: StrategyInfo[] }> {
+  return http.get('/strategies').then((r) => r.data)
+}
+
+/** 单个策略详情：自定义策略返回 custom_meta.base（编辑器「更新」要用它当基础策略） */
+export function getStrategyDetail(name: string): Promise<StrategyDetail> {
+  return http.get(`/strategies/${encodeURIComponent(name)}`).then((r) => r.data)
+}
+
+/** 更新自定义策略参数：基础策略由后端从元数据取，前端不要再把自己填成 base */
+export function updateCustomStrategy(
+  name: string,
+  payload: { params: Record<string, unknown>; description?: string },
+): Promise<{ updated: boolean; name: string; base_strategy: string }> {
+  return http.put(`/strategies/custom/${encodeURIComponent(name)}`, payload).then((r) => r.data)
 }
 
 export function deleteCustomStrategy(name: string): Promise<{ deleted: boolean }> {
@@ -1318,6 +1336,98 @@ export function getAccessLog(params: {
   unique?: boolean
 } = {}): Promise<AccessLogResult> {
   return http.get('/access-log', { params: { refresh: true, ...params } }).then((r) => r.data)
+}
+
+// ==================== 线上 ML / 复盘产物（只读） ====================
+
+export interface MlStatus {
+  enabled: boolean
+  effective: boolean
+  state: 'off' | 'effective' | 'pending' | 'fallback'
+  outcome: string
+  as_of: string | null
+  codes: number
+  oos_rank_ic: number | null
+  at: string | null
+  cache_days: number
+  note: string
+}
+export function getMlStatus(): Promise<MlStatus> {
+  return http.get('/ops/ml-status', { params: { refresh: true } }).then((r) => r.data)
+}
+
+export type ReviewName = 'daily' | 'param' | 'position'
+export interface ReviewDoc {
+  name: string
+  available: boolean
+  content: string
+  updated_at: string | null
+  truncated?: boolean
+  note: string
+}
+export function getReview(name: ReviewName): Promise<ReviewDoc> {
+  return http.get('/ops/review', { params: { name } }).then((r) => r.data)
+}
+
+export interface ShadowProfile {
+  name: string
+  as_of: string | null
+  total_return: number | null
+  benchmark_return: number | null
+  excess: number | null
+  max_drawdown: number | null
+  trade_count: number | null
+  win_rate: number | null
+  snapshots: number
+}
+export interface ShadowStatus {
+  tag: string
+  available: boolean
+  start?: string | null
+  universe?: number | null
+  profiles: ShadowProfile[]
+  ml_pair: { base_excess: number; ml_excess: number; diff: number } | null
+  /** 两方案最新快照完全相同：多半是 ML 回退/参数未生效，不能当作「ML 无超额」 */
+  pair_identical?: boolean
+  updated_at?: string | null
+  note: string
+}
+export function getShadow(tag = 'live'): Promise<ShadowStatus> {
+  return http.get('/ops/shadow', { params: { tag, refresh: true } }).then((r) => r.data)
+}
+
+export interface BreadthRow {
+  date: string
+  up: number | null
+  down: number | null
+  flat: number | null
+  total: number | null
+  up_ratio: number | null
+}
+export interface BreadthStatus {
+  available: boolean
+  rows: BreadthRow[]
+  note: string
+}
+export function getBreadth(limit = 60): Promise<BreadthStatus> {
+  return http.get('/ops/breadth', { params: { limit, refresh: true } }).then((r) => r.data)
+}
+
+export interface SelfCheckItem {
+  key: string
+  label: string
+  level: 'ok' | 'warn' | 'error' | 'info'
+  detail: string
+  hint: string
+}
+export interface SelfCheck {
+  level: 'ok' | 'warn' | 'error'
+  checks: SelfCheckItem[]
+  server_time: string
+  note: string
+}
+export function getSelfCheck(): Promise<SelfCheck> {
+  return http.get('/ops/self-check', { params: { refresh: true } }).then((r) => r.data)
 }
 
 export default http

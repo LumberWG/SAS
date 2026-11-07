@@ -9,6 +9,9 @@ import { Save, Settings2, X } from 'lucide-vue-next'
 import {
   createCustomStrategy,
   deleteCustomStrategy,
+  getStrategyDetail,
+  updateCustomStrategy,
+  type StrategyDetail,
   type StrategyInfo,
 } from '../api'
 
@@ -27,17 +30,35 @@ const form = reactive<Record<string, number | boolean | string>>({})
 const customName = ref('')
 const saving = ref(false)
 const errorMsg = ref('')
+const detail = ref<StrategyDetail | null>(null)
+const detailError = ref('')
 
 function initForm() {
+  for (const key of Object.keys(form)) delete form[key]
+  // 自定义策略要回填「已保存的参数」，而不是基础策略默认值；否则点开编辑器
+  // 看到的永远是默认值，一保存就把之前的调参悄悄覆盖掉。
+  const saved = props.strategy.custom ? detail.value?.custom_meta?.params : null
   for (const [key, spec] of Object.entries(props.strategy.parameters)) {
-    form[key] = spec.default
+    const v = saved && key in saved ? saved[key] : spec.default
+    if (typeof v === 'number' || typeof v === 'boolean' || typeof v === 'string') form[key] = v
+    else form[key] = spec.default
   }
   // 默认另存名：内置策略加后缀，自定义策略保持原名
   customName.value = props.strategy.custom
     ? props.strategy.name
     : `${props.strategy.name}·改`
 }
-watch(() => props.strategy, initForm, { immediate: true })
+
+watch(() => props.strategy.name, async (name) => {
+  detail.value = null
+  detailError.value = ''
+  try {
+    detail.value = await getStrategyDetail(name)
+  } catch {
+    detailError.value = '策略详情加载失败，参数暂按默认值显示'
+  }
+  initForm()
+}, { immediate: true })
 
 const hasParams = computed(
   () => Object.keys(props.strategy.parameters).length > 0
@@ -47,12 +68,21 @@ async function save() {
   saving.value = true
   errorMsg.value = ''
   try {
-    await createCustomStrategy({
-      name: customName.value.trim(),
-      base_strategy: props.strategy.name,
-      params: form,
-      description: `${props.strategy.description}（自定义参数版）`,
-    })
+    if (props.strategy.custom) {
+      // 走 PUT：基础策略由后端从 custom_meta 取。以前这里也走 POST，还把
+      // base_strategy 填成自定义策略自己 → register_dynamic 同名必抛错，「更新」一直是坏的。
+      await updateCustomStrategy(props.strategy.name, {
+        params: form,
+        description: props.strategy.description,
+      })
+    } else {
+      await createCustomStrategy({
+        name: customName.value.trim(),
+        base_strategy: props.strategy.name,
+        params: form,
+        description: `${props.strategy.description}（自定义参数版）`,
+      })
+    }
     emit('saved', customName.value.trim())
   } catch (e: unknown) {
     const detail = (e as { response?: { data?: { detail?: string } } })?.response
@@ -115,6 +145,12 @@ function resetDefaults() {
         class="border-b border-base-600/60 bg-base-700/30 px-5 py-3 text-[13.5px] leading-relaxed text-content-muted"
       >
         {{ strategy.description }}
+        <div v-if="detail?.custom" class="mt-1.5 text-[12.5px] text-content-faint">
+          基于内置策略「{{ detail.custom_meta?.base ?? '—' }}」· 已保存
+          {{ Object.keys(detail.custom_meta?.params ?? {}).length }} 项参数
+          <span v-if="detailError" class="ml-1 text-warn">（{{ detailError }}）</span>
+        </div>
+        <div v-else-if="detailError" class="mt-1.5 text-[12.5px] text-warn">{{ detailError }}</div>
       </div>
 
       <!-- 参数表单 -->

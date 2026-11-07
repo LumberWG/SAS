@@ -13,11 +13,22 @@ import { csvDateTag, downloadCsv } from '../lib/csv'
 
 import {
   getAccessLog,
+  getBreadth,
   getDataStatus,
+  getMlStatus,
   getMonitorStatus,
+  getReview,
+  getSelfCheck,
+  getShadow,
   type AccessRecord,
+  type BreadthRow,
   type DataStatus,
+  type MlStatus,
   type MonitorStatus,
+  type ReviewDoc,
+  type ReviewName,
+  type SelfCheck,
+  type ShadowStatus,
 } from '../api'
 
 const monitor = ref<MonitorStatus | null>(null)
@@ -31,6 +42,19 @@ const unique = ref(false)
 const loading = ref(false)
 const error = ref('')
 const lastRefresh = ref('')
+const mlStatus = ref<MlStatus | null>(null)
+const shadow = ref<ShadowStatus | null>(null)
+const breadthRows = ref<BreadthRow[]>([])
+const breadthNote = ref('')
+const reviewDoc = ref<ReviewDoc | null>(null)
+const reviewName = ref<ReviewName>('daily')
+const reviewLoading = ref(false)
+const selfCheck = ref<SelfCheck | null>(null)
+const reviewTabs: Array<{ key: ReviewName; label: string }> = [
+  { key: 'daily', label: '每日复盘' },
+  { key: 'param', label: '参数体检' },
+  { key: 'position', label: '仓位盈亏' },
+]
 let timer: number | undefined
 
 const JOB_LABELS: Record<string, string> = {
@@ -96,14 +120,40 @@ function exportAccessCsv() {
   )
 }
 
+/** 切换复盘文档 tab（只读原文，不刷新整页其它卡片） */
+async function loadReview(name: ReviewName = reviewName.value) {
+  reviewName.value = name
+  reviewLoading.value = true
+  reviewDoc.value = await getReview(name).catch(() => null)
+  reviewLoading.value = false
+}
+
+function fmtPct(v: number | null): string {
+  return v == null ? '—' : `${v > 0 ? '+' : ''}${v.toFixed(2)}%`
+}
+function fmtRatio(v: number | null): string {
+  return v == null ? '—' : `${(v * 100).toFixed(1)}%`
+}
+
 async function loadAll() {
   // 任一子接口失败都不影响其它卡片，避免一个请求挂掉整页空白
-  const [m, d] = await Promise.all([
+  const [m, d, ml, sh, br, rv, ck] = await Promise.all([
     getMonitorStatus().catch(() => null),
     getDataStatus().catch(() => null),
+    getMlStatus().catch(() => null),
+    getShadow().catch(() => null),
+    getBreadth(60).catch(() => null),
+    getReview(reviewName.value).catch(() => null),
+    getSelfCheck().catch(() => null),
   ])
   monitor.value = m
+  selfCheck.value = ck
   dataStatus.value = d
+  mlStatus.value = ml
+  shadow.value = sh
+  breadthRows.value = br?.rows ?? []
+  breadthNote.value = br?.note ?? ''
+  reviewDoc.value = rv
   lastRefresh.value = new Date().toLocaleTimeString('zh-CN', { hour12: false })
   await loadAccess()
 }
@@ -111,6 +161,24 @@ async function loadAll() {
 const dataTone = computed(() => ({
   ok: 'text-up', warn: 'text-warn', error: 'text-down', unknown: 'text-content-faint',
 }[dataStatus.value?.level ?? 'unknown']))
+const mlStateLabel = computed(() => ({
+  off: '未开启', effective: '已生效', pending: '待运行', fallback: '回退 14 因子',
+}[mlStatus.value?.state ?? 'pending']))
+const mlTone = computed(() => ({
+  off: 'text-content-faint', effective: 'text-up', pending: 'text-content-faint', fallback: 'text-warn',
+}[mlStatus.value?.state ?? 'pending']))
+const checkChipClass = computed(() => ({
+  ok: 'chip-up', warn: 'chip-warn', error: 'chip-down',
+}[selfCheck.value?.level ?? 'warn']))
+const checkLabel = computed(() => ({
+  ok: '全部正常', warn: '有提示项', error: '存在故障',
+}[selfCheck.value?.level ?? 'warn']))
+function dotOf(level: string): string {
+  return { ok: 'bg-up', warn: 'bg-warn', error: 'bg-down', info: 'bg-primary-light' }[level] ?? 'bg-content-faint'
+}
+function levelText(level: string): string {
+  return { ok: '正常', warn: '提示', error: '故障', info: '说明' }[level] ?? level
+}
 
 onMounted(() => {
   loadAll()
@@ -178,6 +246,36 @@ onUnmounted(() => {
       </div>
     </div>
 
+    <!-- 系统自检：把「页面看着正常但某个环节已经静默坏掉」变成一屏红黄灯 -->
+    <div class="glass-card p-5">
+      <div class="flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <h3 class="text-subheading">系统自检</h3>
+          <p class="mt-1 text-[12.5px] text-content-faint">
+            只读汇总库结构 / 净值 / 快照 / 调度 / 分钟库 / 影子账户 / ML · {{ selfCheck?.server_time ?? '—' }}
+          </p>
+        </div>
+        <span class="chip" :class="checkChipClass">{{ checkLabel }}</span>
+      </div>
+      <div class="mt-3 grid gap-2 md:grid-cols-2 xl:grid-cols-3">
+        <div
+          v-for="c in selfCheck?.checks ?? []"
+          :key="c.key"
+          class="rounded-lg border border-base-600/60 px-3 py-2"
+        >
+          <div class="flex items-center gap-2 text-[13px]">
+            <span class="h-1.5 w-1.5 shrink-0 rounded-full" :class="dotOf(c.level)"></span>
+            <span class="font-medium text-content">{{ c.label }}</span>
+            <span class="ml-auto text-[12px] text-content-faint">{{ levelText(c.level) }}</span>
+          </div>
+          <p class="mt-1 text-[12px] leading-relaxed text-content-muted">{{ c.detail }}</p>
+          <p v-if="c.hint" class="mt-1 text-[12px] text-content-faint">{{ c.hint }}</p>
+        </div>
+        <div v-if="!selfCheck" class="text-[12.5px] text-content-faint">自检接口不可用</div>
+      </div>
+      <p class="mt-2 text-[12px] text-content-faint">{{ selfCheck?.note ?? '' }}</p>
+    </div>
+
     <!-- 进程内调度任务 -->
     <div class="glass-card p-5">
       <h3 class="text-subheading">调度任务</h3>
@@ -209,6 +307,133 @@ onUnmounted(() => {
         <span class="chip chip-muted" title="由 Windows 计划任务执行，本页不查询其状态">SASDbBackup · 每日 15:50 备份</span>
         <span class="chip chip-muted" title="由 Windows 计划任务执行，本页不查询其状态">SASMinutesFsdb · 交易日 17:30 导出</span>
         <span class="chip chip-muted" title="手动触发">SASRestart / SASDeploy · 手动</span>
+      </div>
+    </div>
+
+    <!-- 线上 ML + 复盘产物：这些内容原来只存在于日志/命令行/仓库文档里 -->
+    <div class="glass-card p-5">
+      <h3 class="text-subheading">ML 与复盘</h3>
+      <p class="mt-1 text-[12.5px] text-content-faint">
+        只读：线上 ML 是否真的生效、影子账户前向配对、脚本产出的复盘文档与广度历史
+      </p>
+
+      <div class="mt-3 grid gap-3 lg:grid-cols-2">
+        <!-- 线上 ML 状态 -->
+        <div class="rounded-lg border border-base-600/60 p-3">
+          <div class="text-[13px] font-medium text-content">线上 ML 打分</div>
+          <div class="mt-1 text-[18px] font-semibold" :class="mlTone">{{ mlStateLabel }}</div>
+          <p class="mt-1 text-[12.5px] text-content-muted">{{ mlStatus?.note ?? '状态接口不可用' }}</p>
+          <dl class="mt-3 grid grid-cols-2 gap-x-3 gap-y-1 text-[12.5px]">
+            <dt class="text-content-faint">开关</dt><dd class="text-content">{{ mlStatus?.enabled ? '开' : '关' }}</dd>
+            <dt class="text-content-faint">数据日</dt><dd class="font-num text-content">{{ mlStatus?.as_of ?? '—' }}</dd>
+            <dt class="text-content-faint">覆盖只数</dt><dd class="font-num text-content">{{ mlStatus?.codes ?? '—' }}</dd>
+            <dt class="text-content-faint">OOS rank-IC</dt><dd class="font-num text-content">{{ mlStatus?.oos_rank_ic ?? '—' }}</dd>
+            <dt class="text-content-faint">最近判定</dt><dd class="font-num text-content">{{ mlStatus?.at ?? '—' }}</dd>
+            <dt class="text-content-faint">缓存数据日</dt><dd class="font-num text-content">{{ mlStatus?.cache_days ?? '—' }}</dd>
+          </dl>
+          <p class="mt-2 text-[12px] leading-relaxed text-content-faint">
+            开关打开 ≠ 生效；effective=false 时结果与 14 因子基线相同，不能当作「ML 有效」的证据（#82）。
+            「待运行」只表示本进程重启后还没跑过一轮，不等于回退。
+          </p>
+        </div>
+
+        <!-- 影子账户 -->
+        <div class="rounded-lg border border-base-600/60 p-3">
+          <div class="flex items-center justify-between gap-2">
+            <div class="text-[13px] font-medium text-content">影子账户（16:45）</div>
+            <span class="text-[12px] text-content-faint">{{ shadow?.updated_at ?? '—' }}</span>
+          </div>
+          <div v-if="shadow?.ml_pair" class="mt-2 rounded-lg border border-primary/30 bg-primary/[0.06] px-2.5 py-2 text-[12.5px]">
+            <span class="font-medium text-primary-light">ML 前向配对</span>：
+            default 超额 {{ fmtPct(shadow.ml_pair.base_excess) }} ·
+            default_ml 超额 {{ fmtPct(shadow.ml_pair.ml_excess) }} ·
+            差 <span :class="shadow.ml_pair.diff >= 0 ? 'text-up' : 'text-down'">{{ fmtPct(shadow.ml_pair.diff) }}</span>
+          </div>
+          <p
+            v-if="shadow?.pair_identical && shadow.ml_pair"
+            class="mt-2 rounded-lg border border-warn/30 bg-warn/[0.08] px-2.5 py-2 text-[12.5px] text-warn"
+          >
+            两方案最新快照完全相同（收益/成交笔数一致），通常说明 ML 本轮回退或参数未生效，
+            <b>不能据此得出「ML 无超额」</b>（#79 / #82）。
+          </p>
+          <p v-else class="mt-2 text-[12.5px] text-content-muted">
+            {{ shadow?.note ?? '影子账户状态不可用' }}
+          </p>
+          <div v-if="shadow?.profiles.length" class="mt-2 overflow-x-auto">
+            <table class="w-full text-left text-[12.5px]">
+              <thead class="text-content-faint">
+                <tr>
+                  <th class="py-1 font-medium">方案</th>
+                  <th class="py-1 text-right font-medium">收益</th>
+                  <th class="py-1 text-right font-medium">超额</th>
+                  <th class="py-1 text-right font-medium">快照</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="p in shadow.profiles" :key="p.name" class="border-t border-base-700/40">
+                  <td class="py-1 text-content">{{ p.name }}</td>
+                  <td class="py-1 text-right font-num text-content-muted">{{ fmtPct(p.total_return) }}</td>
+                  <td class="py-1 text-right font-num text-content-muted">{{ fmtPct(p.excess) }}</td>
+                  <td class="py-1 text-right font-num text-content-faint">{{ p.snapshots }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      <div class="mt-3 grid gap-3 lg:grid-cols-2">
+        <!-- 复盘文档原文 -->
+        <div class="rounded-lg border border-base-600/60 p-3">
+          <div class="mb-2 flex flex-wrap items-center justify-between gap-2">
+            <div class="seg !p-0.5">
+              <button
+                v-for="t in reviewTabs"
+                :key="t.key"
+                class="seg-item px-2 py-1"
+                :class="reviewName === t.key ? 'seg-item-active' : ''"
+                @click="loadReview(t.key)"
+              >{{ t.label }}</button>
+            </div>
+            <span class="text-[12px] text-content-faint">{{ reviewDoc?.updated_at ?? '—' }}</span>
+          </div>
+          <pre class="max-h-[280px] overflow-auto whitespace-pre-wrap rounded-lg bg-base-900/60 p-3 text-[12px] leading-relaxed text-content-muted">{{ reviewLoading ? '加载中…' : (reviewDoc?.content || (reviewDoc?.note ?? '暂无内容')) }}</pre>
+          <p class="mt-1 text-[12px] text-content-faint">
+            {{ reviewDoc?.note ?? '' }}<span v-if="reviewDoc?.truncated"> · 内容已截断</span>
+          </p>
+        </div>
+
+        <!-- 广度历史 -->
+        <div class="rounded-lg border border-base-600/60 p-3">
+          <div class="mb-2 flex items-center justify-between gap-2">
+            <div class="text-[13px] font-medium text-content">涨跌家数广度（近 10 日）</div>
+            <span class="text-[12px] text-content-faint">纯观测</span>
+          </div>
+          <div v-if="breadthRows.length" class="overflow-x-auto">
+            <table class="w-full text-left text-[12.5px]">
+              <thead class="text-content-faint">
+                <tr>
+                  <th class="py-1 font-medium">日期</th>
+                  <th class="py-1 text-right font-medium">涨</th>
+                  <th class="py-1 text-right font-medium">跌</th>
+                  <th class="py-1 text-right font-medium">上涨占比</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="r in breadthRows.slice(-10)" :key="r.date" class="border-t border-base-700/40">
+                  <td class="py-1 font-num text-content-muted">{{ r.date }}</td>
+                  <td class="py-1 text-right font-num text-up">{{ r.up ?? '—' }}</td>
+                  <td class="py-1 text-right font-num text-down">{{ r.down ?? '—' }}</td>
+                  <td class="py-1 text-right font-num text-content">{{ fmtRatio(r.up_ratio) }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <p v-else class="text-[12.5px] text-content-muted">{{ breadthNote || '广度缓存尚未生成' }}</p>
+          <p class="mt-2 text-[12px] leading-relaxed text-content-faint">
+            4 年非重叠只有 5 个 shock 样本、方向不稳，广度不进任何交易判定（#86）。
+          </p>
+        </div>
       </div>
     </div>
 

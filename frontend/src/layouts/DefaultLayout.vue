@@ -24,9 +24,11 @@ import {
 import { useMarketStore } from '../stores/market'
 import {
   getDataStatus,
+  getMlStatus,
   getScopeStats,
   onDataDegraded,
   type DataStatus,
+  type MlStatus,
   type ScopeStats,
 } from '../api'
 
@@ -76,20 +78,40 @@ let offDegraded: (() => void) | undefined
 // 全局数据新鲜度：SWR 会静默返回旧快照，接口 200 也可能带 degraded=true。
 // 状态条独立于任何页面，30s 轮询一次（refresh=true 绕过 GET 缓存）。
 const dataStatus = ref<DataStatus | null>(null)
+const mlStatus = ref<MlStatus | null>(null)
 const degradeNotice = ref('')
 let degradeAt = 0
 
-function refreshDataStatus() {
-  getDataStatus()
-    .then((s) => {
-      dataStatus.value = s
-      // 降级提示保留至少 60s，避免一次抖动就闪一下消失
-      if (s.level === 'ok' && Date.now() - degradeAt > 60_000) degradeNotice.value = ''
-    })
-    .catch(() => {
-      dataStatus.value = null // 状态接口自己挂了也不能假装数据正常
-    })
+async function refreshDataStatus() {
+  // 两个状态接口互相独立：任一挂掉都不影响另一个（更不能假装正常）
+  const [s, m] = await Promise.all([
+    getDataStatus().catch(() => null),
+    getMlStatus().catch(() => null),
+  ])
+  dataStatus.value = s
+  mlStatus.value = m
+  // 降级提示保留至少 60s，避免一次抖动就闪一下消失
+  if (s?.level === 'ok' && Date.now() - degradeAt > 60_000) degradeNotice.value = ''
 }
+
+const mlState = computed(() => mlStatus.value?.state ?? 'pending')
+const mlChipClass = computed(() => ({
+  effective: 'chip-up', pending: 'chip-muted', fallback: 'chip-warn', off: 'chip-muted',
+}[mlState.value]))
+const mlChipText = computed(() => ({
+  effective: '生效', pending: '待运行', fallback: '14因子', off: '关',
+}[mlState.value]))
+const mlTitle = computed(() => {
+  const s = mlStatus.value
+  if (!s) return '线上 ML 状态不可用'
+  return [
+    s.note,
+    `开关：${s.enabled ? '开' : '关'} · 判定：${s.outcome} · 状态：${s.state}`,
+    `数据日：${s.as_of ?? '—'} · 覆盖 ${s.codes} 只 · OOS rank-IC：${s.oos_rank_ic ?? '—'}`,
+    `最近判定：${s.at ?? '—'} · 缓存 ${s.cache_days} 个数据日`,
+    'effective=false 时结果与 14 因子基线相同，不能当作 ML 有效的证据',
+  ].join('\n')
+})
 
 const dataLevel = computed(() => {
   if (degradeNotice.value && dataStatus.value?.level !== 'error') return 'warn'
@@ -287,6 +309,11 @@ const activePath = computed(() =>
             <span class="h-1.5 w-1.5 rounded-full" :class="dataDotClass" />
             {{ dataChipText }}
           </span>
+          <span
+            class="chip hidden md:inline-flex"
+            :class="mlChipClass"
+            :title="mlTitle"
+          >ML: {{ mlChipText }}</span>
           <span class="chip chip-muted hidden md:inline-flex">
             LLM: {{ market.llmAvailable ? market.llmModel : '规则降级' }}
           </span>

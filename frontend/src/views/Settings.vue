@@ -33,6 +33,8 @@ const loading = ref(false)
 const saving = ref(false)
 const error = ref('')
 const toast = ref('')
+/** 保存后回读确认：{ ok, keys, mismatches }，避免「POST 200 但覆盖层没生效」被当成成功 */
+const verify = ref<{ ok: boolean; keys: number; mismatches: string[] } | null>(null)
 const keyword = ref('')
 const activeGroup = ref('')
 const onlyChanged = ref(false)
@@ -235,10 +237,38 @@ async function save() {
   if (!Object.keys(changes).length) return
   saving.value = true
   error.value = ''
+  verify.value = null
   try {
     hydrate(await updateSettings(changes))
-    toast.value = `已保存 ${Object.keys(changes).length} 项，立即生效`
-    window.setTimeout(() => (toast.value = ''), 2500)
+    // POST 响应只是「写完之后就地生成」的总览，不能证明 app_state 覆盖层真的生效。
+    // #114 踩过：写进去了但被 .env / 另一层覆盖读回旧值，页面却显示「已生效」。
+    // 必须再 GET 一次（带 refresh 绕过前端 20s GET 缓存），逐项比对 value + source。
+    const fresh = await getSettingsOverview(true)
+    hydrate(fresh)
+    const items = new Map<string, ParamItem>()
+    for (const g of fresh.groups) for (const it of g.items) items.set(it.key, it)
+    const mismatches: string[] = []
+    for (const [key, want] of Object.entries(changes)) {
+      const it = items.get(key)
+      if (!it) {
+        mismatches.push(`${key}：回读结果里不存在`)
+        continue
+      }
+      if (it.secret) continue // 掩码无法逐项比对，跳过
+      const got = it.value
+      const same = String(got) === String(want)
+        || (Number.isFinite(Number(got)) && Number(got) === Number(want))
+      if (!same) {
+        mismatches.push(`${key}：期望 ${want}，实际 ${got}（来源 ${it.source}）`)
+      } else if (it.source !== 'app_state') {
+        mismatches.push(`${key}：值一致，但来源是 ${it.source}，覆盖层未生效`)
+      }
+    }
+    verify.value = { ok: mismatches.length === 0, keys: Object.keys(changes).length, mismatches }
+    toast.value = mismatches.length
+      ? `已提交 ${Object.keys(changes).length} 项，但有 ${mismatches.length} 项回读未确认`
+      : `已回读确认 ${Object.keys(changes).length} 项，来源 app_state，立即生效`
+    window.setTimeout(() => (toast.value = ''), 4000)
   } catch (e: unknown) {
     error.value = e instanceof Error ? e.message : '保存失败'
   } finally {
@@ -395,10 +425,25 @@ onMounted(load)
         </div>
       </div>
 
-      <div v-if="toast" class="mt-2 rounded border border-down/30 bg-down/10 px-2 py-1 text-[12.5px] text-down">
+      <div
+        v-if="verify"
+        class="mt-2 rounded border px-2 py-1.5 text-[12.5px] leading-relaxed"
+        :class="verify.ok ? 'border-up/30 bg-up/10 text-up' : 'border-warn/40 bg-warn/10 text-warn'"
+      >
+        <div class="font-medium">
+          {{ verify.ok ? `回读确认通过：${verify.keys} 项的值与来源（app_state）均已核实` : `回读未确认：${verify.mismatches.length} 项` }}
+        </div>
+        <ul v-if="verify.mismatches.length" class="mt-1 list-disc pl-5">
+          <li v-for="m in verify.mismatches" :key="m" class="font-num">{{ m }}</li>
+        </ul>
+        <div v-if="!verify.ok" class="mt-1 opacity-80">
+          检查 GET /api/settings 的 source 字段与 .env / app_state 覆盖层；不要只信「保存成功」提示。
+        </div>
+      </div>
+      <div v-if="toast" class="mt-2 rounded border border-up/30 bg-up/10 px-2 py-1 text-[12.5px] text-up">
         {{ toast }}
       </div>
-      <div v-if="error" class="mt-2 rounded border border-up/30 bg-up/10 px-2 py-1 text-[12.5px] text-up">
+      <div v-if="error" class="mt-2 rounded border border-down/30 bg-down/10 px-2 py-1 text-[12.5px] text-down">
         {{ error }}
       </div>
     </div>

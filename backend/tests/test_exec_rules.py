@@ -21,6 +21,17 @@ def trader() -> LiveTrader:
     return LiveTrader()
 
 
+@pytest.fixture
+def window_on(monkeypatch):
+    """显式打开 5 分钟开盘窗口：本机 .env 把它设成了 0（全时段可买）。
+
+    这两个用例要锁的是「窗口内的时点规则」，不应依赖本机运行口径；
+    不显式设值就会变成「测 .env」，clean checkout 与本机结果不一致。
+    """
+    monkeypatch.setattr(get_settings(), "paper_buy_open_window_minutes", 5, raising=False)
+    return 5
+
+
 @pytest.fixture(autouse=True)
 def _disable_large_cap(monkeypatch):
     """默认关闭大盘股过滤：本文件其它用例用真实代码跑准入闸门。
@@ -59,7 +70,7 @@ def test_name_rejected(name):
 
 
 # ---------------- 时点口径：买单只在开盘窗口成交 ----------------
-def test_in_buy_window(trader):
+def test_in_buy_window(trader, window_on):
     d = datetime(2026, 10, 28)  # 周三
     window = trader._window_minutes()
     assert trader._in_buy_window(d.replace(hour=9, minute=31))
@@ -68,7 +79,7 @@ def test_in_buy_window(trader):
     assert trader._in_buy_window(d.replace(hour=9, minute=30) + timedelta(minutes=window)) is False
 
 
-def test_next_buy_window_start(trader):
+def test_next_buy_window_start(trader, window_on):
     assert trader._next_buy_window_start(
         datetime(2026, 10, 28, 13, 1)
     ) == datetime(2026, 10, 29, 9, 30)
@@ -81,7 +92,7 @@ def test_next_buy_window_start(trader):
     ) == datetime(2026, 11, 2, 9, 30)
 
 
-def test_buy_expiry_survives_to_next_open(trader):
+def test_buy_expiry_survives_to_next_open(trader, window_on):
     """13:01 产生的买单必须活到次日开盘窗口，否则永远等不到开盘就过期了。"""
     settings = get_settings()
     ttl = timedelta(minutes=settings.paper_signal_ttl_minutes)

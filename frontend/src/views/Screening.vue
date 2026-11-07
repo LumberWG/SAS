@@ -26,6 +26,7 @@ import ScanEmptyState from '../components/ScanEmptyState.vue'
 import ScanResultTable from '../components/ScanResultTable.vue'
 import StrategyEditor from '../components/StrategyEditor.vue'
 import StrategyPanel from '../components/StrategyPanel.vue'
+import { POLL } from '../lib/polling'
 
 const router = useRouter()
 
@@ -67,7 +68,7 @@ function startTicker() {
   nowTick.value = Date.now()
   ticker = window.setInterval(() => {
     nowTick.value = Date.now()
-  }, 1000)
+  }, POLL.clockMs)
 }
 
 function stopTicker() {
@@ -158,6 +159,14 @@ async function loadStrategies() {
   }
 }
 
+/** 「新建」：用第一个带参数的内置策略当模板打开编辑器（保存时另存为新名字） */
+function openCreateStrategy() {
+  const base = strategies.value.find(
+    (s) => !s.custom && Object.keys(s.parameters ?? {}).length > 0,
+  )
+  if (base) editingStrategy.value = base
+}
+
 /** 自定义策略保存/删除后：刷新列表 + 自动勾选新策略。 */
 async function onStrategySaved(name: string) {
   editingStrategy.value = null
@@ -205,7 +214,7 @@ function startQuoteRefresh(taskId: string) {
     } catch {
       // 静默失败：保留当前展示，下次轮询再试
     }
-  }, 30_000)
+  }, POLL.defaultMs)
 }
 
 function stopQuoteRefresh() {
@@ -248,7 +257,7 @@ function startPolling(taskId: string) {
         }
       }
     }
-  }, 2000)
+  }, POLL.scanTaskMs)
 }
 
 function toggleStrategy(name: string) {
@@ -285,7 +294,7 @@ async function warmup() {
     toast('K线预热已在后台开始，完成后扫描将直接使用本地缓存')
     // 预热期间轮询进度，直到命中本地缓存比例接近满或预热按钮恢复
     stopStatusPolling()
-    statusPoller = window.setInterval(loadKlineStatus, 3000)
+    statusPoller = window.setInterval(loadKlineStatus, POLL.scanWarmupMs)
   } catch {
     toast('预热触发失败，请稍后重试')
   } finally {
@@ -373,6 +382,7 @@ onMounted(async () => {
       @select-all="selected = strategies.map((s) => s.name)"
       @clear-all="selected = []"
       @edit="editingStrategy = $event"
+      @create="openCreateStrategy"
       @update:scope="scope = $event"
     />
 

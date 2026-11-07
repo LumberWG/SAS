@@ -4,7 +4,7 @@
  * 支持收起为窄条（w-72 → w-11），把宽度让给右侧扫描结果区。
  */
 import { computed } from 'vue'
-import { ChevronsLeft, ChevronsRight, ListChecks, Pencil } from 'lucide-vue-next'
+import { ChevronsLeft, ChevronsRight, ListChecks, Pencil, Plus } from 'lucide-vue-next'
 
 import type { ScanScope, StrategyInfo } from '../api'
 
@@ -24,6 +24,8 @@ const emit = defineEmits<{
   selectAll: []
   clearAll: []
   edit: [StrategyInfo]
+  /** 新建自定义策略：以某个内置策略为模板打开编辑器（另存为） */
+  create: []
   'update:scope': [string]
   'update:collapsed': [boolean]
 }>()
@@ -81,6 +83,13 @@ const allSelected = computed(
         </div>
         <div class="flex shrink-0 items-center gap-1.5">
           <span class="text-[12.5px] text-content-faint">{{ selected.length }}/{{ strategies.length }}</span>
+          <button
+            class="flex h-6 w-6 items-center justify-center rounded-md border border-base-600 text-content-muted transition-colors hover:border-primary/50 hover:text-primary-light"
+            title="新建自定义策略（以内置策略为模板另存）"
+            @click="emit('create')"
+          >
+            <Plus class="h-3.5 w-3.5" />
+          </button>
           <button
             class="flex h-6 w-6 items-center justify-center rounded-md text-content-faint transition-colors hover:bg-base-700/60 hover:text-primary-light"
             title="收起策略面板"

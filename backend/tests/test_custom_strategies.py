@@ -1,4 +1,6 @@
 """自定义策略单元测试：参数注入、动态注册、持久化加载。"""
+from types import SimpleNamespace
+
 import pandas as pd
 import pytest
 
@@ -148,6 +150,40 @@ class TestPersistence:
         count = load_custom_strategies()
         assert count == 1
         assert registry.create("加载测试").param("breakout_period") == 30
+
+
+class TestUpdateCustomStrategy:
+    """编辑器里的「更新」以前走 POST /custom，把基础策略填成自己 → 必定 400。"""
+
+    def test_update_keeps_original_base(self, monkeypatch):
+        from app.api import strategies as strategies_api
+
+        registry.register_dynamic("我的突破", "海龟突破", {"breakout_period": 25})
+        saved = []
+        monkeypatch.setattr(
+            strategies_api, "db",
+            SimpleNamespace(save_custom_strategy=lambda **kw: saved.append(kw)),
+        )
+
+        res = strategies_api.update_custom_strategy(
+            "我的突破",
+            strategies_api.CustomStrategyUpdate(params={"breakout_period": 40}, description="改过"),
+        )
+        assert res["updated"] is True and res["base_strategy"] == "海龟突破"
+        assert registry.create("我的突破").param("breakout_period") == 40
+        assert saved[0]["base_strategy"] == "海龟突破"
+        assert saved[0]["params"] == {"breakout_period": 40}
+
+    def test_update_rejects_builtin(self):
+        from fastapi import HTTPException
+
+        from app.api import strategies as strategies_api
+
+        with pytest.raises(HTTPException) as exc:
+            strategies_api.update_custom_strategy(
+                "海龟突破", strategies_api.CustomStrategyUpdate(params={})
+            )
+        assert exc.value.status_code == 400
 
 
 class TestParamSpec:

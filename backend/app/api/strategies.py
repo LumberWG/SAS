@@ -27,6 +27,13 @@ class CustomStrategyRequest(BaseModel):
     description: str = Field("", max_length=100, description="策略说明")
 
 
+class CustomStrategyUpdate(BaseModel):
+    """更新自定义策略：只改参数与说明，基础策略从注册表元数据里取。"""
+
+    params: dict = Field(default_factory=dict, description="策略参数")
+    description: str = Field("", max_length=100, description="策略说明")
+
+
 @router.get("")
 def list_strategies() -> dict:
     """全部策略（内置 + 自定义），含参数 schema 与默认值。"""
@@ -77,6 +84,43 @@ def create_custom_strategy(req: CustomStrategyRequest) -> dict:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     return with_disclaimer({"created": True, "name": req.name})
+
+
+@router.put("/custom/{name}")
+def update_custom_strategy(name: str, req: CustomStrategyUpdate) -> dict:
+    """更新自定义策略参数（保持原基础策略）。
+
+    以前前端「更新」也走 `POST /custom`，且把 `base_strategy` 填成**自定义策略自己**：
+    `register_dynamic` 遇到同名必然抛 `策略名已存在`，所以编辑器里的「更新」一直是坏的。
+    这里先取 `custom_meta.base`，注销后用真正的基础策略重建；失败则按旧元数据回滚内存注册。
+    """
+    if not registry.is_custom(name):
+        raise HTTPException(status_code=400, detail=f"{name} 不是自定义策略，不能更新")
+    meta = dict(registry.custom_meta(name) or {})
+    base = meta.get("base")
+    if not base or registry.get_class(base) is None:
+        raise HTTPException(status_code=400, detail=f"{name} 的基础策略 {base!r} 不存在")
+    desc = req.description or meta.get("description", "")
+    category = meta.get("category", "自定义")
+
+    registry.unregister(name)
+    try:
+        registry.register_dynamic(
+            name=name, base_name=base, params=req.params,
+            description=desc, category=category,
+        )
+        db.save_custom_strategy(
+            name=name, base_strategy=base, params=req.params,
+            description=desc, category=category,
+        )
+    except (ValueError, KeyError) as exc:
+        # 内存注册失败必须还原，否则页面刷新后策略直接消失
+        registry.register_dynamic(
+            name=name, base_name=base, params=meta.get("params", {}),
+            description=meta.get("description", ""), category=category,
+        )
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return with_disclaimer({"updated": True, "name": name, "base_strategy": base})
 
 
 @router.delete("/custom/{name}")

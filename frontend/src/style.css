@@ -308,6 +308,11 @@
     @apply border-warn/40 bg-warn/[0.12] text-warn;
   }
 
+  /* 页面级提示条：接口失败但保留旧数据时，必须让人看见「这不是最新结果」 */
+  .banner-warn {
+    @apply border border-warn/40 bg-warn/[0.10] text-warn;
+  }
+
   /* ---------- 分段切换（页内 tab） ---------- */
   .seg {
     @apply inline-flex flex-wrap items-center gap-1 rounded-lg border border-base-600/70 bg-base-800/60 p-1;

@@ -70,14 +70,19 @@ git -c user.name=LumberWG -c user.email=663589316@qq.com commit -m "..."
   ——它是**收盘目标**，盘中买入上限是 100%（现金约束），收盘前 10 分钟由 `eod_trim` 压回；
   改回盘中也卡 80% 会让「钱满票不满」的僵局重现（`#93` 的起因）。
 - **本机 `.env` 把 `PAPER_BUY_OPEN_WINDOW_MINUTES` 设成了 0**（2026-11-02 起，窗口关闭）。
-  于是 `test_exec_rules.py` 有 **2 例会挂**（`test_in_buy_window` / `test_buy_expiry_survives_to_next_open`），
-  这是环境口径不是回归；clean checkout 下全绿。
+  `test_exec_rules.py` 里测「开盘窗口时点规则」的 3 个用例已改为用 `window_on` 夹具**显式把窗口设成 5 分钟**，
+  不再随本机 `.env` 漂移（2026-11-07 前这 2 例会挂，属环境口径不是回归）。
+- **不要再接受「全量 4 例既有失败」这个说法**：2026-11-07 已全部清掉 ——
+  `param_specs._SHORT_LABELS["paper_buy_open_window_minutes"]` 误塞了一整句说明（标签含「；」且 >10 字），
+  改成「开盘成交窗口」；全量顺序污染来自 `update_settings()` 就地改 Settings 单例，已在
+  `tests/conftest.py` 加 autouse 快照/还原夹具。**本机全量 `pytest -q` 现在应当全绿**，
+  再出现失败先当回归查，不要归因为环境。
 
 ## 5. 常用命令
 
 ```powershell
 cd e:\Study\SAS\backend
-.\.venv\Scripts\python.exe -m pytest tests -q          # 全量单测（当前 343 例，全离线，约 35s）
+.\.venv\Scripts\python.exe -m pytest tests -q          # 全量单测（当前 404 例，全离线，约 35s；2026-11-07 起应全绿）
 .\.venv\Scripts\python.exe -m ruff check .             # 代码检查（配置在 backend\pyproject.toml）
 .\.venv\Scripts\python.exe scripts\weekly_review.py --md   # 周度复盘（零成交归因）
 .\.venv\Scripts\python.exe scripts\live_review.py --md     # 实盘 vs 等权基准超额对账
