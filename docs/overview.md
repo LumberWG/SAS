@@ -39,7 +39,7 @@
 | 交易 | `paper/` | 实盘决策 + 秒级撮合 + 并行账本 | `engine.py`(PaperEngine)、`live.py`(LiveTrader)、`ledger.py` |
 | 回测 | `backtest/` | 全流水线回测 | `pipeline.py`(主线)、`profiles.py`、`apply.py`、`review.py`、`ml_scorer.py` |
 | 配置 | 根 | 三层配置 + 参数中心 + 审计 | `config.py`(Settings)、`param_specs.py`、`audit.py`、`api/settings.py` |
-| 接口/前端 | `api/` `frontend/` | REST + SPA | `api/*.py`；前端 **Vue3 + TS + Vite**，`src/views/Settings.vue` |
+| 接口/前端 | `api/` `frontend/` | REST + SPA | `api/*.py`；前端 **Vue3 + TS + Vite**，`src/views/Settings.vue`（参数）、`src/views/Ops.vue`（运维审计） |
 | 调度/运维 | `monitor/` `scripts/` | 定时任务 + 数据/复盘脚本 | `monitor/scheduler.py`、`scripts/*` |
 
 > 纠正：前端是 **Vue3**（非 React）；`cond_pair.py` 在 `backend/scripts/`（是脚本，不在 `app/backtest/`）。

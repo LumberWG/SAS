@@ -19,6 +19,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
@@ -289,6 +290,46 @@ class SnapshotStore:
         """只读内存指数快照（不触发刷新、不等待）。"""
         with self._cond:
             return self._indices
+
+    def status(self) -> dict:
+        """只读健康状态：不触发刷新、不等待、不联网。
+
+        SWR 会静默返回旧数据，页面若只写「实时」或「更新于 now」，使用者根本
+        不知道看到的是几分钟前（甚至上一交易日）的行情。这里把「数据到底多旧、
+        是不是在降级」暴露给顶栏状态条，判定本身不改变任何缓存行为。
+        """
+        now_mono = time.monotonic()
+        now_wall = time.time()
+        with self._cond:
+            snap_at, idx_at = self._snapshot_at, self._indices_at
+            snap_rows = 0 if self._snapshot is None else len(self._snapshot)
+            idx_rows = 0 if self._indices is None else len(self._indices)
+            refreshing = sorted(self._refreshing_keys)
+            failures = {
+                key: round(now_mono - at, 1)
+                for key, at in self._failed_at.items()
+                if now_mono - at < self._fail_cooldown
+            }
+
+        def part(at: float, rows: int) -> dict:
+            age = max(0.0, now_mono - at) if at else None
+            return {
+                "rows": rows,
+                "age_seconds": None if age is None else round(age, 1),
+                "updated_at": (
+                    None if age is None else
+                    datetime.fromtimestamp(now_wall - age).strftime("%Y-%m-%d %H:%M:%S")
+                ),
+                "stale": age is None or age > self._ttl,
+            }
+
+        return {
+            "ttl_seconds": self._ttl,
+            "snapshot": part(snap_at, snap_rows),
+            "indices": part(idx_at, idx_rows),
+            "refreshing": refreshing,
+            "recent_failures": failures,
+        }
 
     def peek_quotes(self) -> dict[str, dict]:
         """只读「股票代码 → 当前行情」映射（不触发刷新、不等待）。

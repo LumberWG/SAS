@@ -3,7 +3,7 @@
  * 回测中心：参数表单 → 提交回测 → 净值曲线 + 绩效指标 + 交易明细。
  */
 import { computed, onMounted, reactive, ref } from 'vue'
-import { Play, ChevronDown, RotateCcw, DatabaseZap, History } from 'lucide-vue-next'
+import { Play, ChevronDown, RotateCcw, DatabaseZap, Download, History } from 'lucide-vue-next'
 import VChart from 'vue-echarts'
 import { use } from 'echarts/core'
 import { CanvasRenderer } from 'echarts/renderers'
@@ -12,6 +12,7 @@ import { GridComponent, TooltipComponent } from 'echarts/components'
 
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 import { chartTheme, tooltipStyle } from '../lib/chartTheme'
+import { csvDateTag, downloadCsv } from '../lib/csv'
 import { useNotifyStore } from '../stores/notify'
 import {
   getBacktest,
@@ -205,6 +206,29 @@ const liveEntryLabel = computed(() => {
 })
 const universeUsed = computed(() => paramNum(result.value?.params?.universe_size) || '—')
 const universeLive = computed(() => paramNum(defaults.value?.universe_size) || '—')
+
+/** 结果导出：从当前 result 取数（所见即所得），文件名带策略与日期，避免多次实验混淆 */
+function exportTradesCsv() {
+  const r = result.value
+  if (!r) return
+  downloadCsv(
+    `回测逐笔_${r.strategy}_${csvDateTag()}.csv`,
+    ['代码', '名称', '买入日', '卖出日', '买价', '卖价', '股数', '盈亏', '收益率%', '卖出原因'],
+    r.trades.map((t) => [
+      t.code, t.name, t.buy_date, t.sell_date, t.buy_price, t.sell_price,
+      t.shares, t.pnl, t.pnl_pct, t.reason,
+    ]),
+  )
+}
+function exportEquityCsv() {
+  const r = result.value
+  if (!r) return
+  downloadCsv(
+    `回测净值_${r.strategy}_${csvDateTag()}.csv`,
+    ['日期', '策略净值', '基准净值'],
+    r.equity_curve.map((e) => [e.date, e.equity, e.benchmark ?? '']),
+  )
+}
 
 /** 下拉落盘时被「折算」成布尔开关的项：回测键 → 把值折成开关的函数。
  *  目前只有打分层（后端 `apply.py` 把 ml / ml_blend 折成 `live_ml_scoring=True`），
@@ -917,6 +941,24 @@ function metricTone(v: number): string {
 
     <!-- 结果 -->
     <template v-if="result">
+      <div class="flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <h3 class="text-subheading">本次结果</h3>
+          <p class="mt-1 text-[12.5px] text-content-faint">
+            {{ result.strategy }} · {{ result.start_date }} ~ {{ result.end_date }}
+            · {{ result.metrics.trading_days }} 个交易日
+          </p>
+        </div>
+        <div class="flex items-center gap-2">
+          <button class="btn btn-outline btn-sm" :disabled="!result.trades.length" @click="exportTradesCsv">
+            <Download class="h-3.5 w-3.5" />导出逐笔
+          </button>
+          <button class="btn btn-outline btn-sm" :disabled="!result.equity_curve.length" @click="exportEquityCsv">
+            <Download class="h-3.5 w-3.5" />导出净值曲线
+          </button>
+        </div>
+      </div>
+
       <!-- 绩效指标卡 -->
       <div class="grid grid-cols-2 gap-4 md:grid-cols-4">
         <div class="glass-card p-4">

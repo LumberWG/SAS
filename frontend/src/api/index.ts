@@ -22,12 +22,25 @@ http.interceptors.request.use((config) => {
 // 命中且未过期时通过 axios adapter 短路返回，不再发起网络请求；
 // 仅缓存 GET，且 refresh=true 的主动刷新请求跳过缓存（保证拿到最新）。
 const _getCache = new Map<string, { ts: number; data: unknown }>()
-// TTL 必须 ≥ 页面轮询间隔（交易池 15s / 首页与建议 30s），否则轮询永远打不中缓存、
-// 每次都是真请求；但也不能太长，否则手动操作后看到的还是旧值（写操作会 clear）。
+// 20s 覆盖交易池 15s 轮询；首页/建议 30s 轮询会穿透缓存（有意为之：首页需要最新大盘），
+// 不能太长，否则手动操作后看到的还是旧值（写操作会 clear）。
+// 顶栏数据状态条用 refresh=true 完全绕过本缓存，避免自己读到 20s 前的「新鲜度」。
 const GET_CACHE_TTL = 20_000
 
 function _cacheKey(config: { url?: string; params?: unknown }): string {
   return (config.url ?? '') + '|' + JSON.stringify(config.params ?? {})
+}
+
+// ---- 200 + degraded：接口成功但给的是降级/旧数据，统一上报给顶栏状态条 ----
+// 原实现只处理 5xx/401，degraded=true 的 200 响应静默通过，页面把旧快照当实时展示。
+export interface DataDegradeEvent {
+  path: string
+  message?: string
+}
+const _degradeListeners = new Set<(event: DataDegradeEvent) => void>()
+export function onDataDegraded(fn: (event: DataDegradeEvent) => void): () => void {
+  _degradeListeners.add(fn)
+  return () => { _degradeListeners.delete(fn) }
 }
 
 http.interceptors.request.use((config) => {
@@ -51,6 +64,16 @@ http.interceptors.request.use((config) => {
 
 http.interceptors.response.use((response) => {
   const cfg = response.config
+  const body = response.data as { degraded?: boolean; message?: string } | undefined
+  if (body?.degraded === true) {
+    for (const fn of _degradeListeners) {
+      try {
+        fn({ path: cfg.url ?? '', message: body.message })
+      } catch {
+        /* 状态条监听器异常不能影响业务请求 */
+      }
+    }
+  }
   const method = (cfg.method ?? 'get').toLowerCase()
   // 写操作（切换模式/下单/撮合/重置）会让之前的 GET 快照全部过期：
   // 若不清缓存，紧随其后的 load() 会读回旧数据，页面看起来「切换没生效」。
@@ -159,8 +182,39 @@ export interface StockQuote {
   float_mv: number | null
 }
 
+export interface DataStatusPart {
+  rows: number
+  age_seconds: number | null
+  updated_at: string | null
+  stale: boolean
+}
+
+export interface DataStatus {
+  level: 'ok' | 'warn' | 'error'
+  degraded: boolean
+  stale: boolean
+  trading: boolean
+  server_time: string
+  message: string
+  ttl_seconds: number
+  snapshot: DataStatusPart
+  indices: DataStatusPart
+  refreshing: string[]
+  recent_failures: Record<string, number>
+  minute_export: {
+    available: boolean
+    latest_date: string | null
+    exported_at: string | null
+  }
+}
+
 export function getOverview(): Promise<MarketOverview> {
   return http.get('/market/overview').then((r) => r.data)
+}
+
+/** 顶栏数据状态条：refresh=true 绕过 20s GET 缓存，每次都是真实新鲜度 */
+export function getDataStatus(): Promise<DataStatus> {
+  return http.get('/market/data-status', { params: { refresh: true } }).then((r) => r.data)
 }
 
 export function getIndexKline(
@@ -1042,6 +1096,10 @@ export interface PaperSimAccount {
   equity_days: number
   as_of: string | null
   overrides: Record<string, number | string>
+  /** 判读口径：并行账本是参数敏感性沙盘，不是独立策略 */
+  role?: string
+  /** 由净值序列算出的最大回撤(%)，熊市里比绝对收益更有可比性 */
+  max_drawdown_pct?: number
 }
 
 export interface PaperSimOverview {
@@ -1049,6 +1107,8 @@ export interface PaperSimOverview {
   profiles: string
   accounts: PaperSimAccount[]
   skipped: string[]
+  /** 后端 ledger_interpretation()：role + 多行 note，前端必须展示，防止「谁赚得多」式误读 */
+  interpretation?: { role: string; note: string }
 }
 
 export function getPaperSim(): Promise<PaperSimOverview> {
@@ -1218,6 +1278,46 @@ export interface ScopeStats {
 /** 当前可交易范围规模（沪深主板+创业板，剔 ST/巨无霸），见后端 /api/scope/stats。 */
 export function getScopeStats(): Promise<ScopeStats> {
   return http.get('/scope/stats').then((r) => r.data)
+}
+
+// ==================== 运维审计 ====================
+
+export interface MonitorJob {
+  id: string
+  next_run_time: string | null
+}
+export interface MonitorStatus {
+  running: boolean
+  jobs: MonitorJob[]
+}
+export function getMonitorStatus(): Promise<MonitorStatus> {
+  return http.get('/monitor/status', { params: { refresh: true } }).then((r) => r.data)
+}
+
+export interface AccessRecord {
+  ts: string
+  ip: string
+  method: string
+  path: string
+  status: number
+  referer?: string
+  ua?: string
+  device?: { browser: string; os: string }
+  is_dev: boolean
+  is_api: boolean
+}
+export interface AccessLogResult {
+  total: number
+  unique_visitors: number | null
+  records: AccessRecord[]
+}
+export function getAccessLog(params: {
+  limit?: number
+  days?: number
+  exclude_dev?: boolean
+  unique?: boolean
+} = {}): Promise<AccessLogResult> {
+  return http.get('/access-log', { params: { refresh: true, ...params } }).then((r) => r.data)
 }
 
 export default http

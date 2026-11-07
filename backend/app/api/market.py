@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
+import re
 from datetime import datetime
 
 import pandas as pd
@@ -122,6 +124,65 @@ def _with_disclaimer(data: dict) -> dict:
 # ----------------------------------------------------------------------
 # 接口
 # ----------------------------------------------------------------------
+def _minute_export_status() -> dict:
+    """本地 1m 库导出进度（只读清单文件尾，不扫几千个 parquet）。
+
+    清单每行 ``code|YYYYMMDD``；只看末尾 64KB 里的最大日期，足以回答
+    「分时图是不是落后了一天」。读不到返回 available=False，绝不影响主接口。
+    """
+    try:
+        from app.data.minute import MINUTE1_DIR
+
+        path = MINUTE1_DIR / "_done_1m.txt"
+        if not path.is_file():
+            return {"available": False}
+        stat = path.stat()
+        with path.open("rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            size = fh.tell()
+            fh.seek(max(0, size - 65536))
+            chunk = fh.read().decode("utf-8", "ignore")
+        dates = re.findall(r"\|(\d{8})\s*$", chunk, flags=re.MULTILINE)
+        return {
+            "available": True,
+            "latest_date": max(dates) if dates else None,
+            "exported_at": datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M:%S"),
+        }
+    except Exception as exc:  # noqa: BLE001 - 状态查询失败不能拖垮页面
+        logger.debug("分钟库导出状态读取失败: %s", exc)
+        return {"available": False}
+
+
+@router.get("/data-status")
+def market_data_status() -> dict:
+    """全局数据新鲜度（顶栏状态条用）：快照/指数有多旧、是否在降级、分钟库导到哪天。
+
+    与 ``/overview`` 不同，这里**不触发任何刷新、不联网**，因此 30s 轮询很便宜。
+    ``degraded=true`` 的 200 响应也会由前端拦截器上报到这里的状态条，
+    避免「接口成功但给的是旧数据」这种静默降级没人提示。
+    """
+    s = snapshot_store.status()
+    trading = _is_trading_time()
+    no_data = s["snapshot"]["rows"] == 0 or s["indices"]["rows"] == 0
+    degraded = no_data or bool(s["recent_failures"])
+    stale = bool(trading and (s["snapshot"]["stale"] or s["indices"]["stale"]))
+    level = "error" if no_data else "warn" if (degraded or stale) else "ok"
+    return _with_disclaimer({
+        "level": level,
+        "degraded": degraded,
+        "stale": stale,
+        "trading": trading,
+        "server_time": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "message": (
+            "行情快照不可用，页面可能显示旧数据或缺失" if no_data else
+            "行情刷新失败或数据已过期，页面可能显示旧数据" if (degraded or stale) else
+            "行情数据正常"
+        ),
+        **s,
+        "minute_export": _minute_export_status(),
+    })
+
+
 @router.get("/overview")
 async def market_overview() -> dict:
     """大盘概览：主要指数 + 涨跌家数 + 成交额 + 市场温度。
@@ -241,7 +302,12 @@ async def market_overview() -> dict:
     degraded = (not snapshot_usable) or (indices_df is None or indices_df.empty)
     return _with_disclaimer({
         "degraded": degraded,
-        "updated_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        # SWR 会把旧快照立即返回给页面；写 now() 会让「数据更新于」变成请求时刻，
+        # 把几分钟前（甚至上一交易日）的行情伪装成实时。改用快照真实落库时间。
+        "updated_at": (
+            snapshot_store.status()["snapshot"]["updated_at"]
+            or datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        ),
         "trading": _is_trading_time(),
         "indices": indices,
         "breadth": {

@@ -6,6 +6,7 @@ import { computed, ref } from 'vue'
 import { ArrowDown, ArrowUp, Download, Star } from 'lucide-vue-next'
 
 import type { ScanHit } from '../api'
+import { csvDateTag, downloadCsv } from '../lib/csv'
 
 const props = defineProps<{
   hits: ScanHit[]
@@ -167,13 +168,7 @@ function exportCsv() {
     r.targetPrice?.toFixed(2) ?? '',
     r.reasons.join('；'),
   ])
-  const csv = '\uFEFF' + [header, ...lines].map((r) => r.join(',')).join('\n')
-  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' })
-  const a = document.createElement('a')
-  a.href = URL.createObjectURL(blob)
-  a.download = `选股命中_${new Date().toISOString().slice(0, 10)}.csv`
-  a.click()
-  URL.revokeObjectURL(a.href)
+  downloadCsv(`选股命中_${csvDateTag()}.csv`, header, lines)
 }
 </script>
 
@@ -222,7 +217,7 @@ function exportCsv() {
             </th>
             <th
               class="cursor-pointer px-4 py-2.5 text-right font-medium hover:text-content"
-              title="当前实时价（列表会自动刷新）；单元格悬停可看信号触发价"
+              title="最近一次可用报价：盘中为实时快照，休市或数据源降级时可能回退到命中时记录价；以顶栏数据状态条为准。单元格悬停可看信号触发价"
               @click="toggleSort('price')"
             >
               最新价

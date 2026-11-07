@@ -33,6 +33,8 @@ const props = defineProps<{
   kline: number[][] // [open, close, low, high]
   volumes: number[]
   height?: string
+  /** 上证指数日线（dates/closes），按日期对齐后画「相对强弱」副图；不传则不显示 */
+  benchmark?: { dates: string[]; closes: (number | null)[] } | null
 }>()
 
 // MA 计算（与后端一致：简单算术平均）
@@ -50,6 +52,27 @@ const ma5 = computed(() => ma(closes.value, 5))
 const ma10 = computed(() => ma(closes.value, 10))
 const ma20 = computed(() => ma(closes.value, 20))
 
+/** 基准按日期对齐（两边 date 可能带时间后缀，统一取前 10 位），只比较交易日 */
+const benchmarkPct = computed(() => {
+  const b = props.benchmark
+  if (!b?.dates?.length) return null
+  const byDate = new Map<string, number>()
+  b.dates.forEach((d, i) => {
+    const v = b.closes[i]
+    if (v != null && v > 0) byDate.set(String(d).slice(0, 10), v)
+  })
+  const aligned = props.dates.map((d) => byDate.get(String(d).slice(0, 10)) ?? null)
+  const base = aligned.find((v) => v != null)
+  if (!base) return null
+  return aligned.map((v) => (v == null ? null : +(((v / base) - 1) * 100).toFixed(2)))
+})
+const stockPct = computed(() => {
+  const base = closes.value.find((v) => v > 0)
+  if (!base) return []
+  return closes.value.map((v) => +(((v / base) - 1) * 100).toFixed(2))
+})
+const hasBenchmark = computed(() => benchmarkPct.value !== null)
+
 const option = computed(() => {
   // 每次重算都读当前主题：切主题 → 图表跟着换色（依赖在 chartTheme 内部登记）
   const c = chartTheme()
@@ -66,7 +89,10 @@ const option = computed(() => {
     ...tooltipStyle(c),
   },
   legend: {
-    data: ['MA5', 'MA10', 'MA20'],
+    data: [
+      'MA5', 'MA10', 'MA20',
+      ...(hasBenchmark.value ? ['个股累计%', '上证累计%'] : []),
+    ],
     textStyle: { color: c.textMuted, fontSize: 12 },
     top: 0,
     icon: 'roundRect',
@@ -74,8 +100,9 @@ const option = computed(() => {
     itemHeight: 3,
   },
   grid: [
-    { left: 52, right: 16, top: 28, height: '58%' },
-    { left: 52, right: 16, top: '74%', height: '16%' },
+    { left: 52, right: 16, top: 28, height: hasBenchmark.value ? '46%' : '58%' },
+    { left: 52, right: 16, top: hasBenchmark.value ? '60%' : '74%', height: '14%' },
+    ...(hasBenchmark.value ? [{ left: 52, right: 16, top: '80%', height: '14%' }] : []),
   ],
   xAxis: [
     {
@@ -93,6 +120,14 @@ const option = computed(() => {
       axisLine: { lineStyle: { color: c.axisLine } },
       boundaryGap: true,
     },
+    ...(hasBenchmark.value ? [{
+      type: 'category',
+      gridIndex: 2,
+      data: props.dates,
+      axisLabel: { show: false },
+      axisLine: { lineStyle: { color: c.axisLine } },
+      boundaryGap: true,
+    }] : []),
   ],
   yAxis: [
     {
@@ -106,9 +141,15 @@ const option = computed(() => {
       axisLabel: label,
       splitLine: { show: false },
     },
+    ...(hasBenchmark.value ? [{
+      scale: true,
+      gridIndex: 2,
+      axisLabel: { color: c.textFaint, fontSize: 11, formatter: '{value}%' },
+      splitLine: { lineStyle: { color: c.splitLine, type: 'dashed' } },
+    }] : []),
   ],
   dataZoom: [
-    { type: 'inside', xAxisIndex: [0, 1], start: 60, end: 100 },
+    { type: 'inside', xAxisIndex: hasBenchmark.value ? [0, 1, 2] : [0, 1], start: 60, end: 100 },
   ],
   series: [
     {
@@ -158,6 +199,29 @@ const option = computed(() => {
         },
       })),
     },
+    // 相对强弱：两条线都归一到「窗口首日 = 0%」，避免把指数点位和个股价格放在同一轴上误读
+    ...(hasBenchmark.value ? [
+      {
+        name: '个股累计%',
+        type: 'line',
+        xAxisIndex: 2,
+        yAxisIndex: 2,
+        data: stockPct.value,
+        smooth: true,
+        symbol: 'none',
+        lineStyle: { width: 1.5, color: c.primaryLight },
+      },
+      {
+        name: '上证累计%',
+        type: 'line',
+        xAxisIndex: 2,
+        yAxisIndex: 2,
+        data: benchmarkPct.value,
+        smooth: true,
+        symbol: 'none',
+        lineStyle: { width: 1.5, color: c.accent, type: 'dashed' },
+      },
+    ] : []),
   ],
   }
 })

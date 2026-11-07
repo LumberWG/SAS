@@ -8,6 +8,7 @@ import { useRoute, useRouter } from 'vue-router'
 import {
   ArrowDownCircle,
   ArrowUpCircle,
+  Download,
   RefreshCw,
   RotateCcw,
   Wallet,
@@ -16,6 +17,7 @@ import {
 import VChart from 'vue-echarts'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 import { chartTheme, tooltipStyle } from '../lib/chartTheme'
+import { csvDateTag, downloadCsv } from '../lib/csv'
 import { use } from 'echarts/core'
 import { CanvasRenderer } from 'echarts/renderers'
 import { LineChart } from 'echarts/charts'
@@ -111,6 +113,10 @@ const simAccounts = ref<PaperSimAccount[]>([])
 const simEnabled = ref(false)
 const simSkipped = ref<string[]>([])
 const simSeries = ref<Record<string, Array<{ date: string; total_asset: number }>>>({})
+// 后端判读口径：同一 alpha 的参数敏感性沙盘，不是独立策略（BACKTEST_LOG #113）
+const simInterpretation = ref<{ role: string; note: string } | null>(null)
+// 默认按「最大回撤小→大」排：熊市里绝对收益都为负，谁扛跌才有可比性
+const simSort = ref<'drawdown' | 'return'>('drawdown')
 const resetting = ref(false)
 const ticking = ref(false)
 const switching = ref(false)
@@ -160,6 +166,7 @@ async function loadSim() {
     simAccounts.value = overview.accounts
     simEnabled.value = overview.enabled
     simSkipped.value = overview.skipped
+    simInterpretation.value = overview.interpretation ?? null
     const filtered: Record<string, Array<{ date: string; total_asset: number }>> = {}
     for (const [tag, rows] of Object.entries(series.series)) {
       filtered[tag] = (rows as Array<{ date: string; total_asset: number }>).filter(
@@ -467,6 +474,30 @@ function simParamText(a: PaperSimAccount): string {
 function pctTone(pct: number): string {
   return pct > 0 ? 'text-up' : pct < 0 ? 'text-down' : 'text-content'
 }
+
+/** 导出当前页面已加载的流水（不是重新查库，所见即所得） */
+function exportTradesCsv() {
+  downloadCsv(
+    `模拟盘流水_${csvDateTag()}.csv`,
+    ['时间', '方向', '代码', '名称', '成交价', '股数', '金额', '费用', '原因', '交易日'],
+    trades.value.map((t) => [
+      (t.created_at || t.trade_date).slice(0, 19),
+      t.side === 'buy' ? '买入' : '卖出',
+      t.code, t.name, t.price, t.shares, t.amount, t.fee, t.reason, t.trade_date,
+    ]),
+  )
+}
+
+const simNoteLines = computed(() =>
+  (simInterpretation.value?.note ?? '').split('\n').filter(Boolean)
+)
+/** 默认回撤优先；缺回撤的账本（老接口/无净值）排最后，不假装它是 0 回撤 */
+const sortedSimAccounts = computed(() => {
+  const rows = [...simAccounts.value]
+  if (simSort.value === 'return') return rows.sort((a, b) => b.return_pct - a.return_pct)
+  const dd = (v: number | undefined) => v ?? 1e9
+  return rows.sort((a, b) => dd(a.max_drawdown_pct) - dd(b.max_drawdown_pct))
+})
 
 const liveStatusText = computed(() => {
   if (!live.value) return '实时撮合状态获取中'
@@ -1085,9 +1116,14 @@ onUnmounted(() => {
 
     <!-- 交易流水 -->
     <div v-if="tab === 'account'" class="glass-card p-5">
-      <div class="mb-3 flex items-center justify-between">
+      <div class="mb-3 flex items-center justify-between gap-2">
         <h3 class="text-subheading">交易流水</h3>
-        <span class="text-[12.5px] text-content-faint">最近 {{ trades.length }} 笔</span>
+        <div class="flex items-center gap-2">
+          <span class="text-[12.5px] text-content-faint">最近 {{ trades.length }} 笔</span>
+          <button class="btn btn-outline btn-sm" :disabled="!trades.length" @click="exportTradesCsv">
+            <Download class="h-3.5 w-3.5" />导出 CSV
+          </button>
+        </div>
       </div>
       <div v-if="trades.length > 0" class="max-h-[400px] overflow-y-auto">
         <table class="w-full text-left text-[13.5px]">
@@ -1151,13 +1187,45 @@ onUnmounted(() => {
         <div>
           <h3 class="text-subheading">并行账本对比</h3>
           <p class="mt-1 text-[12.5px] text-content-faint">
-            同一份信号、不同处置参数各自撮合记账；曲线为累计收益率（消除本金差异）
+            同一份信号、不同处置参数各自撮合记账；曲线为累计收益率（消除本金差异）；这些账本不是独立策略
           </p>
         </div>
-        <span class="text-[12.5px] text-content-faint">
-          {{ simEnabled ? `${simAccounts.length} 个账本` : '未启用（PAPER_SIM_ENABLED）' }}
-        </span>
+        <div class="flex flex-wrap items-center gap-2">
+          <div class="seg" role="group" aria-label="并行账本排序">
+            <button
+              class="seg-item"
+              :class="simSort === 'drawdown' ? 'seg-item-active' : ''"
+              title="熊市绝对收益都为负，按最大回撤小→大排，看谁扛跌"
+              @click="simSort = 'drawdown'"
+            >回撤优先</button>
+            <button
+              class="seg-item"
+              :class="simSort === 'return' ? 'seg-item-active' : ''"
+              title="按累计收益降序；注意这不是优劣判据"
+              @click="simSort = 'return'"
+            >收益排序</button>
+          </div>
+          <span class="text-[12.5px] text-content-faint">
+            {{ simEnabled ? `${simAccounts.length} 个账本` : '未启用（PAPER_SIM_ENABLED）' }}
+          </span>
+        </div>
       </div>
+
+      <!-- 判读口径：不写清楚，9 条曲线会被误读成「哪个策略赚得多」（#113） -->
+      <details class="mb-3 rounded-lg border border-primary/30 bg-primary/[0.06] px-3 py-2 text-[12.5px]">
+        <summary class="cursor-pointer font-medium text-primary-light">
+          判读口径 · {{ simInterpretation?.role ?? '参数敏感性对照（同 alpha，不同处置参数），非独立策略' }}
+        </summary>
+        <ul class="mt-2 list-disc space-y-1 pl-5 leading-relaxed text-content-muted">
+          <li v-for="line in simNoteLines" :key="line">{{ line }}</li>
+          <li v-if="!simNoteLines.length">
+            熊市里绝对收益都负，比不出优劣，看相对最大回撤；单窗口样本太小不下结论；主曲线为真实盘。
+          </li>
+        </ul>
+        <p class="mt-2 text-content-faint">
+          当前排序：{{ simSort === 'drawdown' ? '最大回撤小→大（推荐）' : '累计收益降序（仅看结果，不代表优劣）' }}
+        </p>
+      </details>
 
       <div v-if="simAccounts.length > 0" class="overflow-x-auto">
         <table class="w-full text-left text-[13.5px]">
@@ -1166,17 +1234,21 @@ onUnmounted(() => {
               <th class="px-3 py-2 font-medium">账本</th>
               <th class="px-3 py-2 text-right font-medium">净值</th>
               <th class="px-3 py-2 text-right font-medium">收益</th>
+              <th class="px-3 py-2 text-right font-medium" title="由净值序列算出的最大回撤(%)；熊市里比绝对收益更有可比性">最大回撤</th>
               <th class="px-3 py-2 text-right font-medium">持仓</th>
               <th class="px-3 py-2 text-right font-medium">净值日</th>
               <th class="px-3 py-2 font-medium">参数</th>
             </tr>
           </thead>
           <tbody>
-            <tr v-for="a in simAccounts" :key="a.tag" class="border-b border-base-700/40">
+            <tr v-for="a in sortedSimAccounts" :key="a.tag" class="border-b border-base-700/40">
               <td class="px-3 py-2 font-medium text-content">{{ a.tag }}</td>
               <td class="px-3 py-2 text-right font-num">{{ a.total_asset.toFixed(0) }}</td>
               <td class="px-3 py-2 text-right font-num" :class="pctTone(a.return_pct)">
                 {{ (a.return_pct > 0 ? '+' : '') + a.return_pct.toFixed(2) }}%
+              </td>
+              <td class="px-3 py-2 text-right font-num text-warn">
+                {{ a.max_drawdown_pct == null ? '—' : `-${a.max_drawdown_pct.toFixed(2)}%` }}
               </td>
               <td class="px-3 py-2 text-right font-num">{{ a.positions }}</td>
               <td class="px-3 py-2 text-right font-num text-content-faint">{{ a.as_of || '--' }}</td>

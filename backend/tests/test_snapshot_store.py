@@ -296,3 +296,41 @@ class TestRefreshDedup:
         time.sleep(0.05)  # 确保刷新者已进入 fetcher
         with pytest.raises(TimeoutError):
             store.get_snapshot(wait_timeout=0.3)
+
+
+class TestStatus:
+    def test_status_is_readonly_and_reports_real_age(self, monkeypatch):
+        """顶栏状态条必须只读：不触发回源，且要报出快照真实落库时间而非请求时刻。
+
+        SWR 会静默返回旧数据；若 status() 也去拉数据或把 updated_at 写成 now()，
+        「数据更新于」就永远是刚刚，旧行情看起来跟实时一样。
+        """
+        calls = []
+
+        def fetcher():
+            calls.append(1)
+            return pd.DataFrame({"code": ["600519"]})
+
+        monkeypatch.setattr(
+            "app.data.snapshot_store.get_data_source",
+            lambda: type("S", (), {"get_realtime_snapshot": staticmethod(fetcher)})(),
+        )
+        store = SnapshotStore(ttl=0.2)
+
+        cold = store.status()
+        assert cold["snapshot"]["rows"] == 0
+        assert cold["snapshot"]["stale"] is True
+        assert cold["snapshot"]["updated_at"] is None
+        assert calls == []
+
+        store.get_snapshot()
+        fresh = store.status()
+        assert fresh["snapshot"]["rows"] == 1
+        assert fresh["snapshot"]["stale"] is False
+        assert fresh["snapshot"]["updated_at"]
+
+        time.sleep(0.25)
+        old = store.status()
+        assert old["snapshot"]["stale"] is True
+        assert old["snapshot"]["age_seconds"] >= 0.2
+        assert len(calls) == 1  # status() 自身从不回源

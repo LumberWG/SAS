@@ -67,6 +67,13 @@ const routes = [
         redirect: (to: RouteLocation) => ({ path: '/paper', query: { ...to.query, tab: 'pool' } }),
       },
       {
+        // 运维审计：只读展示调度任务、数据新鲜度、访客访问记录
+        path: 'ops',
+        name: 'ops',
+        component: () => import('../views/Ops.vue'),
+        meta: { title: '运维审计', icon: 'Server' },
+      },
+      {
         // 系统设置：只读总览「当前生效值 + 来源 + 是否要重启」，不做写操作
         path: 'settings',
         name: 'settings',

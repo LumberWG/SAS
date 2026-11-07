@@ -9,6 +9,7 @@ import { ArrowLeft, CheckCircle2, AlertTriangle, XCircle, Sparkles, Star } from 
 import {
   addWatch,
   analyzeStock,
+  getIndexKline,
   getPaperTrades,
   getStockIntraday,
   getStockKline,
@@ -48,6 +49,12 @@ function goBack() {
 const quote = ref<StockQuote | null>(null)
 const kline = ref<{ dates: string[]; kline: number[][]; volumes: number[] } | null>(null)
 const klineError = ref(false)
+// 日K区间与基准：原来写死 120 天、也没有任何基准叠加，无法回答「跑赢大盘没有」
+const klineDays = ref(120)
+const klineRanges = [60, 120, 250] as const
+const showBenchmark = ref(true)
+const benchmark = ref<{ dates: string[]; closes: (number | null)[] } | null>(null)
+const benchmarkError = ref(false)
 const intraday = ref<IntradayData | null>(null)
 const intradayError = ref(false)
 const chartTab = ref<'intraday' | 'kline'>('intraday')
@@ -97,11 +104,28 @@ let pollTimer: number | undefined  // 分时轮询定时器
 async function loadKline() {
   klineError.value = false
   try {
-    const data = await getStockKline(code.value, 120)
+    const data = await getStockKline(code.value, klineDays.value)
     kline.value = { dates: data.dates, kline: data.kline, volumes: data.volumes }
+    await loadBenchmark()
   } catch {
     // 数据源降级 / 超时：标记为错误，模板展示统一降级卡片（避免永久 loading）
     klineError.value = true
+  }
+}
+
+/** 上证指数基准：多取一些天数以便按日期对齐（个股可能停牌，交易日不完全一致） */
+async function loadBenchmark() {
+  benchmarkError.value = false
+  if (!showBenchmark.value) {
+    benchmark.value = null
+    return
+  }
+  try {
+    const d = await getIndexKline('sh000001', Math.max(klineDays.value, 250))
+    benchmark.value = { dates: d.dates, closes: d.closes }
+  } catch {
+    benchmark.value = null
+    benchmarkError.value = true
   }
 }
 
@@ -225,6 +249,9 @@ onUnmounted(() => {
 })
 
 // 同组件内切换股票（路由参数变化）时重新加载全部数据
+watch(klineDays, () => { void loadKline() })
+watch(showBenchmark, () => { void loadBenchmark() })
+
 watch(code, async () => {
   watchMsg.value = ''
   await Promise.all([
@@ -360,9 +387,25 @@ function statusColor(status: string) {
               {{ tab.label }}
             </button>
           </div>
-          <span class="text-[12.5px] text-content-faint">
-            {{ chartTab === 'intraday' ? intradayHint : 'MA5 天蓝 · MA10 黄 · MA20 紫' }}
-          </span>
+          <div v-if="chartTab === 'kline'" class="flex flex-wrap items-center gap-2">
+            <div class="seg !p-0.5" role="group" aria-label="日K区间">
+              <button
+                v-for="n in klineRanges"
+                :key="n"
+                class="seg-item px-2 py-1"
+                :class="klineDays === n ? 'seg-item-active' : ''"
+                @click="klineDays = n"
+              >{{ n }}日</button>
+            </div>
+            <button
+              class="btn btn-outline btn-xs"
+              :class="showBenchmark ? '!border-primary/50 !text-primary-light' : ''"
+              title="下方副图把个股与上证指数都归一到窗口首日 = 0%，看相对强弱"
+              @click="showBenchmark = !showBenchmark"
+            >{{ showBenchmark ? '基准：上证' : '基准：关' }}</button>
+            <span v-if="benchmarkError" class="text-[12px] text-warn">基准数据暂不可用</span>
+          </div>
+          <span v-else class="text-[12.5px] text-content-faint">{{ intradayHint }}</span>
           <span
             v-if="chartTab === 'intraday' && tradeMarkers.length"
             class="flex items-center gap-2 text-[12px]"
@@ -418,7 +461,8 @@ function statusColor(status: string) {
             :dates="kline.dates"
             :kline="kline.kline"
             :volumes="kline.volumes"
-            height="440px"
+            :benchmark="benchmark"
+            :height="showBenchmark && benchmark ? '520px' : '440px'"
           />
           <div
             v-else-if="klineError"
