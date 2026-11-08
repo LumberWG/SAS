@@ -7381,3 +7381,35 @@ True（关掉后 `t_tick` 仍返回空）；`TestRotation` 新增 `test_rotation
   改「信号与自选」、Ops 页标题改「运行监控」并套用 page-hd/page-desc。
 - 验证：npm run build（vue-tsc + vite）通过，2448 模块；dist/ 被 gitignore，本地已重建，
   浏览器刷新即可见（前端为静态站，无需重启服务）。
+
+
+#119 · 2026-11-08 · 修复「明日关注」同股多策略重复占名额
+- 现象：用户反馈明日关注里有重复股票。实测 `focus_2026-11-06` 批次 10 条只有
+  4 只不同票（002270 华明装备 / 603706 东方环宇 / 002697 红旗连锁 各 3 条，
+  600941 中国移动 1 条），`/api/advisory/summary` 的 focus_count 也虚高为 10；
+  历史 8 个批次共 20 组 (batch,code) 重复，属长期存在的老 bug，非 #118 改版引入。
+- 根因：全市场扫描命中是「策略 × 股票」粒度（last_scan.json 558 条命中 / 498 只票，
+  48 只票命中多策略），且多策略命中的技术面评分相同（多为 3.0）；
+  `Recommender.post_market_focus` 直接对 hits 按 score 排序取 TopN，未按 code 去重，
+  于是同一只票的海龟突破 / 均线放量 / 平台突破三条记录一起挤进 Top10。
+- 修复（生成层 `analysis/recommender.py`）：
+  - 新增模块级 `dedupe_focus_hits()`：按 code 分组，代表记录取最高分那条
+    （price / stop_loss / target_price 沿用它），合并命中的策略名；多策略时生成
+    「N 个策略共振（A、B、C）；主因：xxx」理由并标 `_signal_count`，不丢信号强度。
+  - `post_market_focus` 先去重再取 TopN；主排序仍是评分，同分时共振票优先
+    （`_signal_count` 作次要 key）。保证 TopN 是 N 只**不同**股票。
+- 修复（读取层，兼容历史批次）：
+  - `cache.list_recommendations` 增加关键字参数 `dedupe_by_code`（默认 False，
+    不改变 buy/sell/premarket 既有语义），按 code 保留排序后第一条。
+  - `/api/advisory/focus`、`/api/advisory/summary`、`scheduler.pre_market` 三处
+    focus 读取启用，历史批次也不再重复且角标计数与实际条数一致。
+- 数据：用修复后逻辑基于 `last_scan.json`(11-06 15:40) 重算 `focus_2026-11-06`
+  为 10 只不同票（含 3 只共振票，并补齐 600505/600650/300244/002164/600585/600501）；
+  原 10 条备份于 `data/logs/focus_backup_20261106.json`（`/data/` 已 gitignore），
+  `for_date=2026-11-09` 不变。
+- 测试：`tests/test_advisory.py` 新增 `TestFocusDedupe` 6 例（聚合 / 最高分保留 /
+  TopN 互异 / 同分共振优先 / 历史批次读取去重 / 接口与角标）；ruff 全过；
+  全量 pytest **422 例全绿**。
+- 部署：`Start-ScheduledTask -TaskName 'SASRestart'` 重启成功（22:38:38 双 health OK），
+  线上 `/api/advisory/focus` 已验证 10 条 / 10 只不同 / 无重复、focus_count=10，
+  调度器 running、明早 09:20 pre_market 排程正常。

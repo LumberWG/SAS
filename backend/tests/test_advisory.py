@@ -220,3 +220,99 @@ class TestAdvisoryApi:
                 if is_trading_day(expected):
                     break
             assert r["for_date"] == expected.strftime("%Y-%m-%d")
+
+
+# ----------------------------------------------------------------------
+# #119 明日关注去重：同股多策略命中不能占掉多个 TopN 名额
+# ----------------------------------------------------------------------
+class TestFocusDedupe:
+    @staticmethod
+    def hit(code: str, strategy: str, score: float = 3.0, name: str = "测试股") -> dict:
+        return {
+            "code": code, "name": name, "strategy": strategy,
+            "reason": f"{strategy} 触发", "price": 10.0,
+            "stop_loss": 9.0, "target_price": 11.5,
+            "extra": {"score": score},
+        }
+
+    def test_dedupe_merges_strategies(self):
+        from app.analysis.recommender import dedupe_focus_hits
+
+        hits = [
+            self.hit("002270", "海龟突破"),
+            self.hit("002270", "均线放量"),
+            self.hit("002270", "平台突破"),
+            self.hit("600941", "MACD金叉", score=3.5),
+        ]
+        out = dedupe_focus_hits(hits)
+        assert [h["code"] for h in out] == ["002270", "600941"]
+        assert out[0]["_signal_count"] == 3
+        assert "3 个策略共振" in out[0]["_focus_reason"]
+        assert "海龟突破" in out[0]["_focus_reason"]
+        assert "_focus_reason" not in out[1]  # 单策略票不受影响
+
+    def test_dedupe_keeps_highest_score(self):
+        from app.analysis.recommender import dedupe_focus_hits
+
+        out = dedupe_focus_hits([
+            self.hit("000001", "策略A", score=1.0),
+            self.hit("000001", "策略B", score=5.0),
+        ])
+        assert len(out) == 1
+        assert out[0]["extra"]["score"] == 5.0
+        assert out[0]["strategy"] == "策略B"
+
+    def test_post_market_focus_topn_are_distinct(self):
+        """TopN 必须是 N 只不同的股票（旧逻辑会退化成 1 只票占 3 个名额）。"""
+        engine = Recommender()
+        hits = [self.hit("002270", s) for s in ("海龟突破", "均线放量", "平台突破")]
+        for i, code in enumerate(("600001", "600002", "600003", "600004")):
+            hits.append(self.hit(code, "MACD金叉", score=2.0 + i * 0.1))
+        focus = asyncio.run(engine.post_market_focus(hits, 5))
+        codes = [r.code for r in focus]
+        assert len(codes) == 5 and len(set(codes)) == 5
+        assert "002270" in codes
+        assert any("策略共振" in r.reason for r in focus if r.code == "002270")
+
+    def test_resonance_wins_same_score_tie(self):
+        """评分相同时，多策略共振的票排在单策略票前面。"""
+        engine = Recommender()
+        hits = [self.hit("600001", "单策略")]
+        hits += [self.hit("002270", s) for s in ("海龟突破", "均线放量", "平台突破")]
+        focus = asyncio.run(engine.post_market_focus(hits, 2))
+        assert [r.code for r in focus] == ["002270", "600001"]
+
+    def test_store_dedupe_for_legacy_batch(self, tmp_path):
+        """历史批次已存了重复行，读取层按 code 兜底去重（旧行为默认保留）。"""
+        db = Database(tmp_path / "test.db")
+        db.save_recommendations([
+            {"code": "002270", "name": "华明装备", "action": "focus",
+             "score": 3.0, "reason": "海龟突破", "price": 19.82},
+            {"code": "002270", "name": "华明装备", "action": "focus",
+             "score": 3.0, "reason": "均线放量", "price": 19.82},
+            {"code": "600941", "name": "中国移动", "action": "focus",
+             "score": 3.5, "reason": "MACD金叉", "price": 103.49},
+        ], "focus_2026-11-06")
+        assert len(db.list_recommendations("focus", "focus")) == 3
+        items = db.list_recommendations("focus", "focus", dedupe_by_code=True)
+        assert len(items) == 2
+        assert [i["code"] for i in items] == ["600941", "002270"]
+
+    def test_api_focus_dedupes_legacy_batch(self, tmp_path, monkeypatch):
+        """接口列表与 summary 角标都不再重复。"""
+        from fastapi.testclient import TestClient
+
+        from app.main import app
+
+        db = Database(tmp_path / "test.db")
+        db.save_recommendations([
+            {"code": "002270", "action": "focus", "score": 3.0, "reason": "A"},
+            {"code": "002270", "action": "focus", "score": 3.0, "reason": "B"},
+            {"code": "600941", "action": "focus", "score": 3.5, "reason": "C"},
+        ], f"focus_{datetime.now().strftime('%Y-%m-%d')}")
+        monkeypatch.setattr("app.api.advisory.db", db)
+
+        with TestClient(app) as client:
+            items = client.get("/api/advisory/focus").json()["items"]
+            assert [i["code"] for i in items] == ["600941", "002270"]
+            assert client.get("/api/advisory/summary").json()["focus_count"] == 2

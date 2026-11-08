@@ -45,7 +45,7 @@ def sell_recommendations() -> dict:
 @router.get("/focus")
 def focus_list() -> dict:
     """明日关注（盘后生成，含生成日期；附带当前行情）。"""
-    items = db.list_recommendations("focus", "focus")
+    items = db.list_recommendations("focus", "focus", dedupe_by_code=True)
     batch = db.latest_batch("focus")
     return with_disclaimer({
         "items": with_realtime(_with_detail(items)),
@@ -65,7 +65,7 @@ def advisory_summary() -> dict:
     buy = _latest_by_action(("intraday", "premarket"), "buy")
     sell = _sell_items()
     # 明日关注取最新批次即可（盘后生成、对应下一开盘日，本就不该按今日过滤）
-    focus = db.list_recommendations("focus", "focus")
+    focus = db.list_recommendations("focus", "focus", dedupe_by_code=True)
     return with_disclaimer({
         "buy_count": len(buy),
         "sell_count": len(sell),

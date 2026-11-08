@@ -1422,13 +1422,17 @@ class Database:
         return len(recommendations)
 
     def list_recommendations(
-        self, batch_prefix: str, action: str | None = None
+        self, batch_prefix: str, action: str | None = None,
+        *, dedupe_by_code: bool = False,
     ) -> list[dict[str, Any]]:
         """查询某类批次的最新一批建议（按评分排序）。
 
         Args:
             batch_prefix: 批次前缀，如 intraday / focus / premarket
             action: 可选过滤 buy / sell / hold / focus
+            dedupe_by_code: 同一 code 只保留排序后第一条。用于兼容历史
+                ``focus_`` 批次——生成逻辑修好前，同股多策略会存成多条记录
+                （见 #119），列表与角标计数都需按股票去重。
         """
         with self._lock, self._connect() as conn:
             # 取该前缀下最新的批次（批次名含日期，字符串最大即最新）
@@ -1450,7 +1454,18 @@ class Database:
                     "SELECT * FROM recommendations WHERE batch=?" + order,
                     (row["latest"],),
                 ).fetchall()
-        return [dict(r) for r in rows]
+        items = [dict(r) for r in rows]
+        if dedupe_by_code:
+            seen: set[str] = set()
+            unique: list[dict[str, Any]] = []
+            for item in items:
+                code = str(item.get("code") or "")
+                if code in seen:
+                    continue
+                seen.add(code)
+                unique.append(item)
+            return unique
+        return items
 
     def latest_batch(self, batch_prefix: str) -> str | None:
         """某类批次的最新批次名（含日期）。"""

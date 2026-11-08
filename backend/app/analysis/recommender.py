@@ -246,25 +246,34 @@ class Recommender:
     # 明日关注（盘后：全市场扫描命中 TopN）
     # ------------------------------------------------------------------
     async def post_market_focus(self, hits: list[dict], top_n: int) -> list[Recommendation]:
-        """从收盘扫描命中中挑选明日关注（按信号内评分排序取 TopN）。
+        """从收盘扫描命中中挑选明日关注（先按股票去重，再按信号内评分取 TopN）。
+
+        扫描命中是「策略 × 股票」粒度，同一只票可能同时触发多条策略且评分相同；
+        旧逻辑直接取 TopN，导致 10 个名额里可能只有 4 只票（2026-11-06 实例）。
+        现在先经 :func:`dedupe_focus_hits` 按 code 聚合，保证返回 N 只**不同**股票，
+        并把「多策略共振」信息合并进理由，不丢信号强度。
 
         Args:
             hits: 扫描命中列表（signal dict，extra.score 为技术面评分）
             top_n: 关注数量
         """
         scored = []
-        for hit in hits:
-            score = hit.get("extra", {}).get("score")
+        for hit in dedupe_focus_hits(hits):
+            score = (hit.get("extra") or {}).get("score")
             if isinstance(score, (int, float)):
-                scored.append((score, hit))
-        scored.sort(key=lambda x: x[0], reverse=True)
+                scored.append((float(score), hit))
+        # 主排序仍是评分；同分时命中策略更多（共振更强）的票优先
+        scored.sort(key=lambda x: (x[0], x[1].get("_signal_count", 1)), reverse=True)
 
         focus = []
         for score, hit in scored[:top_n]:
+            reason = hit.get("_focus_reason") or (
+                f"{hit.get('strategy', '')}：{hit.get('reason', '')}"
+            )
             focus.append(Recommendation(
                 code=hit["code"], name=hit.get("name", ""),
                 action="focus", score=float(score),
-                reason=f"{hit.get('strategy', '')}：{hit.get('reason', '')}",
+                reason=reason,
                 price=float(hit.get("price", 0)),
                 stop_loss=hit.get("stop_loss"),
                 target_price=hit.get("target_price"),
@@ -312,6 +321,55 @@ def _safe_snapshot():
         import pandas as pd
 
         return pd.DataFrame({"pct_change": []})
+
+
+def dedupe_focus_hits(hits: list[dict]) -> list[dict]:
+    """把「同一只票命中多条策略」的扫描结果聚合成一条，避免 TopN 名额被单票占满。
+
+    全市场扫描按「策略 × 股票」产出命中：一只票同时触发海龟突破 / 均线放量 /
+    平台突破时会有 3 条记录且评分相同，旧逻辑直接取 TopN 就会让 10 个名额
+    只剩 4 只票。这里按 code 分组：
+
+    - 代表记录取评分最高的一条（price / stop_loss / target_price 沿用它）；
+    - 多策略命中时把策略名汇总进 ``_focus_reason``，标注「N 个策略共振」，
+      不丢弃信号强度信息；
+    - ``_signal_count`` 供调用方在同分时把共振票排前面。
+
+    返回顺序沿用首次出现顺序，排序仍由调用方决定。
+    """
+    groups: dict[str, list[dict]] = {}
+    order: list[str] = []
+    for hit in hits:
+        code = str(hit.get("code") or "").strip()
+        if not code:
+            continue
+        if code not in groups:
+            groups[code] = []
+            order.append(code)
+        groups[code].append(hit)
+
+    def _score(h: dict) -> float:
+        s = (h.get("extra") or {}).get("score")
+        return float(s) if isinstance(s, (int, float)) else 0.0
+
+    out: list[dict] = []
+    for code in order:
+        group = groups[code]
+        best = max(group, key=_score)
+        merged = dict(best)
+        strategies: list[str] = []
+        for h in group:
+            s = str(h.get("strategy") or "").strip()
+            if s and s not in strategies:
+                strategies.append(s)
+        merged["_signal_count"] = len(strategies) or 1
+        if len(strategies) > 1:
+            primary = str(best.get("reason") or "").strip()
+            merged["_focus_reason"] = (
+                f"{len(strategies)} 个策略共振（{'、'.join(strategies)}）；主因：{primary}"
+            )
+        out.append(merged)
+    return out
 
 
 # 全局单例

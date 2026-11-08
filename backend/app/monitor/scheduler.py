@@ -406,7 +406,7 @@ class MarketScheduler:
             sells = sum(1 for r in recommendations if r.action == "sell")
 
             # 昨日关注列表（今日重点关注）
-            focus = db.list_recommendations("focus")
+            focus = db.list_recommendations("focus", dedupe_by_code=True)
             focus_note = (
                 f"昨日关注 {len(focus)} 只: "
                 + ", ".join(f"{f['name']}({f['code']})" for f in focus[:5])
