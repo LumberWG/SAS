@@ -652,7 +652,7 @@ onUnmounted(() => {
       </div>
     </div>
 
-    <!-- 页内分段切换：④ 交易池（判定与队列）/ ⑤ 持仓与成交（账户复盘），不再占两个菜单项 -->
+    <!-- 页内分段切换：判定与队列 / 持仓与成交（账户复盘），不再占两个菜单项 -->
     <div class="seg">
       <button
         type="button"
@@ -660,7 +660,7 @@ onUnmounted(() => {
         :class="tab === 'pool' ? 'seg-item-active' : ''"
         @click="switchTab('pool')"
       >
-        ④ 交易池 · 判定与队列
+        判定与队列
       </button>
       <button
         type="button"
@@ -668,7 +668,7 @@ onUnmounted(() => {
         :class="tab === 'account' ? 'seg-item-active' : ''"
         @click="switchTab('account')"
       >
-        ⑤ 持仓与成交 · 账户复盘
+        持仓与成交
       </button>
     </div>
 

@@ -48,6 +48,12 @@ export default {
         warn: token("warn"),
         accent: token("accent"),
       },
+      // 统一的圆角层级：容器 12 / 面板 10 / 控件 8。避免各页面各写一档 rounded-*
+      borderRadius: {
+        card: "12px",
+        panel: "10px",
+        control: "8px",
+      },
       fontFamily: {
         sans: [
           "Inter",

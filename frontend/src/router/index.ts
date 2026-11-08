@@ -1,13 +1,20 @@
 /**
- * 路由定义：按「自动交易五段式」组织页面（见 docs/sas_formulas.md §8）。
+ * 路由定义：按职能划分的信息架构（工作台 / 投研分析 / 交易执行 / 系统管理）。
  *
- *   ① 一选 · 股票池   /screening   全市场扫描 → 候选池
- *   ② 二选 · 自选股   /signals     池内打分排序 → topN 关注
- *   ③ 三选 · 交易队列 /advisory    详细分析 → topM 候选
- *   ④ 交易池 · 持仓   /paper       判定规则（模式/队列/候补）+ 账户、持仓、流水
- *                                  （同一页两个 tab；旧的 /paper-pool 会跳到这里）
+ * 业务内核仍是「自动交易五段式」（见 docs/sas_formulas.md §8），但菜单不再用
+ * ①②③ +「一选/二选/三选」这种内部流程口语，改为金融终端通行的职能命名：
  *
- * 概览与回测为辅助页，不属于流水线环节。
+ *   工作台      市场总览       /dashboard
+ *   投研分析    全市场选股     /screening   全市场扫描 → 候选池
+ *              信号与自选     /signals     池内打分排序 → topN 关注
+ *              决策建议       /advisory    详细分析 → topM 候选
+ *              策略回测       /backtest    参数与历史绩效验证（研究链路收口）
+ *   交易执行    模拟交易       /paper       判定规则 + 账户、持仓、流水（页内两 tab）
+ *   系统管理    运行监控       /ops
+ *              系统设置       /settings
+ *
+ * 注：后端 API、策略文档与账本里的「一选/二选/三选」是业务术语，不随菜单改名。
+ * meta.stage 保留五段式的阶段序号，供以后做流程可视化/引导使用（当前未消费）。
  */
 import { createRouter, createWebHistory, type RouteLocation } from 'vue-router'
 
@@ -21,13 +28,7 @@ const routes = [
         path: 'dashboard',
         name: 'dashboard',
         component: () => import('../views/Dashboard.vue'),
-        meta: { title: '大盘概览', icon: 'LayoutDashboard' },
-      },
-      {
-        path: 'screening',
-        name: 'screening',
-        component: () => import('../views/Screening.vue'),
-        meta: { title: '① 一选 · 股票池', stage: 1, icon: 'Filter' },
+        meta: { title: '市场总览', icon: 'LayoutDashboard' },
       },
       {
         path: 'stock/:code',
@@ -36,30 +37,35 @@ const routes = [
         meta: { title: '个股详情', icon: 'LineChart' },
       },
       {
-        path: 'backtest',
-        name: 'backtest',
-        component: () => import('../views/Backtest.vue'),
-        meta: { title: '回测中心', icon: 'History' },
+        path: 'screening',
+        name: 'screening',
+        component: () => import('../views/Screening.vue'),
+        meta: { title: '全市场选股', stage: 1, icon: 'ScanSearch' },
       },
       {
         path: 'signals',
         name: 'signals',
         component: () => import('../views/Signals.vue'),
-        meta: { title: '② 二选 · 自选股', stage: 2, icon: 'Bell' },
+        meta: { title: '信号与自选', stage: 2, icon: 'Radar' },
       },
       {
         path: 'advisory',
         name: 'advisory',
         component: () => import('../views/Advisory.vue'),
-        meta: { title: '③ 三选 · 交易队列', stage: 3, icon: 'Lightbulb' },
+        meta: { title: '决策建议', stage: 3, icon: 'Target' },
       },
       {
-        // ④ 交易池 · 持仓：同一个组件、同一份数据，页内用 tab 切换「判定与队列 / 账户复盘」。
-        // 拆成两个菜单项（④交易池 + ⑤持仓与成交）只是让人来回点，已合并。
+        path: 'backtest',
+        name: 'backtest',
+        component: () => import('../views/Backtest.vue'),
+        meta: { title: '策略回测', icon: 'FlaskConical' },
+      },
+      {
+        // 模拟交易：判定与队列 / 账户复盘是同一份数据的两种视角，页内用 tab 切换。
         path: 'paper',
         name: 'paper',
         component: () => import('../views/PaperTrading.vue'),
-        meta: { title: '④ 交易池 · 持仓', stage: 4, icon: 'Wallet' },
+        meta: { title: '模拟交易', stage: 4, icon: 'Wallet' },
       },
       {
         // 兼容旧书签与旧文档链接：/paper-pool 直接落到合并页的交易池 tab
@@ -67,18 +73,18 @@ const routes = [
         redirect: (to: RouteLocation) => ({ path: '/paper', query: { ...to.query, tab: 'pool' } }),
       },
       {
-        // 运维审计：只读展示调度任务、数据新鲜度、访客访问记录
+        // 运行监控：只读展示调度任务、数据新鲜度、访客访问记录
         path: 'ops',
         name: 'ops',
         component: () => import('../views/Ops.vue'),
-        meta: { title: '运维审计', icon: 'Server' },
+        meta: { title: '运行监控', icon: 'Server' },
       },
       {
-        // 系统设置：只读总览「当前生效值 + 来源 + 是否要重启」，不做写操作
+        // 系统设置：参数当前生效值 + 来源 + 是否要重启
         path: 'settings',
         name: 'settings',
         component: () => import('../views/Settings.vue'),
-        meta: { title: '系统设置', icon: 'Settings' },
+        meta: { title: '系统设置', icon: 'SlidersHorizontal' },
       },
     ],
   },
@@ -91,7 +97,7 @@ const router = createRouter({
 
 router.afterEach((to) => {
   const title = to.meta.title as string | undefined
-  document.title = title ? `${title} · SAS A股分析` : 'SAS A股分析'
+  document.title = title ? `${title} · SAS 智能投研终端` : 'SAS 智能投研终端'
   // 导航成功说明入口与懒加载 chunk 匹配，解除「已尝试重载」标记
   sessionStorage.removeItem('sas:chunk-reload')
 })

@@ -657,7 +657,7 @@ export function resetSettings(keys: string[] = []): Promise<SettingsOverview & {
   return http.post('/settings/reset', { keys }).then((r) => r.data)
 }
 
-/** 交易队列的大盘股过滤设置（「③ 三选 · 交易队列」页开关）。 */
+/** 交易队列的大盘股过滤设置（「决策建议」页开关）。 */
 export interface QueueFilter {
   exclude_large_cap: boolean
   large_cap_yi: number

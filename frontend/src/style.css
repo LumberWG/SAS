@@ -161,6 +161,14 @@
     text-rendering: optimizeLegibility;
   }
 
+  /* 标题短行更匀称：避免中文标题在窄卡片里留下孤字 */
+  h1,
+  h2,
+  h3,
+  h4 {
+    text-wrap: balance;
+  }
+
   /* 数字统一等宽 + 表格数字对齐，避免行情跳动时整行左右抖 */
   .font-num {
     @apply font-mono tabular-nums;
@@ -177,13 +185,13 @@
     outline-offset: 1px;
   }
 
-  /* 滚动条 */
+  /* 滚动条：比浏览器默认更细、更淡，不抢数据区的注意力 */
   ::-webkit-scrollbar {
-    width: 10px;
-    height: 10px;
+    width: 9px;
+    height: 9px;
   }
   ::-webkit-scrollbar-thumb {
-    @apply rounded-full bg-base-600;
+    @apply rounded-full bg-base-600/80;
     border: 2px solid transparent;
     background-clip: content-box;
   }
@@ -222,8 +230,9 @@
 
 @layer components {
   /* ---------- 表面 ---------- */
+  /* 圆角/边框/阴影走统一令牌，四套主题下层次一致 */
   .glass-card {
-    @apply rounded-xl border border-base-600/70 bg-base-800/80 backdrop-blur-md shadow-card;
+    @apply rounded-card border border-base-600/70 bg-base-800/80 backdrop-blur-md shadow-card;
     transition:
       border-color 0.2s ease,
       background-color 0.2s ease;
@@ -250,18 +259,49 @@
 
   /* 静态面板：表格 / 配置页这类不该有 hover 反馈的容器 */
   .panel {
-    @apply rounded-xl border border-base-600/70 bg-base-800/70;
+    @apply rounded-card border border-base-600/70 bg-base-800/70;
   }
+  /* 面板头部给一层极淡的底色，与内容区形成清晰的上下层次 */
   .panel-hd {
-    @apply flex flex-wrap items-center gap-2 border-b border-base-600/60 px-3.5 py-2.5;
+    @apply flex min-h-[44px] flex-wrap items-center gap-2 border-b border-base-600/60 bg-base-700/25 px-3.5 py-2.5;
   }
   .panel-title {
     @apply text-[14px] font-semibold tracking-wide text-content;
   }
 
+  /* ---------- 页面级排版 ---------- */
+  /* 统一页面头部：标题 + 说明 + 右侧操作区，避免每个页面各写一套间距 */
+  .page-hd {
+    @apply flex flex-wrap items-end justify-between gap-x-4 gap-y-2;
+  }
+  .page-title {
+    @apply text-heading font-semibold tracking-tight text-content;
+  }
+  .page-desc {
+    @apply mt-1 text-caption text-content-faint;
+  }
+  /* 卡片内分区标题：左侧主色竖条，形成稳定的视觉锚点 */
+  .section-hd {
+    @apply flex flex-wrap items-center gap-2 border-b border-base-600/60 px-3.5 py-2.5;
+  }
+  .section-title {
+    @apply relative pl-2.5 text-[14px] font-semibold tracking-wide text-content;
+  }
+  .section-title::before {
+    content: "";
+    @apply absolute left-0 top-1/2 h-3.5 w-[3px] -translate-y-1/2 rounded-full bg-primary/70;
+  }
+  /* 指标卡里的数值/标签：数值更醒目、标签更收敛 */
+  .metric-value {
+    @apply font-num text-[22px] font-semibold leading-tight tracking-tight text-content;
+  }
+  .metric-label {
+    @apply text-caption font-medium tracking-wide text-content-faint;
+  }
+
   /* ---------- 按钮 ---------- */
   .btn {
-    @apply inline-flex select-none items-center justify-center gap-1.5 whitespace-nowrap rounded-lg border
+    @apply inline-flex select-none items-center justify-center gap-1.5 whitespace-nowrap rounded-control border
       px-3 py-1.5 text-[13px] font-medium transition-colors duration-150
       disabled:cursor-not-allowed disabled:opacity-45;
   }
@@ -282,15 +322,15 @@
     @apply border-base-600 bg-base-700/60 text-content-muted hover:border-up/60 hover:text-up;
   }
   .btn-sm {
-    @apply rounded-md px-2.5 py-1 text-[12px];
+    @apply rounded-control px-2.5 py-1 text-[12px];
   }
   .btn-xs {
-    @apply rounded-md px-2 py-0.5 text-[12px];
+    @apply rounded-control px-2 py-0.5 text-[12px];
   }
 
   /* ---------- 状态胶囊 ---------- */
   .chip {
-    @apply inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11.5px] font-medium leading-normal;
+    @apply inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11.5px] font-medium leading-[1.45];
   }
   .chip-primary {
     @apply border-primary/45 bg-primary/[0.12] text-primary-light;
@@ -315,10 +355,10 @@
 
   /* ---------- 分段切换（页内 tab） ---------- */
   .seg {
-    @apply inline-flex flex-wrap items-center gap-1 rounded-lg border border-base-600/70 bg-base-800/60 p-1;
+    @apply inline-flex flex-wrap items-center gap-1 rounded-control border border-base-600/70 bg-base-800/60 p-1;
   }
   .seg-item {
-    @apply rounded-md px-3 py-1.5 text-[13px] font-medium text-content-muted transition-colors hover:text-content;
+    @apply rounded-[6px] px-3 py-1.5 text-[13px] font-medium text-content-muted transition-colors hover:text-content;
   }
   .seg-item-active {
     @apply bg-primary/[0.12] text-primary-light;
@@ -327,7 +367,7 @@
 
   /* ---------- 表单 ---------- */
   .field {
-    @apply h-8 rounded-lg border border-base-600 bg-base-900/70 px-2.5 text-[13.5px] text-content
+    @apply h-8 rounded-control border border-base-600 bg-base-900/70 px-2.5 text-[13.5px] text-content
       outline-none transition-colors placeholder:text-content-faint
       focus:border-primary/70 focus:bg-base-900;
   }
@@ -341,13 +381,14 @@
     @apply w-full overflow-x-auto;
   }
   .table-shell {
-    @apply overflow-auto rounded-xl border border-base-600/70 bg-base-800/60;
+    @apply overflow-auto rounded-card border border-base-600/70 bg-base-800/60 shadow-card;
   }
+  /* sticky 表头必须自带底边线，滚动时才不会与数据行糊在一起 */
   .table-head {
-    @apply sticky top-0 z-10 bg-base-700/90 px-3 py-2 text-left text-[12px] font-medium tracking-wider text-content-faint backdrop-blur;
+    @apply sticky top-0 z-10 border-b border-base-600/60 bg-base-700/95 px-3 py-2.5 text-left text-[12px] font-semibold tracking-wider text-content-faint backdrop-blur;
   }
   .table-cell {
-    @apply border-t border-base-600/40 px-3 py-2 text-[13.5px] text-content-muted;
+    @apply border-t border-base-600/40 px-3 py-2 align-middle text-[13.5px] leading-[1.55] text-content-muted;
   }
   .row-hover:hover {
     background-color: rgb(var(--c-base-700) / 0.72);
@@ -355,7 +396,7 @@
 
   /* 小标题（分组名、字段组名） */
   .eyebrow {
-    @apply text-[11px] font-semibold uppercase tracking-[0.12em] text-content-faint;
+    @apply text-[10.5px] font-semibold uppercase tracking-[0.16em] text-content-faint;
   }
 
   /* ---------- 动效 ---------- */
@@ -494,5 +535,17 @@
   .app-main {
     padding-left: max(12px, env(safe-area-inset-left)) !important;
     padding-right: max(12px, env(safe-area-inset-right)) !important;
+  }
+}
+
+/* 尊重系统「减少动态效果」：专业终端以信息密度为先，不做无谓的过渡 */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
   }
 }

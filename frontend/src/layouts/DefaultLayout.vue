@@ -1,24 +1,26 @@
 <script setup lang="ts">
 /**
- * 默认布局：左侧导航 + 顶栏（市场状态灯 + 时钟 + 数据口径）。
+ * 默认布局：左侧职能导航 + 顶栏（面包屑 + 市场状态灯 + 时钟 + 数据口径）。
  *
- * 视觉约定：侧栏/顶栏都用半透明深色 + 1px 边框，不用发光阴影；导航激活态由
- * 「左侧 2px 色条 + 略亮的底色 + 主色文字」三重提示，hover 只提亮文字。
+ * 视觉约定：侧栏/顶栏用半透明底色 + 1px 边框，不用发光阴影；导航激活态由
+ * 「左侧 3px 色条 + 略亮的底色 + 主色图标 + 右侧圆点」四重提示，hover 只提亮文字。
+ * 分组标题带延伸细线与序号，形成清晰的层级节奏。
  */
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { DEGRADE_NOTICE_MS, POLL } from '../lib/polling'
 import { useRoute, useRouter } from 'vue-router'
 import {
   Activity,
-  Bell,
-  Filter,
-  History,
+  ChevronRight,
+  FlaskConical,
   LayoutDashboard,
-  Lightbulb,
   Menu,
+  Radar,
+  ScanSearch,
   Server,
-  Settings,
   ShieldAlert,
+  SlidersHorizontal,
+  Target,
   Wallet,
 } from 'lucide-vue-next'
 
@@ -54,29 +56,35 @@ function onKeydown(e: KeyboardEvent) {
   }
 }
 
-// 按「自动交易五段式」组织导航（docs/sas_formulas.md §8）：
-// 一选池 → 二选自选 → 三选队列 → 交易池/持仓（同页两 tab），概览/回测为辅助。
+// 导航按职能划分（而非内部流程阶段）：工作台 → 投研分析 → 交易执行 → 系统管理。
+// 业务上的「五段式」顺序仍完整保留在投研分析组内（选股 → 信号 → 建议 → 回测）。
 const navGroups = [
   {
-    title: '概览',
-    items: [{ path: '/dashboard', title: '大盘概览', icon: LayoutDashboard }],
-  },
-  {
-    title: '交易流水线',
+    title: '工作台',
     items: [
-      { path: '/screening', title: '① 一选 · 股票池', icon: Filter },
-      { path: '/signals', title: '② 二选 · 自选股', icon: Bell },
-      { path: '/advisory', title: '③ 三选 · 交易队列', icon: Lightbulb },
-      // ④ 交易池与⑤ 持仓本是同一页的两个 tab，合并为一个菜单项
-      { path: '/paper', title: '④ 交易池 · 持仓', icon: Wallet },
+      { path: '/dashboard', title: '市场总览', icon: LayoutDashboard },
     ],
   },
   {
-    title: '复盘与配置',
+    title: '投研分析',
     items: [
-      { path: '/backtest', title: '回测中心', icon: History },
-      { path: '/ops', title: '运维审计', icon: Server },
-      { path: '/settings', title: '系统设置', icon: Settings },
+      { path: '/screening', title: '全市场选股', icon: ScanSearch },
+      { path: '/signals', title: '信号与自选', icon: Radar },
+      { path: '/advisory', title: '决策建议', icon: Target },
+      { path: '/backtest', title: '策略回测', icon: FlaskConical },
+    ],
+  },
+  {
+    title: '交易执行',
+    items: [
+      { path: '/paper', title: '模拟交易', icon: Wallet },
+    ],
+  },
+  {
+    title: '系统管理',
+    items: [
+      { path: '/ops', title: '运行监控', icon: Server },
+      { path: '/settings', title: '系统设置', icon: SlidersHorizontal },
     ],
   },
 ]
@@ -216,9 +224,13 @@ onUnmounted(() => {
 
 const statusText = computed(() => phase.value || (market.trading ? '交易中' : '已收盘'))
 
-// 个股详情是流水线里的下钻页，高亮到 ② 二选（自选股入口）
+// 个股详情是投研链路里的下钻页，高亮到「信号与自选」入口
 const activePath = computed(() =>
   route.path.startsWith('/stock/') ? '/signals' : route.path
+)
+// 顶栏面包屑的分组名，与侧栏共用同一份 navGroups，避免两处维护
+const currentGroup = computed(() =>
+  navGroups.find((g) => g.items.some((i) => i.path === activePath.value))?.title ?? '工作台'
 )
 </script>
 
@@ -236,26 +248,30 @@ const activePath = computed(() =>
       :class="sidebarOpen ? 'translate-x-0' : '-translate-x-full'"
     >
       <!-- 品牌 -->
-      <div class="flex items-center gap-2.5 border-b border-base-600/60 px-5 py-4">
+      <div class="flex items-center gap-2.5 border-b border-base-600/60 px-5 py-[15px]">
         <div
-          class="flex h-8 w-8 items-center justify-center rounded-lg bg-gradient-to-br from-primary to-primary-dark ring-1 ring-inset ring-white/15"
+          class="flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] bg-gradient-to-br from-primary to-primary-dark ring-1 ring-inset ring-white/20"
         >
-          <Activity class="h-4 w-4 text-white" />
+          <Activity class="h-[18px] w-[18px] text-white" :stroke-width="2.2" />
         </div>
         <div class="min-w-0">
-          <div class="text-[15.5px] font-semibold leading-tight tracking-wide text-content">SAS</div>
-          <div class="truncate text-[12.5px] leading-tight text-content-faint">A股智能分析系统</div>
+          <div class="text-[16px] font-semibold leading-tight tracking-[0.08em] text-content">SAS</div>
+          <div class="truncate text-[11.5px] leading-tight text-content-faint">智能投研终端</div>
         </div>
       </div>
 
-      <nav class="flex-1 space-y-5 overflow-y-auto px-3 py-4">
-        <div v-for="group in navGroups" :key="group.title" class="space-y-0.5">
-          <div class="eyebrow px-2.5 pb-1.5">{{ group.title }}</div>
+      <nav class="flex-1 space-y-6 overflow-y-auto px-3 py-5">
+        <div v-for="group in navGroups" :key="group.title" class="space-y-1">
+          <div class="mb-2 flex items-center gap-2 px-2.5">
+            <span class="eyebrow shrink-0">{{ group.title }}</span>
+            <span class="h-px flex-1 bg-base-600/60"></span>
+            <span class="font-num text-[10.5px] leading-none text-content-faint">{{ String(group.items.length).padStart(2, '0') }}</span>
+          </div>
           <router-link
             v-for="item in group.items"
             :key="item.path"
             :to="item.path"
-            class="group relative flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-[14px] font-medium transition-colors duration-150"
+            class="group relative flex items-center gap-2.5 rounded-control px-2.5 py-[9px] text-[13.5px] font-medium transition-colors duration-150"
             @click="sidebarOpen = false"
             :class="
               activePath === item.path
@@ -264,7 +280,7 @@ const activePath = computed(() =>
             "
           >
             <span
-              class="absolute left-0 top-1/2 h-4 w-0.5 -translate-y-1/2 rounded-full transition-colors"
+              class="absolute left-0 top-1/2 h-5 w-[3px] -translate-y-1/2 rounded-full transition-colors"
               :class="activePath === item.path ? 'bg-primary' : 'bg-transparent'"
             ></span>
             <component
@@ -273,17 +289,28 @@ const activePath = computed(() =>
               :class="activePath === item.path ? 'text-primary-light' : 'text-content-faint group-hover:text-content-muted'"
             />
             <span class="truncate">{{ item.title }}</span>
+            <span
+              v-if="activePath === item.path"
+              class="ml-auto h-1 w-1 shrink-0 rounded-full bg-primary"
+            ></span>
           </router-link>
         </div>
       </nav>
 
-      <!-- 免责声明（侧栏底部常驻） -->
-      <div class="border-t border-base-600/60 p-3">
+      <!-- 侧栏底部：免责声明 + 运行环境标识 -->
+      <div class="border-t border-base-600/60 px-3 py-3">
         <div
           class="flex items-start gap-2 rounded-lg border border-warn/25 bg-warn/[0.07] px-2.5 py-2 text-[12px] leading-relaxed text-warn/90"
         >
           <ShieldAlert class="mt-px h-3.5 w-3.5 shrink-0" />
           <span>{{ market.disclaimer }}</span>
+        </div>
+        <div class="mt-2.5 flex items-center justify-between px-1">
+          <span class="inline-flex items-center gap-1.5 text-[10.5px] font-medium tracking-[0.1em] text-content-faint">
+            <span class="h-1.5 w-1.5 rounded-full bg-warn/70"></span>
+            PAPER MODE
+          </span>
+          <span class="font-num text-[10.5px] tracking-wide text-content-faint">SIM</span>
         </div>
       </div>
     </aside>
@@ -303,7 +330,11 @@ const activePath = computed(() =>
           >
             <Menu class="h-4 w-4" />
           </button>
-          <h1 class="min-w-0 truncate text-subheading tracking-tight">{{ route.meta.title ?? '大盘概览' }}</h1>
+          <div class="hidden min-w-0 items-center gap-1.5 sm:flex">
+            <span class="shrink-0 text-[12.5px] text-content-faint">{{ currentGroup }}</span>
+            <ChevronRight class="h-3.5 w-3.5 shrink-0 text-content-faint/60" />
+          </div>
+          <h1 class="min-w-0 truncate text-subheading font-semibold tracking-tight">{{ route.meta.title ?? '市场总览' }}</h1>
           <span
             class="chip shrink-0"
             :class="market.trading ? 'chip-up' : 'chip-muted'"

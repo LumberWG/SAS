@@ -198,10 +198,10 @@ onUnmounted(() => {
 
 <template>
   <div class="space-y-4">
-    <div class="flex flex-wrap items-center justify-between gap-2">
+    <div class="page-hd">
       <div>
-        <h2 class="text-[18px] font-semibold tracking-tight text-content">运维审计</h2>
-        <p class="mt-1 text-[12.5px] text-content-faint">
+        <h2 class="text-subheading font-semibold tracking-tight text-content">运行监控</h2>
+        <p class="page-desc">
           只读：调度任务、数据新鲜度、访客记录 · 每 30 秒刷新 · 最近更新 {{ lastRefresh || '—' }}
         </p>
       </div>
