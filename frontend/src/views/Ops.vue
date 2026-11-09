@@ -7,7 +7,7 @@
  * 进程内 APScheduler 里，因此只列口径与时刻，不伪造「运行状态」。
  */
 import { computed, onMounted, onUnmounted, ref } from 'vue'
-import { Clock3, Download, RefreshCw, Server, Users } from 'lucide-vue-next'
+import { Clock3, Download, RefreshCw, Server, ShieldAlert, Users } from 'lucide-vue-next'
 
 import { csvDateTag, downloadCsv } from '../lib/csv'
 import { POLL } from '../lib/polling'
@@ -227,6 +227,48 @@ onUnmounted(() => {
         </template>
       </span>
       <span class="opacity-80">下降市中动量信号 20 日超额转负，新开仓建议等待指数站回 MA20 上方</span>
+    </div>
+    <!-- 入场护栏明细：逐信号 flags 标签（影子层，仅提示，不参与交易） -->
+    <div
+      v-if="entryGuard && entryGuard.signals && entryGuard.signals.length"
+      class="glass-card p-5"
+    >
+      <div class="mb-2 flex items-center gap-2">
+        <ShieldAlert class="h-4 w-4 text-amber-300" />
+        <h3 class="text-subheading">入场护栏明细</h3>
+        <span class="text-[12.5px] text-content-faint">{{ entryGuard.signals.length }} 条近期信号</span>
+      </div>
+      <p class="mb-3 text-[12.5px] leading-relaxed text-content-faint">
+        市场状态滤网：上证站上 MA20 时动量信号 20 日超额 +0.74%，跌破后转 −1.22%，下降市标注「慎开新仓」；
+        日内追高护栏：信号日高开 &gt;3% 或盘中冲高 &gt;5% 时提示用限价单在尾盘或回踩均线买入。均为只读提示，不参与交易。
+      </p>
+      <div class="grid grid-cols-1 gap-2 md:grid-cols-2 xl:grid-cols-3">
+        <div
+          v-for="sig in entryGuard.signals"
+          :key="sig.code + sig.scan_date"
+          class="rounded-lg border border-base-600/60 bg-base-800/40 p-3"
+        >
+          <div class="flex items-center justify-between gap-2">
+            <span class="text-[14px] font-semibold text-content">{{ sig.name }}</span>
+            <span class="font-num text-[12px] text-content-faint">{{ sig.code }}</span>
+          </div>
+          <div class="mt-0.5 text-[11.5px] text-content-faint">{{ sig.strategy }} · {{ sig.scan_date }}</div>
+          <div class="mt-1.5 flex flex-wrap items-center gap-1.5">
+            <span
+              v-for="fl in sig.flags"
+              :key="fl"
+              class="rounded px-1.5 py-0.5 text-[11px] font-medium"
+              :class="fl === '下降市慎开新仓' ? 'border border-down/40 bg-down/15 text-down' : 'border border-amber-400/40 bg-amber-400/15 text-amber-300'"
+            >
+              {{ fl }}
+            </span>
+            <span v-if="!sig.flags.length" class="text-[11px] text-content-faint">无护栏触发</span>
+          </div>
+          <div v-if="sig.intraday && sig.intraday.triggered && sig.intraday.note" class="mt-1 text-[11px] leading-relaxed text-amber-300/80">
+            {{ sig.intraday.note }}
+          </div>
+        </div>
+      </div>
     </div>
     <div class="page-hd">
       <div>
