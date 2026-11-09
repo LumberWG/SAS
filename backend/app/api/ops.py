@@ -511,3 +511,87 @@ def exit_lab(tag: str = Query("live", description="出场规则实验标签")) -
         "conclusion_detail": data.get("conclusion_detail"),
         "note": data.get("note") or "纯研究产物，不参与交易",
     })
+
+
+@router.get("/intraday-swing")
+def intraday_swing(
+    period: int = Query(30, description="聚合周期（分钟），30 或 60"),
+    tag: str = Query("live", description="日内摆动实验标签"),
+) -> dict:
+    """日内摆动实验的**只读**结果（BACKTEST_LOG #125）。
+
+    回答的是「更短周期（30/60 分钟）能否让 RS 摆动低点重新获得预测力」：
+    5 分钟 K 线聚合到目标周期，用**扫描宇宙等权均价**作大盘代理（无上证指数分钟数据），
+    重放 #120~#124 同款 RS 摆动 + 预估 + 出场评估。
+
+    口径与 ``/ops/exit-lab`` 一致：入场用下一根收盘（可交易口径）、误报计入、
+    绝对与超额收益并列；``estimate`` 块是核心评估（Brier skill / 命中率 / walk-forward /
+    多重检验），``oos_rows`` 是样本外各出场规则表现。不是净值曲线、不含持仓、不产生买卖指令。
+    """
+    if period not in (30, 60):
+        raise HTTPException(status_code=400, detail="period 只支持 30 或 60")
+    if not _TAG_RE.fullmatch(tag):
+        raise HTTPException(status_code=400, detail="非法 tag")
+    log_dir = Path(get_settings().kline_dir).parent / "logs"
+    path = (log_dir / f"intraday_swing_{period}_{tag}.json").resolve()
+    if log_dir.resolve() not in path.parents:
+        raise HTTPException(status_code=400, detail="路径越界")
+    empty = {
+        "period": period, "tag": tag, "available": False, "all_rows": [],
+        "dev_rows": [], "oos_rows": [], "estimate": {}, "dev_selection": {},
+        "oos_best": {}, "oos_folds": [], "conclusion": None,
+    }
+    if not path.is_file():
+        return with_disclaimer({
+            **empty, "note": "日内摆动实验尚无产物；运行 scripts/intraday_swing.py 生成",
+        })
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        logger.debug("日内摆动读取失败 %s: %s", path, exc)
+        return with_disclaimer({**empty, "note": "日内摆动实验产物损坏"})
+    est = data.get("estimate") or {}
+    return with_disclaimer({
+        "period": period,
+        "tag": tag,
+        "available": True,
+        "as_of": data.get("as_of"),
+        "start": data.get("start"),
+        "run_at": data.get("run_at"),
+        "updated_at": _fmt_mtime(path),
+        "elapsed_sec": data.get("elapsed_sec"),
+        "bars_per_day": data.get("bars_per_day"),
+        "baseline_kind": data.get("baseline_kind"),
+        "symbols_scanned": data.get("symbols_scanned"),
+        "symbols_skipped": data.get("symbols_skipped"),
+        "bars": data.get("bars"),
+        "queries": data.get("queries"),
+        "signals": data.get("signals"),
+        "signal_hit_rate": data.get("signal_hit_rate"),
+        "dev_cut_date": data.get("dev_cut_date"),
+        "entry_bases": data.get("entry_bases") or [],
+        "scaled_config": data.get("scaled_config") or {},
+        "estimate": {
+            "verdict": est.get("verdict"),
+            "brier_score": est.get("brier_score"),
+            "brier_skill": est.get("brier_skill"),
+            "brier_baseline": est.get("brier_baseline"),
+            "hit_rate": est.get("hit_rate"),
+            "hit_rate_threshold": est.get("hit_rate_threshold"),
+            "exp_net_pct": est.get("exp_net_pct"),
+            "predicted_signals": est.get("predicted_signals"),
+            "walk_forward_rows": est.get("walk_forward_rows"),
+            "multiple_tests": est.get("multiple_tests"),
+        },
+        "all_rows": data.get("all_rows") or [],
+        "dev_rows": data.get("dev_rows") or [],
+        "oos_rows": data.get("oos_rows") or [],
+        "dev_selection": data.get("dev_selection") or {},
+        "oos_best": data.get("oos_best") or {},
+        "oos_folds": data.get("oos_folds") or [],
+        "fold_positive": data.get("fold_positive"),
+        "fold_consistency": data.get("fold_consistency"),
+        "conclusion": data.get("conclusion"),
+        "conclusion_detail": data.get("conclusion_detail"),
+        "note": data.get("note") or "纯研究产物，不参与交易",
+    })

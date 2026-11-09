@@ -1443,4 +1443,42 @@ net     = r_exit - cost              # cost 默认 0.3%（双边）
 
 ---
 
+## 14. 更短周期实验：30/60 分钟 RS 摆动（2026-11-09，只研究不交易）
+
+### 14.1 数据聚合与基准代理
+- 源：`data/minute5_fsdb/{code}.parquet`（5min bar，列 `date/open/high/low/close/volume/amount`）。
+- 聚合：30min 用 `agg=6`（连续 6 根一组，午休/隔夜缺口落组边界）；60min 用 `agg=12`。聚合后 `high=max / low=min / close=last / volume=sum / amount=sum`。
+- **基准代理**：上证指数分钟线未存盘（`minute5_fsdb` 只有 000001/000016/000688），故日内基准 = 扫描宇宙（Top300 ∩ 分钟库 = 243 只）等权均价。`baseline_kind="equal_weight_universe_mean"`，self-inclusion 在 243 只量级可忽略。
+- 缺 OHLC 任一列（约 28/5564 的指数类文件只有 `date,close`）直接跳过该票。
+
+### 14.2 参数按周期缩放
+| 参数 | 30min | 60min |
+|---|---|---|
+| `bars_per_day` | 8 | 4 |
+| `z_window` | 480 (60×8) | 240 (60×4) |
+| `confirm_bars` | 16 (2×8) | 8 (2×4) |
+| `horizon` | 24 (3×8) | 12 (3×4) |
+
+其余（`entry_lift`/`cost`/`features`/`calibration`）沿用 #123 默认。评估链（detect_swings / relative_strength / build_dataset / simulate_exit）频率无关，原样复用。
+
+### 14.3 出场预设（关键修正）
+- **ATR 跟踪用紧止损**：`atr_k ∈ {2.0, 4.0}`，**不乘 `bars_per_day`**（早期 bug 版误写成 `2.0×bpd`/`3.0×bpd`，30min 即 16/24，止损宽到约 8%~16%，等于变相长持、偷换日内择时）。`hold_bars=10×bpd` 兜底。
+- `fixed`：30min 用 `{8,16,32}`（=1/2/4×bpd）；60min 用 `{4,8,16}`。
+- `swing_trail`：跌破最近已确认价格摆动高点。
+
+### 14.4 实测（243 只 / 核心估计器）
+| 周期 | 查询 | 信号 | 命中率 | brier_skill | 盈亏平衡命中 | 结论 |
+|---|---|---|---|---|---|---|
+| 30min | 734640 | 6320 | 29.21% | 0.0238 | 77.7% | below_breakeven |
+| 60min | 367320 | 5835 | 34.41% | 0.0317 | 75.3% | below_breakeven |
+
+样本外出场（可交易口径 `signal_next`）：
+- 30min：`fixed8/16/32`、`swing_trail` 全负（−0.42%~−0.82%）；`atr2` 净 +0.633%/超额 +0.954%、`atr4` 净 +0.794%/超额 +1.122%（胜率 33%、盈亏比 1.37），5 折 (1.50, 1.20, 0.02, 3.12, −1.98) → 4/5 正、一致性 0.8 → `positive_expectancy_candidate`。
+- 60min：所有规则全负（fixed4 −0.724% … atr2 −0.673% … swing_trail −0.556%），5 折全负 → `no_tradeable_edge`。
+
+### 14.5 结论
+主假设「更短周期提升转折点识别」不成立：命中率仍 ~30%，与日线同量级，概率模型自身 below_breakeven。唯一正的是 30min + 紧 ATR 跟踪吃到的周级漂移（出场层，非信号层），对周期极敏感、未计滑点，归 `positive_expectancy_candidate` 待独立区间复核。系统层面维持 `no_tradeable_edge`，不接评分/下单/不改线上默认。
+
+---
+
 *本表为快照，参数以代码当前实现为准；调整权重/阈值请同步 `tests/test_factors.py` 与前端"智能建议"展示。*
