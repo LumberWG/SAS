@@ -17,10 +17,12 @@ import {
 import {
   getAdvisorySummary,
   getBuyRecommendations,
+  getEntryGuard,
   getFocusList,
   getQueueFilter,
   getSellRecommendations,
   setQueueFilter,
+  type EntryGuard,
   type QueueFilter,
   type RecommendationItem,
 } from '../api'
@@ -39,6 +41,7 @@ const focus = ref<RecommendationItem[]>([])
 const focusDate = ref<string | null>(null)
 const summary = ref<Awaited<ReturnType<typeof getAdvisorySummary>> | null>(null)
 const updatedAt = ref<string | null>(null)
+const entryGuard = ref<EntryGuard | null>(null)
 let timer: number | undefined
 
 async function load() {
@@ -57,6 +60,12 @@ async function load() {
     updatedAt.value = buyData.updated_at ?? sellData.updated_at
     staleNotice.value = false
     loadFailed = false
+    // 入场护栏（影子层）：市场状态滤网 + 日内追高护栏，仅提示不参与交易
+    try {
+      entryGuard.value = await getEntryGuard()
+    } catch {
+      /* 护栏加载失败不影响主建议展示 */
+    }
   } catch (e: unknown) {
     // 保留旧数据，但同一轮故障只弹一次 toast，并常驻一条「可能是旧数据」提示
     staleNotice.value = true
@@ -73,6 +82,17 @@ async function load() {
 
 function goDetail(code: string) {
   router.push(`/stock/${code}`)
+}
+
+const REGIME_META: Record<string, { label: string; cls: string }> = {
+  uptrend: { label: '上升市 · 可正常开仓', cls: 'border-up/30 bg-up/10 text-up' },
+  choppy: { label: '震荡市 · 控制仓位', cls: 'border-amber-400/30 bg-amber-400/10 text-amber-300' },
+  declining: { label: '下降市 · 慎开新仓', cls: 'border-down/30 bg-down/10 text-down' },
+  unknown: { label: '市场状态未知', cls: 'border-white/15 bg-white/5 text-content-faint' },
+}
+const regimeMeta = () => {
+  const st = entryGuard.value?.regime?.state ?? 'unknown'
+  return REGIME_META[st] ?? REGIME_META.unknown
 }
 
 function scoreClass(score: number): string {
@@ -177,6 +197,19 @@ onUnmounted(() => {
     <div v-if="staleNotice" class="banner-warn flex items-center justify-between gap-3 rounded-lg px-4 py-2 text-[12.5px]">
       <span>建议数据加载失败，当前显示的是上一次成功加载的结果（可能不是最新一批）。</span>
       <button class="shrink-0 rounded border border-current/30 px-2 py-0.5 hover:opacity-80" @click="load">重试</button>
+    </div>
+    <div
+      v-if="entryGuard"
+      class="flex flex-wrap items-center justify-between gap-3 rounded-lg border px-4 py-2 text-[12.5px]"
+      :class="regimeMeta().cls"
+    >
+      <span class="flex items-center gap-2">
+        <span class="font-semibold">市场状态：{{ regimeMeta().label }}</span>
+        <template v-if="entryGuard.regime.as_of">
+          （上证 {{ entryGuard.regime.close?.toFixed(0) }} · MA20 {{ entryGuard.regime.ma20?.toFixed(0) }} · 截至 {{ entryGuard.regime.as_of }}）
+        </template>
+      </span>
+      <span class="text-content-faint">下降市中动量信号 20 日超额转负，新开仓建议等待指数站回 MA20 上方</span>
     </div>
     <!-- 顶部：机制说明 + 三项计数 -->
     <div class="glass-card flex flex-wrap items-center justify-between gap-4 p-5">

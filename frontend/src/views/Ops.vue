@@ -16,6 +16,7 @@ import {
   getAccessLog,
   getBreadth,
   getDataStatus,
+  getEntryGuard,
   getMlStatus,
   getMonitorStatus,
   getReview,
@@ -24,6 +25,7 @@ import {
   type AccessRecord,
   type BreadthRow,
   type DataStatus,
+  type EntryGuard,
   type MlStatus,
   type MonitorStatus,
   type ReviewDoc,
@@ -53,6 +55,7 @@ const reviewDoc = ref<ReviewDoc | null>(null)
 const reviewName = ref<ReviewName>('daily')
 const reviewLoading = ref(false)
 const selfCheck = ref<SelfCheck | null>(null)
+const entryGuard = ref<EntryGuard | null>(null)
 const reviewTabs: Array<{ key: ReviewName; label: string }> = [
   { key: 'daily', label: '每日复盘' },
   { key: 'param', label: '参数体检' },
@@ -157,6 +160,7 @@ async function loadAll() {
   breadthRows.value = br?.rows ?? []
   breadthNote.value = br?.note ?? ''
   reviewDoc.value = rv
+  entryGuard.value = await getEntryGuard().catch(() => null)
   const failed = [m, d, ml, sh, br, rv, ck].filter((x) => x === null).length
   partialError.value = failed
     ? `${failed} 个只读接口未返回数据，下方卡片可能仍是上一次的结果`
@@ -198,6 +202,32 @@ onUnmounted(() => {
 
 <template>
   <div class="space-y-4">
+    <div
+      v-if="entryGuard"
+      class="flex flex-wrap items-center justify-between gap-3 rounded-lg border px-4 py-2 text-[12.5px]"
+      :class="{
+        'border-up/30 bg-up/10 text-up': entryGuard.regime.state === 'uptrend',
+        'border-amber-400/30 bg-amber-400/10 text-amber-300': entryGuard.regime.state === 'choppy',
+        'border-down/30 bg-down/10 text-down': entryGuard.regime.state === 'declining',
+        'border-white/15 bg-white/5 text-content-faint': entryGuard.regime.state === 'unknown',
+      }"
+    >
+      <span class="flex items-center gap-2">
+        <span class="font-semibold">
+          市场状态：
+          {{
+            entryGuard.regime.state === 'uptrend' ? '上升市 · 可正常开仓'
+            : entryGuard.regime.state === 'choppy' ? '震荡市 · 控制仓位'
+            : entryGuard.regime.state === 'declining' ? '下降市 · 慎开新仓'
+            : '市场状态未知'
+          }}
+        </span>
+        <template v-if="entryGuard.regime.as_of">
+          （上证 {{ entryGuard.regime.close?.toFixed(0) }} · MA20 {{ entryGuard.regime.ma20?.toFixed(0) }} · 截至 {{ entryGuard.regime.as_of }}）
+        </template>
+      </span>
+      <span class="opacity-80">下降市中动量信号 20 日超额转负，新开仓建议等待指数站回 MA20 上方</span>
+    </div>
     <div class="page-hd">
       <div>
         <h2 class="text-subheading font-semibold tracking-tight text-content">运行监控</h2>

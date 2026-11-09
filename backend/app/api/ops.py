@@ -595,3 +595,36 @@ def intraday_swing(
         "conclusion_detail": data.get("conclusion_detail"),
         "note": data.get("note") or "纯研究产物，不参与交易",
     })
+
+
+@router.get("/entry-guard")
+def entry_guard(
+    limit: int = Query(20, description="回溯的最近信号条数"),
+) -> dict:
+    """入场护栏（影子层 / 只读，不参与交易）。
+
+    叠加两个互不预测转折点的护栏，回答「现在该不该开新仓、该以什么方式买」：
+
+    1. **市场状态滤网**：上证相对 MA20/MA60。下降市（close<MA20）时，新动量 / ML 信号
+       标注「慎开新仓」。回测显示指数站上 MA20 时信号 20 日超额 +0.74%，跌破后转 -1.22%。
+    2. **日内追高护栏**：信号日个股高开（>3%）或盘中冲高（>5%）明显时，提示用限价单在
+       尾盘 / 回踩均线买入，勿追当根尖峰。
+
+    返回 ``regime``（当前市场状态）、``guards``（阈值）、``signals``（逐条叠加 flags）。
+    只读，不改动选股 / 评分 / 下单逻辑。
+    """
+    from app.analysis.entry_guard import evaluate_entry_guards
+
+    try:
+        result = evaluate_entry_guards(limit=limit)
+    except Exception as exc:  # 任何数据异常都降级为 unknown，不 500
+        logger.debug("入场护栏计算失败: %s", exc)
+        return with_disclaimer({
+            "available": False,
+            "regime": {"state": "unknown", "new_entry_advice": "unknown"},
+            "guards": {"gap_threshold": 0.03, "spike_threshold": 0.05},
+            "signals": [],
+            "note": f"\u5165\u573a\u62a4\u680f\u8ba1\u7b97\u5931\u8d25\uff1a{exc}",
+        })
+    result["available"] = True
+    return with_disclaimer(result)

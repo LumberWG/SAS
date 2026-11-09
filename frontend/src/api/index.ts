@@ -1439,4 +1439,48 @@ export function getSelfCheck(): Promise<SelfCheck> {
   return http.get('/ops/self-check', { params: { refresh: true } }).then((r) => r.data)
 }
 
+export interface EntryIntraday {
+  available: boolean
+  triggered: boolean
+  gap_up_pct: number | null
+  intraday_high_pct: number | null
+  open: number | null
+  high: number | null
+  note: string
+}
+export interface EntrySignal {
+  code: string
+  name: string
+  strategy: string
+  price: number
+  scan_date: string
+  reason: string | null
+  score: number | null
+  rank: number | null
+  regime_state: string
+  regime_advice: string
+  intraday: EntryIntraday
+  flags: string[]
+}
+export interface EntryRegime {
+  state: 'uptrend' | 'choppy' | 'declining' | 'unknown'
+  close: number | null
+  ma20: number | null
+  ma60: number | null
+  above_ma20: boolean | null
+  above_ma60: boolean | null
+  as_of: string | null
+  new_entry_advice: string
+}
+export interface EntryGuard {
+  available: boolean
+  regime: EntryRegime
+  guards: { gap_threshold: number; spike_threshold: number }
+  signals: EntrySignal[]
+  note?: string
+}
+export function getEntryGuard(limit = 20): Promise<EntryGuard> {
+  return http.get('/ops/entry-guard', { params: { limit } }).then((r) => r.data)
+}
+
 export default http
