@@ -357,3 +357,48 @@ def breadth_history(limit: int = Query(60, ge=1, le=500)) -> dict:
         "rows": rows,
         "note": "纯观测：4 年非重叠只有 5 个 shock 样本、方向不稳，不进任何判定（#86）",
     })
+
+
+@router.get("/swing-shadow")
+def swing_shadow(tag: str = Query("live", description="摆动影子标签")) -> dict:
+    """大盘基准锚 + RS 摆动共振的**只读**观测结果（BACKTEST_LOG #120）。
+
+    与 ``/ops/shadow`` 区分：那个是冻结参数逐日重跑回测的净值/超额配对；
+    这个只有信号分布、「确认滞后后剩余波段幅度」与事前预估的条件分布校准，
+    不含收益曲线、不含持仓、不含任何买卖指令（BACKTEST_LOG #121）。
+    """
+    if not _TAG_RE.fullmatch(tag):
+        raise HTTPException(status_code=400, detail="非法 tag")
+    log_dir = Path(get_settings().kline_dir).parent / "logs"
+    path = (log_dir / f"swing_shadow_{tag}.json").resolve()
+    if log_dir.resolve() not in path.parents:
+        raise HTTPException(status_code=400, detail="路径越界")
+    if not path.is_file():
+        return with_disclaimer({
+            "tag": tag, "available": False, "stats": {}, "signals": [], "estimate": {},
+            "note": "摆动影子尚无产物；运行 scripts/swing_shadow.py 生成",
+        })
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        logger.debug("摆动影子读取失败 %s: %s", path, exc)
+        return with_disclaimer({
+            "tag": tag, "available": False, "stats": {}, "signals": [], "estimate": {},
+            "note": "摆动影子产物损坏",
+        })
+    return with_disclaimer({
+        "tag": tag,
+        "available": True,
+        "as_of": data.get("as_of"),
+        "start": data.get("start"),
+        "run_at": data.get("run_at"),
+        "updated_at": _fmt_mtime(path),
+        "params": data.get("params") or {},
+        "regime": data.get("regime") or {},
+        "benchmark": data.get("benchmark") or {},
+        "stats": data.get("stats") or {},
+        "signal_density": data.get("signal_density") or {},
+        "signals": (data.get("signals") or [])[-50:],
+        "estimate": data.get("estimate") or {},
+        "note": data.get("note") or "纯观测，不参与交易",
+    })

@@ -39,6 +39,73 @@ def test_shadow_rejects_bad_tag_and_missing_file(monkeypatch, tmp_path):
     assert r["available"] is False and r["profiles"] == []
 
 
+def test_swing_shadow_rejects_bad_tag_and_missing_file(monkeypatch, tmp_path):
+    """#120：摆动影子同样不许传路径，产物未生成时优雅降级。"""
+    with pytest.raises(HTTPException):
+        ops.swing_shadow("../secrets")
+    monkeypatch.setattr(
+        ops, "get_settings",
+        lambda: SimpleNamespace(kline_dir=tmp_path / "klines"),
+    )
+    r = ops.swing_shadow("live")
+    assert r["available"] is False and r["signals"] == []
+    assert r["estimate"] == {}
+    assert "尚无产物" in r["note"]
+
+
+def test_swing_shadow_reads_snapshot(monkeypatch, tmp_path):
+    """#120：只读返回统计/信号，不混入净值曲线与持仓（那是 /ops/shadow 的职责）。"""
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    data = {
+        "tag": "live", "start": "2026-09-01", "as_of": "2026-11-06",
+        "run_at": "2026-11-08 23:00:00",
+        "params": {"confirm_bars": 3}, "regime": {"state": "weak"},
+        "benchmark": {"bars": 800, "swing_lows": 21, "anchor_windows": 21},
+        "stats": {"signals": 12, "by_status": {"resonance_buy": 4}},
+        "signal_density": {"signals_per_day": 0.2},
+        "signals": [{"code": "000001", "date": "2026-11-06", "status": "resonance_buy"}],
+        "note": "纯观测，不参与交易",
+    }
+    (log_dir / "swing_shadow_live.json").write_text(json.dumps(data), encoding="utf-8")
+    monkeypatch.setattr(
+        ops, "get_settings",
+        lambda: SimpleNamespace(kline_dir=tmp_path / "klines"),
+    )
+    r = ops.swing_shadow("live")
+    assert r["available"] is True and r["as_of"] == "2026-11-06"
+    assert r["stats"]["signals"] == 12
+    assert r["signals"][0]["code"] == "000001"
+    assert "净值" not in r["note"]
+    assert r["updated_at"]
+    assert r["estimate"] == {}
+
+
+def test_swing_shadow_exposes_estimate_summary(monkeypatch, tmp_path):
+    """#121：只读接口透出预估校准摘要，且不夹带任何买卖字段。"""
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    est = {
+        "samples": 12000, "estimated_queries": 9000, "predicted_signals": 210,
+        "hit_rate": 0.34, "brier_score": 0.21, "breakeven_hit_pct": 71.4,
+        "verdict": "below_breakeven", "calibration_bins": [{"bin": "0.0-0.2", "count": 10}],
+    }
+    data = {
+        "tag": "live", "as_of": "2026-11-06", "stats": {"signals": 12},
+        "signals": [], "estimate": est, "note": "纯观测，不参与交易",
+    }
+    (log_dir / "swing_shadow_live.json").write_text(json.dumps(data), encoding="utf-8")
+    monkeypatch.setattr(
+        ops, "get_settings",
+        lambda: SimpleNamespace(kline_dir=tmp_path / "klines"),
+    )
+    r = ops.swing_shadow("live")
+    assert r["available"] is True
+    assert r["estimate"]["verdict"] == "below_breakeven"
+    assert r["estimate"]["hit_rate"] == 0.34
+    assert "order" not in r["estimate"] and "buy" not in r["estimate"]
+
+
 def test_shadow_ml_pair(monkeypatch, tmp_path):
     """default_ml 在方案集内时给出前向超额配对差，不在时明确提示。"""
     log_dir = tmp_path / "logs"

@@ -110,6 +110,29 @@ class Settings(BaseSettings):
     # 逗号分隔的方案名；空 = 用 scripts/shadow.DEFAULT_PROFILES
     shadow_profiles: str = ""
 
+    # ---------- 摆动影子（相对强弱极值共振，只观测不交易；见 BACKTEST_LOG #120） ----------
+    # 与影子账户互不相干：那个是「冻结参数逐日重跑整段回测」，这个是「逐日重放 RS 摆动信号」。
+    # 产物 data/logs/swing_shadow_<tag>.json，不读写 paper_* 表、不进评分、不触发下单。
+    swing_threshold_pct: float = 0.05  # 摆动尺度：相对幅度至少达到此值才算一次转折
+    swing_atr_mult: float = 1.0        # 摆动尺度：ATR 倍数折算的相对幅度，与上一项取较大值
+    swing_confirm_bars: int = 3        # 右侧确认 K 线数：越大越可靠，也越滞后
+    swing_min_gap: int = 5             # 相邻摆动点最小间隔，过滤密集的噪声级极值
+    swing_anchor_bars: int = 3         # 基准确认低点后开放的共振时间窗长度
+    swing_z_window: int = 60           # 相对强弱偏离度的滚动窗口
+    swing_band: float = 1.0            # 跟随带：|Z| 不超过此值算与基准共振
+    swing_extreme_z: float = 2.0       # 极端背离：|Z| 超过此值进观察池，剔除不交易
+    swing_min_corr: float = 0.2        # 与基准滚动收益相关度下限，低于此值视为不同步
+    swing_max_symbols: int = 300       # 影子扫描最多覆盖多少只票，与线上 Top300 口径对齐
+
+    # ---------- 事前预估（只观测：输出转折概率与条件分布，不输出点位/买卖日期） ----------
+    # 标签窗口未走完的样本绝不入库；个股历史只做带上限的贝叶斯收缩，见 BACKTEST_LOG #121。
+    swing_est_horizon: int = 3         # 预估窗口：未来多少根内出现摆动低点算一次转折
+    swing_est_prior_strength: float = 40.0  # 收缩先验强度（等效虚拟样本数），越大越信任全局
+    swing_est_symbol_cap: int = 40     # 单只票有效样本上限，校正日线样本的自相关
+    swing_est_entry_lift: float = 2.0  # 发观测信号的概率提升倍数（相对当时已入库样本的基础率）
+    swing_est_cost_pct: float = 0.3    # 期望净收益里扣掉的双边成本（百分点）
+    swing_est_min_exp_net: float = 0.0  # 期望净收益下限，低于此不发观测信号
+
     # ---------- 并行模拟账本（同一份信号、不同处置参数各自记账） ----------
     # 与影子账户的区别：影子账户是「日频、重跑整段、能复现选股侧差异」，
     # 并行账本是「tick 级、共享信号、只能复现处置侧差异」，两者互补。

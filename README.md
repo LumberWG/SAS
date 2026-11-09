@@ -561,6 +561,29 @@ schtasks /run /tn SASDbBackup                              # 立即触发计划�
 - 注意：账本从建立当天开始记账，不补算历史（要补历史用回测或影子账户）
 - 边界：并行账本只复制主账本经 `submit → pending → tick` 撮合的**普通买卖信号**；**做T（`t_tick`）成交不经过 pending 队列、不会被复制**，因此 `paper_t_active=true` 时主账本会比 sim 多出做T维度的仓位变动，sim 对比的仅是信号处置参数差异、**不含做T维度**（别误判 sim 与主账本不一致）
 
+### 8d. 摆动影子（相对强弱极值共振，只观测不交易）
+
+用户思路「大盘给基准线、个股不能偏离太远、按基准找个股极值、严重背离剔除」的数学翻译：**不对大盘和个股分别找极值再对齐**，而是直接对 `RS = 个股收盘 / 基准收盘` 找摆动点——分母消掉大盘共同波动，只需一层确认滞后。
+
+- 运行：`.venv\Scripts\python.exe scripts\swing_shadow.py --start 2025-01-01 --tag live`；`--lookback` 控制基准窗口（默认最近 1200 根），`--codes` 只扫指定票，`--report` 只看已有产物
+- 产物：`data/logs/swing_shadow_<tag>.json`；只读接口 `GET /api/ops/swing-shadow?tag=live`（含 `with_disclaimer`）
+- **与影子账户（8b）严格区分**：8b 冻结参数逐日重跑整段回测、比较净值与超额；8d 只有信号分布与「确认滞后后剩余波段幅度」，没有净值曲线、没有持仓、不算收益
+- 口径：摆动点须等右侧 `swing_confirm_bars` 根确认，输出 `confirmed_bar`；`RS` 低点是「相对弱势结束」不是绝对低价；`|Z| > swing_extreme_z` 或收益相关度 `< swing_min_corr` 一律剔除；基准摆动低点只负责开 `±swing_anchor_bars` 时间窗，不触发买卖
+- 参数：`swing_*` 共 10 项，设置页「选股与自选 › 摆动尺度 / 共振与偏离」，走 `/api/settings` 可热更（`cfg:` 覆盖层）
+- **边界**：不进评分、不接下单、不读写 `paper_*` 表、不注册计划任务；RS 上升不等于股价上涨，弱市须叠加 regime 闸门；评估一律用相对基准的超额收益。公式与踩坑见 `docs/sas_formulas.md` §9、实验记录见 `BACKTEST_LOG` #120
+
+### 8e. 事前预估摆动转折（条件分布，只观测不交易）
+
+用户追问「极值不该事后确认，应根据个股历史数据预估」。实测先否掉了「提前埋伏」：提前 1/2/3 根买入收益 6.65 / 5.48 / 4.61%，反而低于等确认 4.98%；真正值钱的是「极值当天零滞后识别」8.36%。
+
+- **输出**：`p_turn`（未来 `swing_est_horizon` 根内出现已确认摆动低点的概率）+ 条件幅度分布 `exp_upside_pct` / `exp_downside_pct` / `exp_net_pct`，**不是点位预测，也不给买卖日期**
+- **因果**：特征只用 T 日及之前数据；标签可以用未来，但样本带 `available_bar`，配对高点的 `confirmed_bar` 没走到就绝不入库；发信号阈值用的基础率也只取当时已入库样本
+- **个股历史**：单票摆动低点中位数只有 11 个，故全局按特征分箱出先验，个股只做带上限的 Beta 收缩（`swing_est_prior_strength` / `swing_est_symbol_cap`），不能单独建模
+- **发信号**：`p_turn ≥ 当时基础率 × swing_est_entry_lift` 且 `exp_net_pct > swing_est_min_exp_net`。用相对提升而非固定概率——转折基础率只有 8.9%，固定 0.6 等于永远不发信号
+- **评估**：Brier 须与「永远猜基础率」比（`brier_skill`）；命中率与动态盈亏平衡门槛 `breakeven_hit_pct` 对照，`verdict` 三态；**实得期望净**与**模型预估净**并列，用来看过度自信
+- **当前实测结论（2026-11-06 数据）**：命中率 30.1% < 门槛 66.7%，`brier_skill` 仅 4.07%，实得期望净 0.21% 远低于等确认 5.022% → `below_breakeven`，**因此不接评分、不接下单**。这是「当前特征/尺度不够」，不是策略被证伪
+- 参数：`swing_est_*` 共 6 项，设置页「选股与自选 › 事前预估」。运行与产物同 8d（同一份 `swing_shadow_live.json`，接口 `estimate` 字段）。公式见 `docs/sas_formulas.md` §10、实验记录见 `BACKTEST_LOG` #121；同样不读写 `paper_*` 表
+
 ### 7. 模拟交易（验证选股思路）
 
 用模拟盘把「分析建议」变成可复盘的账本，验证选股思路的准确性。

@@ -1163,4 +1163,132 @@ scoring_mode = factors   14 因子启发式（基线，即 #72 的 default）
 
 ---
 
+## 9. 摆动影子：相对强弱（RS）极值口径（2026-11-08，只观测不交易）
+
+> 实现：`app/analysis/swing.py` / `app/analysis/baseline.py` / `scripts/swing_shadow.py`，
+> 实验记录 `BACKTEST_LOG` #120。**不参与任何选股、评分、撮合路径**。
+
+### 9.1 为什么用 RS，而不是「两个极值对齐」
+
+个股价格与指数点位量纲不同，无法直接比较「偏离多远」。定义
+
+```
+RS_t = (P_stock,t / P_index,t) / (P_stock,0 / P_index,0)
+```
+
+分母消掉大盘共同波动；在 RS 上找摆动点即「按基准找个股的相对极值」，且**只需一层确认滞后**。
+分别找大盘极值与个股极值再对齐，会把两段滞后叠加到买点上。注意 **RS 低点 = 相对弱势结束**，
+不是绝对低价：大盘 −2% / 个股 −1% 时 RS 上升但账户在亏，故必须前置 regime 闸门。
+
+### 9.2 摆动点：尺度、确认、不可撤销
+
+```
+阈值_i     = max(swing_threshold_pct, swing_atr_mult × ATR_i / |v_i|)
+候选 low   : v_i < min(v_{i-k..i-1}) 且 v_i < min(v_{i+1..i+k})     k = swing_confirm_bars
+候选 high  : v_i > max(v_{i-k..i-1}) 且 v_i > max(v_{i+1..i+k})
+确认时点   : confirmed_bar = i + k，滞后 lag_bars = k
+ZigZag 筛选: 类型交替 + pivot 间隔 ≥ swing_min_gap
+             + |v_i − v_last| / |v_last| ≥ 阈值_i（首个点用前缀跨度初始化）
+```
+
+**确认窗口只负责「右侧不破」，不负责走完整段波段。** 初版把 5% 波段门槛写成「3 根确认窗口内
+必须反弹 5%」，指数 1200 根只识别出 1 个低点、锚窗形同虚设；改成相对上一摆动点的反转幅度后
+为 14 个。另外点一旦输出**不回头替换**，因此
+
+```
+detect_swings(v[:t+1]) == [p for p in detect_swings(v) if p.confirmed_bar <= t]
+```
+
+（`tests/test_swing_shadow.py::test_no_lookahead_prefix_equivalence` 逐 bar 锁死）。
+脚本虽只算一遍，语义仍是逐日重放；不能用「先标好全区间高低点再对齐买卖」的做法。
+
+### 9.3 偏离度、剔除与波段幅度
+
+```
+z_t    = (RS_t − MA(RS, w)) / STD(RS, w)              w = swing_z_window
+beta_t = cov(r_stock, r_index, w) / var(r_index, w)
+corr_t = corr(r_stock, r_index, w)                    全部只用 T 日及之前数据
+```
+
+| 条件 | 判定 | 处理 |
+| --- | --- | --- |
+| `z`/`corr` 非有限 | `excluded_insufficient` | 数据不足，剔除 |
+| `abs(z) > swing_extreme_z` | `extreme_positive` / `extreme_negative` | 严重背离，进观察池不交易 |
+| `corr < swing_min_corr` | — | 与基准不同步，剔除 |
+| 不在基准锚窗内 | `no_anchor` | 只记录，不算共振 |
+| `abs(z) ≤ swing_band` 且落在锚窗内 | `resonance` | `resonance_buy` 观测信号 |
+
+基准锚窗 = 基准**已确认低点**的 `[confirmed_bar, confirmed_bar + swing_anchor_bars]`，
+只作时间筛选，不直接触发买卖。波段幅度统计区分 `gross`（极值到极值）与
+`net`（从 `confirmed_bar` 的可买价到后续高点），`eaten = gross − net` 即确认滞后的成本。
+
+### 9.4 评估口径（防止自我欺骗）
+
+- 一律用**相对基准的超额收益**，不能用绝对收益：基准见底时大批个股同时见底只是 beta 的机械结果。
+- 「共振度」若做成因子，须过 IC > 0.03 / IR > 0.5、分层收益单调、样本外 walk-forward；
+  因子值只用 T 日及之前数据，收益取 T+1 起的前向超额。
+- 弱市里 RS 会系统性失真（分母跌得慢、个股阴跌），不同 regime 要分层统计。
+- 机制层 `detect_regime` 四态与线上 paper engine 的 MA60 弱市闸门**不是同一口径**，产物里
+  同时给 `below_ma60` 便于对照，别把 `crisis` 当成线上仓位闸门的值。
+
+## 10. 事前预估摆动转折：条件分布口径（2026-11-09，只观测不交易）
+
+### 10.1 为什么不是「预估极值点」
+
+`pivot` 的定义要求右侧 `k` 根不破，本身依赖未来路径，事前不可观测。单票摆动低点中位数
+11 个（p10=5 / p90=15），摆动间隔 CV=0.964、幅度 CV=1.743，时点几乎不可预测。
+实测买点收益中位数（Top300 / 2496 段）：
+
+| 买点 | 到下一个摆动高点的收益 |
+| --- | --- |
+| 提前 3 / 2 / 1 根 | 4.613 / 5.478 / 6.647% |
+| 极值当天（理想上界） | 8.363% |
+| 确认日 +3（现行） | 4.979% |
+
+**提前埋伏反而劣于等确认**；预估目标是「把买点从确认日拉回极值当天」，不是更早买。
+
+### 10.2 输出是分布，不是点位
+
+对 bar `s` 输出 `p_turn = P(未来 horizon 根内出现已确认摆动低点 | X_s)`，以及
+`exp_upside` / `exp_downside`：
+
+```
+exp_net = p_turn · exp_upside − (1 − p_turn) · exp_downside − cost_pct
+```
+
+特征 `X_s` 五维分箱，全部因果：RS 滚动 Z、连续下跌根数、距最近**已可见**摆动点根数、
+`|RS 日收益|` 波动代理、基准 MA60 上下。
+
+### 10.3 三条因果红线
+
+1. 标签（未来是否转折、波段幅度）可用未来数据，但样本带 `available_bar`：
+   `y=1` 时为配对高点的 `confirmed_bar`（幅度用到了该高点的 pivot 值）；
+   `y=0` 时为 `s + horizon + confirm_bars + 1`（确认窗口走完才能断言「没有低点」）。
+   建表按 `available_bar ≤ t` 增量推进，不回头重训。
+2. 全局分箱先验用 Laplace 平滑 `p_g = (n_pos + 1)/(n + 2)`；个股修正用带上限的 Beta 收缩
+   `w = min(k, cap)/(min(k, cap) + α)`，`p = w·p_c + (1−w)·p_g`，幅度同理。
+   `cap` 校正日线样本的自相关，避免单票几百个高度相关的 bar 把权重顶到 1。
+3. 发信号阈值 `θ_t = base_rate_t × entry_lift`，`base_rate_t` 只取 `t` 时**已入库**样本
+   （冷启动 ≈0.5 → θ≈1 → 天然不发信号）。**绝不能用全样本事后基础率**。
+
+### 10.4 评估口径（防止自我欺骗）
+
+- Brier `= mean((p − y)²)` 必须与常数基准 `mean((p̄ − y)²)` 比，
+  `brier_skill = 1 − Brier/Brier_base`；基础率 8.9% 时 0.08 左右看着漂亮，其实几乎无信息量。
+- 命中率对照动态门槛
+  `breakeven = (median_confirmed + median_loss + cost)/(median_upside + median_loss)`；
+  `verdict ∈ {insufficient_samples, below_breakeven, above_breakeven}`。
+- **模型预估净 vs 实得期望净**并列看校准：本轮 0.519% vs 0.21%，过度自信约 2.5 倍。
+  过度自信未修前，概率不可用于仓位。
+- 一切用相对基准的超额收益，弱市须叠加 regime 闸门（同 §9.4）。
+
+### 10.5 本轮实测（截至 2026-11-06）
+
+113851 条样本 / 105881 次逐日重放 / 基础率 0.0889 / `p_turn` p99 = 0.2111 /
+2713 条观测信号 / 命中率 0.3011 / 门槛 66.7% / Brier 0.0777（基准 0.0810，技巧 4.07%）/
+命中收益 6.549% / 误报下探 1.584% / 实得期望净 0.21% vs 等确认 5.022%
+→ `verdict = below_breakeven`，**不接评分、不接下单**。
+
+---
+
 *本表为快照，参数以代码当前实现为准；调整权重/阈值请同步 `tests/test_factors.py` 与前端"智能建议"展示。*
