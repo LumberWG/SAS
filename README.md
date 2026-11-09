@@ -582,7 +582,18 @@ schtasks /run /tn SASDbBackup                              # 立即触发计划�
 - **发信号**：`p_turn ≥ 当时基础率 × swing_est_entry_lift` 且 `exp_net_pct > swing_est_min_exp_net`。用相对提升而非固定概率——转折基础率只有 8.9%，固定 0.6 等于永远不发信号
 - **评估**：Brier 须与「永远猜基础率」比（`brier_skill`）；命中率与动态盈亏平衡门槛 `breakeven_hit_pct` 对照，`verdict` 三态；**实得期望净**与**模型预估净**并列，用来看过度自信
 - **当前实测结论（2026-11-06 数据）**：命中率 30.1% < 门槛 66.7%，`brier_skill` 仅 4.07%，实得期望净 0.21% 远低于等确认 5.022% → `below_breakeven`，**因此不接评分、不接下单**。这是「当前特征/尺度不够」，不是策略被证伪
-- 参数：`swing_est_*` 共 6 项，设置页「选股与自选 › 事前预估」。运行与产物同 8d（同一份 `swing_shadow_live.json`，接口 `estimate` 字段）。公式见 `docs/sas_formulas.md` §10、实验记录见 `BACKTEST_LOG` #121；同样不读写 `paper_*` 表
+- 参数：`swing_est_*` 共 7 项（#122 增 `swing_est_features`），设置页「选股与自选 › 事前预估」。运行与产物同 8d（同一份 `swing_shadow_live.json`，接口 `estimate` 字段）。公式见 `docs/sas_formulas.md` §10、实验记录见 `BACKTEST_LOG` #121；同样不读写 `paper_*` 表
+
+### 8f. 特征敏感性网格与可靠性曲线（只研究，不交易）
+
+#121 只跑了一组特征/参数就判 `below_breakeven`，但「这组不够」不等于「方向不行」。本节回答**换特征、换尺度能不能把概率信息量提上来**。
+
+- **新增 3 个因果特征**（`swing_est_features` 可热更切换）：`bench_mom` 基准近 5 根收益、`lead` 个股 RS 近 5 根变化减基准近 5 根变化（即「基准没转向、个股先转向」的量化）、`bench_z` 基准相对自身 60 日均线/标准差的位置。全部是 trailing 窗口，`np.roll` 绕回头部的前 5 根显式归零，单测逐列锁死因果性。**默认特征集仍为 #121 的原 5 维，线上产物数值逐字段不变**。
+- **校准改成等频十分箱**：#121 用等宽 5 箱，而 `p_turn` 99% 落在 0–0.2，5 箱里 3 箱为空。新增 `calibration_ece` / `calibration_bias` / `calibration_slope`。实测 `bias=-0.0105` 是**低估**，q10 预测 0.166 对实际 0.245，`slope=1.58` 表示排序有信息但概率幅度被压缩 —— 这和 #121 说的「模型预估净 0.519% vs 实得 0.21%」是两回事：那个是**条件幅度**过度自信，不是概率校准过度自信。
+- **网格**：10 个特征集（#121 基线、3 个新特征组合、`z_only`、4 组 leave-one-out）+ 81 组参数（`horizon × prior_strength × entry_lift`）。`scripts/estimate_grid.py`，产物 `data/logs/estimate_grid_live.json`，只读接口 `GET /api/ops/estimate-grid?tag=live`。
+- **两条防自欺口径**：① 时间切分 60/40，开发期选参，样本外只对 top-3 与默认配置**各评估一次**，绝不回头调参；② 排序用 `brier_skill`（辅以 ECE、有效重放覆盖率），**不用命中率** —— `entry_lift` 不影响 Brier 却能把命中率从 0.34 刷到 0.46，拿它选参就是在拟合噪声。同配置的三个门槛还要去重，否则样本外名额会被占满。
+- **注意**：`brier_skill` 是相对各段自身常数基准的比值，**跨时间段不可比**；样本外 skill 变高不等于没过拟合，必须同时看绝对 Brier、命中率与实得净收益。另外 8 维全特征集会把分箱切得太稀疏，有效重放次数从 60949 掉到 33358，不同覆盖率的 skill 不能直接排名。
+- **边界**：不进评分、不接下单、不读写 `paper_*` 表、不注册计划任务、不改任何既有参数。公式见 `docs/sas_formulas.md` §11、实验记录见 `BACKTEST_LOG` #122。
 
 ### 7. 模拟交易（验证选股思路）
 

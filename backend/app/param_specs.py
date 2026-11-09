@@ -128,6 +128,7 @@ _LAYOUT: tuple[tuple[str, str, tuple[tuple[str, str, tuple[str, ...]], ...]], ..
                     "swing_est_horizon", "swing_est_prior_strength",
                     "swing_est_symbol_cap", "swing_est_entry_lift",
                     "swing_est_cost_pct", "swing_est_min_exp_net",
+                    "swing_est_features",
                 ),
             ),
             (
@@ -625,6 +626,7 @@ _SHORT_LABELS: dict[str, str] = {
     "swing_est_entry_lift": "发信号倍数",
     "swing_est_cost_pct": "双边成本",
     "swing_est_min_exp_net": "净收益下限",
+    "swing_est_features": "分箱特征集",
     "paper_sim_enabled": "并行账本",
     "paper_sim_profiles": "账本方案",
     "paper_sim_capital": "账本本金",

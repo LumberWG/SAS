@@ -88,20 +88,21 @@ def _align(frame: pd.DataFrame, dates: list[str]) -> pd.DataFrame:
     return data.drop_duplicates("date", keep="last").set_index("date").reindex(dates)
 
 
-def run(
+def prepare_scans(
     *,
     start: str = "",
     end: str = "",
-    tag: str = "live",
     codes: str = "",
     max_symbols: int | None = None,
     lookback: int = 1200,
     log=None,
 ) -> dict:
-    """扫描并落盘一份影子观测结果。"""
+    """读取真实 K 线，产出摆动影子与敏感性网格**共用**的中间数据。
+
+    抽出来是为了让 #122 的网格与 #121 的线上产物用完全相同的对齐、warmup、
+    摆动尺度与 RS 序列 —— 口径不一致时网格结论无法与线上结果对照。
+    """
     emit = log or (lambda msg: None)
-    if not _TAG_RE.fullmatch(tag):
-        raise ValueError(f"非法 tag: {tag}")
     settings = get_settings()
     swing_cfg, base_cfg = configs_from_settings()
     est_cfg = estimate_config_from_settings()
@@ -173,6 +174,54 @@ def run(
         if idx % 100 == 0:
             emit(f"  已扫描 {idx}/{len(symbols)} 只 · 累计信号 {len(signals)}")
 
+    return {
+        "dates": dates,
+        "bench_close": bench_close,
+        "scans": scans,
+        "signals": signals,
+        "amplitudes": amplitudes,
+        "swing_cfg": swing_cfg,
+        "base_cfg": base_cfg,
+        "est_cfg": est_cfg,
+        "bench_lows": bench_lows,
+        "windows": windows,
+        "n": n,
+        "warmup": warmup,
+        "start_bar": start_bar,
+        "limit": limit,
+        "symbols_scanned": len(symbols) - skipped,
+        "symbols_skipped": skipped,
+    }
+
+
+def run(
+    *,
+    start: str = "",
+    end: str = "",
+    tag: str = "live",
+    codes: str = "",
+    max_symbols: int | None = None,
+    lookback: int = 1200,
+    log=None,
+) -> dict:
+    """扫描并落盘一份影子观测结果。"""
+    emit = log or (lambda msg: None)
+    if not _TAG_RE.fullmatch(tag):
+        raise ValueError(f"非法 tag: {tag}")
+    prep = prepare_scans(
+        start=start, end=end, codes=codes, max_symbols=max_symbols,
+        lookback=lookback, log=emit,
+    )
+    dates = prep["dates"]
+    bench_close = prep["bench_close"]
+    scans = prep["scans"]
+    signals = prep["signals"]
+    amplitudes = prep["amplitudes"]
+    swing_cfg, base_cfg, est_cfg = prep["swing_cfg"], prep["base_cfg"], prep["est_cfg"]
+    n, warmup, limit = prep["n"], prep["warmup"], prep["limit"]
+    bench_lows, windows = prep["bench_lows"], prep["windows"]
+    skipped, symbols_scanned = prep["symbols_skipped"], prep["symbols_scanned"]
+
     if start:
         signals = [s for s in signals if s["date"] >= start]
         amplitudes = [a for a in amplitudes if dates[a["pivot_bar"]] >= start]
@@ -190,7 +239,7 @@ def run(
         f"观测信号 {estimate_data.get('predicted_signals')} 条"
     )
     stats = summarize(signals, amplitudes)
-    stats["symbols_scanned"] = len(symbols) - skipped
+    stats["symbols_scanned"] = symbols_scanned
     stats["symbols_skipped"] = skipped
     density = {
         "trading_days": len(window_days),

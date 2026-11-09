@@ -132,6 +132,8 @@ class Settings(BaseSettings):
     swing_est_entry_lift: float = 2.0  # 发观测信号的概率提升倍数（相对当时已入库样本的基础率）
     swing_est_cost_pct: float = 0.3    # 期望净收益里扣掉的双边成本（百分点）
     swing_est_min_exp_net: float = 0.0  # 期望净收益下限，低于此不发观测信号
+    # 逗号分隔的因果特征（z 必选）：z/streak/since/vol/regime/bench_mom/lead/bench_z
+    swing_est_features: str = "z,streak,since,vol,regime"  # 预估分箱特征集，#122 网格可热更切换
 
     # ---------- 并行模拟账本（同一份信号、不同处置参数各自记账） ----------
     # 与影子账户的区别：影子账户是「日频、重跑整段、能复现选股侧差异」，

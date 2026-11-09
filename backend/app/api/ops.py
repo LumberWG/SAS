@@ -402,3 +402,51 @@ def swing_shadow(tag: str = Query("live", description="摆动影子标签")) -> 
         "estimate": data.get("estimate") or {},
         "note": data.get("note") or "纯观测，不参与交易",
     })
+
+
+@router.get("/estimate-grid")
+def estimate_grid(tag: str = Query("live", description="预估敏感性网格标签")) -> dict:
+    """事前预估的特征敏感性网格**只读**结果（BACKTEST_LOG #122）。
+
+    开发期（前 60% 时间）用来选特征集与参数，样本外只对 top-K 与默认配置
+    评估一次。返回的是 skill / 命中率 / 样本外衰减，不是净值曲线、不含持仓，
+    也不产生任何买卖指令；``conclusion`` 为脚本自动判定，不等于可交易结论。
+    """
+    if not _TAG_RE.fullmatch(tag):
+        raise HTTPException(status_code=400, detail="非法 tag")
+    log_dir = Path(get_settings().kline_dir).parent / "logs"
+    path = (log_dir / f"estimate_grid_{tag}.json").resolve()
+    if log_dir.resolve() not in path.parents:
+        raise HTTPException(status_code=400, detail="路径越界")
+    empty = {
+        "tag": tag, "available": False, "split": {}, "stage1_feature_sets": [],
+        "top_dev": [], "oos_rows": [], "conclusion": None,
+    }
+    if not path.is_file():
+        return with_disclaimer({
+            **empty, "note": "预估敏感性网格尚无产物；运行 scripts/estimate_grid.py 生成",
+        })
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        logger.debug("预估网格读取失败 %s: %s", path, exc)
+        return with_disclaimer({**empty, "note": "预估敏感性网格产物损坏"})
+    return with_disclaimer({
+        "tag": tag,
+        "available": True,
+        "as_of": data.get("as_of"),
+        "start": data.get("start"),
+        "run_at": data.get("run_at"),
+        "updated_at": _fmt_mtime(path),
+        "split": data.get("split") or {},
+        "symbols_scanned": data.get("symbols_scanned"),
+        "ranking_metric": data.get("ranking_metric"),
+        "grid_size": data.get("grid_size"),
+        "stage1_feature_sets": data.get("stage1_feature_sets") or [],
+        "top_dev": data.get("top_dev") or [],
+        "threshold_sensitivity": data.get("threshold_sensitivity") or [],
+        "oos_rows": data.get("oos_rows") or [],
+        "conclusion": data.get("conclusion"),
+        "conclusion_detail": data.get("conclusion_detail"),
+        "note": data.get("note") or "纯研究产物，不参与交易",
+    })

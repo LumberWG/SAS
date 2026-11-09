@@ -237,3 +237,51 @@ def test_breadth_missing_is_graceful(monkeypatch):
     )
     r = ops.breadth_history(10)
     assert r["available"] is False and r["rows"] == []
+
+
+def test_estimate_grid_rejects_bad_tag_and_missing_file(monkeypatch, tmp_path):
+    """#122：网格产物同样不许路径穿越，未生成时优雅降级。"""
+    with pytest.raises(HTTPException):
+        ops.estimate_grid("../secrets")
+    monkeypatch.setattr(
+        ops, "get_settings",
+        lambda: SimpleNamespace(kline_dir=tmp_path / "klines"),
+    )
+    r = ops.estimate_grid("live")
+    assert r["available"] is False and r["stage1_feature_sets"] == []
+    assert r["oos_rows"] == [] and r["conclusion"] is None
+    assert "尚无产物" in r["note"]
+
+
+def test_estimate_grid_returns_split_and_oos_only(monkeypatch, tmp_path):
+    """#122：只读透出切分与样本外对照，不夹带净值/持仓/买卖字段。"""
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    data = {
+        "tag": "live", "start": "2025-01-01", "as_of": "2026-11-06",
+        "run_at": "2026-11-09 08:30:00",
+        "split": {"start_bar": 754, "split_bar": 1021, "n": 1200, "dev_frac": 0.6},
+        "symbols_scanned": 257, "ranking_metric": "brier_skill", "grid_size": 81,
+        "stage1_feature_sets": [{"name": "base", "brier_skill": 0.04}],
+        "top_dev": [{"features": "z,lead,bench_mom", "brier_skill": 0.07}],
+        "oos_rows": [{
+            "label": "default", "features": "z,streak,since,vol,regime",
+            "dev_brier_skill": 0.04, "oos": {"brier_skill": 0.03, "verdict": "below_breakeven"},
+            "dev_to_oos_skill_delta": -0.01,
+        }],
+        "conclusion": "no_tradeable_edge", "conclusion_detail": "样本外未过门槛",
+        "note": "纯研究产物，不参与交易",
+    }
+    (log_dir / "estimate_grid_live.json").write_text(json.dumps(data), encoding="utf-8")
+    monkeypatch.setattr(
+        ops, "get_settings",
+        lambda: SimpleNamespace(kline_dir=tmp_path / "klines"),
+    )
+    r = ops.estimate_grid("live")
+    assert r["available"] is True and r["as_of"] == "2026-11-06"
+    assert r["split"]["split_bar"] == 1021 and r["grid_size"] == 81
+    assert r["conclusion"] == "no_tradeable_edge"
+    assert r["oos_rows"][0]["oos"]["verdict"] == "below_breakeven"
+    assert "净值" not in r["note"] and "持仓" not in r["note"]
+    assert r["updated_at"]
+    assert "disclaimer" in r

@@ -1291,4 +1291,41 @@ exp_net = p_turn · exp_upside − (1 − p_turn) · exp_downside − cost_pct
 
 ---
 
+## 11. 特征敏感性网格与校准口径（2026-11-09，只研究不交易）
+
+### 11.1 三个新增的基准节奏 / 领先型特征（#122）
+
+| 特征 | 计算 | 分箱 | 因果性 |
+|---|---|---|---|
+| `bench_mom` | `B_t / B_{t−5} − 1` | `<−1% / −1%~1% / >1%` | 只用 t 及之前；`np.roll` 绕回头部的前 5 根显式置 0 |
+| `lead` | `(RS_t / RS_{t−5} − 1) − bench_mom_t` | 同上 | 「基准没转向、个股 RS 先转向」的量化代理 |
+| `bench_z` | `(B_t − MA60_t) / SD60_t` | `<−1 / −1~0 / 0~1 / >1` | 60 根 trailing 均值与标准差，窗口不足填中间档 |
+
+`z` 强制排在分箱矩阵第一列：它的 `-1` 同时承担「滚动 Z 窗口未走完，该 bar 不可用」的掩码，`build_samples_and_queries` 依赖这个约定。特征集由 `swing_est_features` 逗号分隔指定，`parse_features()` 拒绝未知名、重复与缺 `z`。
+
+### 11.2 等频十分箱可靠性曲线
+
+#121 用等宽 5 箱 `[0,0.2)…[0.8,1]`，而 `p_turn` p99 仅 0.2111 → 5 箱里 3 箱为空，曲线读不出来。改为把 `(p, y)` 按 `p` 排序后切成 10 个**等样本量**箱：
+
+- 每箱 `predicted = mean(p)`、`actual = mean(y)`；`predicted > actual` 为过度自信，`<` 为低估；
+- `calibration_ece = Σ(count_i × |predicted_i − actual_i|) / N`（拿概率定仓位前必看）；
+- `calibration_bias = mean(p) − mean(y)`；`calibration_slope` 为 10 个箱点 `(predicted, actual)` 的 OLS 斜率，`>1` 表示**排序有信息但概率幅度被压缩**。
+
+#121 默认口径实测：`bias = −0.0105`（低估）、`ECE = 0.0153`、`slope = 1.5821`，q10 预测 0.1656 对实际 0.2453。所以要分清两件事：**概率是低估**，而 #121 的「模型预估净 0.519% vs 实得 0.21%」是 `exp_upside / exp_downside` 的**条件幅度**被高估，两者不是同一个校准问题。
+
+### 11.3 网格与时间切分（防过拟合）
+
+- `build_dataset()` 先造好全部样本与查询；只有 `features / horizon / z_window / confirm_bars` 会影响其内容，`prior_strength / entry_lift / min_exp_net` 只影响重放。网格按 `(features, horizon)` 缓存 dataset，81 组参数只重建 9 次。
+- 时间切分 `split = start_bar + (n − start_bar) × dev_frac`（默认 0.6）。`evaluate_dataset(..., bar_max=split)` 为开发期，`bar_min=split` 为样本外；**样本表始终全量**，靠 `available_bar ≤ q.bar` 推进，所以开发期看不到样本外标签，样本外可以用开发期历史。单测锁死 `dev.queries + oos.queries == 全量` 且分段 Brier 加权平均还原整段。
+- 排序键 `(-brier_skill, calibration_ece, -estimated_queries)`。第三键是覆盖率：分箱维度越多，`min_global_samples=30` 滤掉的 bar 越多（8 维全特征集 33358 次重放 vs 5 维 60949 次），不同覆盖率的 skill 不可直接比。
+- `entry_lift` **不影响 brier_skill**（只决定发不发信号），却能显著改变 `hit_rate`；因此按 `(features, horizon, prior_strength)` 去重、代表行取最接近默认门槛的一组，且**绝不**用命中率选参。样本外只对 top-3 与默认配置各评估一次。
+
+### 11.4 三个判读坑
+
+1. `brier_skill = 1 − Brier / Brier_base` 的分母是**该段自身**的常数基准；两段基础率不同，skill 跨段不可比。top1 样本外 skill 从 0.0464 升到 0.0497 的同时，绝对 Brier 从 0.1047 恶化到 0.1224，只是因为样本外基础率更高、`Brier_base` 从 0.1098 抬到 0.1288 —— 这不叫「没有过拟合」。
+2. 抬高门槛能把命中率从 0.3398 刷到 0.4579，代价是信号从 3464 条骤减到 629 条（−82%），而实得净收益 0.415% → 0.635% → 0.619% **并不随命中率单调提升**。命中率必须与 `predicted_signals`、`mean_realized_net_pct` 一起看。
+3. #121 的动态门槛 `breakeven_hit_pct` 会随分段的 `median_confirmed / median_loss` 变化（67.0% ~ 71.9%），所以「命中率提升了」不等于「跨过门槛了」。
+
+---
+
 *本表为快照，参数以代码当前实现为准；调整权重/阈值请同步 `tests/test_factors.py` 与前端"智能建议"展示。*

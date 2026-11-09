@@ -7516,3 +7516,81 @@ True（关掉后 `t_tick` 仍返回空）；`TestRotation` 新增 `test_rotation
   重点补「基准未转向、个股 RS 先转向」的领先型特征；② 每交易日收盘后跑 `--tag live`
   累积样本（仍未注册调度）；③ 累积 ≥21 个交易日再看分 regime 差异与门槛稳定性。
 
+---
+
+## 记录 #122 — 2026-11-09 · 特征敏感性网格 + 等频可靠性曲线（只研究，样本外仍无可交易边际）
+
+- **起因**：#121 只跑一组特征/参数就判 `below_breakeven`，但「这组不够」不等于「方向不行」；
+  按 #121 下轮计划，先回答「换特征、换尺度能不能把概率信息量提上来」。同时修 #121 的
+  校准口径错误：等宽 5 箱里 3 箱为空（p99 仅 0.2111），可靠性曲线根本读不出来。
+- **条件**：Top300 真实日线（257 只有效）/ 2025-01-01 ~ 2026-11-06 / 基准 1200 根。
+  时间切分 60/40：开发期 2025-01-02~2026-02-05（bar 754–1020）、样本外
+  2026-02-06~2026-11-06（bar 1021–1199）。样本表始终全量、靠 `available_bar ≤ bar`
+  推进；单测锁死 `dev + oos = 全段`（查询数、有效重放数、分段 Brier 加权平均）。
+- **新增 3 个因果特征**：`bench_mom`（基准近 5 根收益）、`lead`（个股 RS 近 5 根变化
+  减基准近 5 根变化，即「基准未转向、个股先转向」的量化）、`bench_z`（基准相对自身
+  MA60/SD60 位置）。`np.roll` 绕回头部的前 5 根显式归零，逐列因果性由单测锁死。
+  **默认特征集仍是 #121 的原 5 维**：重扫后 `stats / signal_density / benchmark`
+  与预估 14 项核心数值逐字段一致，没有偷改基准。
+- **结果（阶段1，10 个特征集，开发期 `brier_skill`）**：`no_regime` 0.0393 >
+  `lead_focus` 0.0370 > `no_vol` 0.0358 > `lead_only` 0.0355 > `base` 0.0350 >
+  `full`(8 维) 0.0323 > `no_since` 0.0314 > `bench_context` 0.0233 > `no_streak` 0.0140 >
+  `z_only` 0.0102。**领先型特征确实带来小幅增量**（0.0350→0.0370），但把 8 维全堆上
+  反而降到 0.0323 —— 分箱稀疏使有效重放从 60949 掉到 33358，不同覆盖率下不可直接比。
+  `no_streak` 塌到 0.0140 说明 `streak`（连跌根数）是最有信息的单维。
+- **结果（阶段2，81 组参数）**：最优 `h=5 / prior=80` 的开发期 skill 0.0464
+  （base 同段 0.0350）。`entry_lift` 完全不影响 Brier（只决定发不发信号），初版
+  top3 被同一配置的三个门槛占满 —— **已修**：按 `(features, horizon, prior)` 去重，
+  代表行取最接近默认门槛的一组，样本外名额还给真正不同的配置。
+- **门槛敏感性（仅开发期，不参与选参）**：`lift` 1.5 / 2.0 / 3.0 → 信号
+  3464 / 2507 / 629 条、命中率 0.3398 / 0.3722 / 0.4579、实得净
+  0.415% / 0.635% / 0.619%。**抬高门槛能刷命中率，但信号骤减 82%、净收益不单调**，
+  这正是「不能用命中率选参」的实证。
+- **样本外（top3 + default 各评估一次，不回头调参）**：
+  | 配置 | dev→oos skill | 绝对 Brier | 命中率 / 门槛 | 实得净 | verdict |
+  |---|---|---|---|---|---|
+  | top1 `z,streak,since,vol` h5/p80 | 0.0464→0.0497 | 0.1047→0.1224 | 0.3916 / 71.9% | −0.148% | `below_breakeven` |
+  | top2 含 regime h5/p80 | 0.0449→0.0476 | 0.1020→0.1220 | 0.3779 / 71.5% | −0.352% | `below_breakeven` |
+  | top3 h5/p40 | 0.0437→0.0458 | 0.1050→0.1229 | 0.4576 / 71.9% | +0.378% | `below_breakeven` |
+  | default (#121 口径) | 0.0350→0.0445 | 0.0717→0.0859 | 0.3166 / 67.0% | −0.114% | `below_breakeven` |
+  → `conclusion = no_tradeable_edge`。最好的一组命中率 45.76% 仍比 71.9% 门槛低
+  26 个百分点，实得净 +0.378% 与 #121 等确认 5.022% 差一个数量级。
+- **归因**：① 概率**低估而非过度自信** —— 默认口径等频十分箱
+  `bias=−0.0105`、`ECE=0.0153`、`slope=1.5821`，q10 预测 0.1656 对实际 0.2453；
+  排序有信息但概率幅度被压缩。#121 说的「过度自信」是 `exp_up/exp_down` 的
+  **条件幅度**被高估（0.519% vs 0.21%），与概率校准是两件事，必须拆开。
+  ② `brier_skill` 是相对各段自身常数基准的比值，**跨段不可比**：样本外 skill 变高
+  只是因为 `Brier_base` 从 0.1098 抬到 0.1288（基础率更高），绝对 Brier 反而恶化，
+  不能读成「没有过拟合」。③ 特征维度的边际收益远小于确认滞后与成本，
+  调阈值/调先验都只是在 4%~5% 的弱信息量里挪动。
+- **建议**：**不接评分、不接下单**，维持 #120 等确认口径；不因「领先型特征略有增量」
+  就改线上 `swing_est_features`（默认仍是 5 维）。下一步更值得做的是**在线概率校准**
+  （isotonic / Platt，须 point-in-time 且只用已入库样本）而不是继续堆特征；
+  即使修好校准，命中率离动态门槛仍差 26pp，所以校准是「把模型读准」，
+  不是「让策略能赚」。若要推翻本结论，需要换标签定义（如转折改判「相对基准的
+  超额」而非 RS 摆动点）与滚动 walk-forward + 多重检验校正，而不是再跑一次网格。
+- **人工判断**：是否继续投研究时间由用户定；本轮不动任何交易逻辑与既有参数。
+- **本轮变更**：`estimate.py` 增可选特征集 / 3 个新特征 / 等频十分箱校准 /
+  `build_dataset`+`evaluate_dataset` 拆分与时间切分；`config.py` / `param_specs.py`
+  增 1 项 `swing_est_features`（设置页「事前预估」）；`scripts/swing_shadow.py` 抽出
+  `prepare_scans()` 供网格复用（重构后产物数值逐字段不变）；新增
+  `scripts/estimate_grid.py`、`tests/test_estimate_grid.py`；
+  `app/api/ops.py` 增 `GET /api/ops/estimate-grid`；产物
+  `data/logs/estimate_grid_live.json`。文档 `README` §8f /
+  `docs/sas_formulas.md` §11 / `WORKLOG` 十一节 / 本记录。
+  **#120 + #121 两批改动已先落 commit `f7fd64d`**（`docs/daily_trade_review.md`
+  为用户侧自动产物，未纳入）。
+- **验证**：`ruff check .` All checks passed；全量 `pytest` **458 例全绿**
+  （447 → 458，新增 11 例：新特征因果性、特征集解析、等频分箱覆盖、
+  dev/oos 切分等价、dataset 复用、门槛去重、网格主流程、接口降级与透出）；
+  正式网格 81 组耗时 3m37s；重扫 `swing_shadow_live.json` 后线上回读：
+  `/api/ops/estimate-grid?tag=live` → `available=true / grid_size=81 /
+  conclusion=no_tradeable_edge / stage1=10 / threshold=3`；
+  `/api/ops/swing-shadow?tag=live` → `verdict=below_breakeven /
+  calibration_kind=equal_frequency_deciles / ece=0.0153 / bias=−0.0105 /
+  slope=1.5821 / bins=10 / features=z,streak,since,vol,regime`；
+  `SASRestart` 08:36:52 触发，`/api/health=ok`。
+- **下轮计划**：① 在线概率校准（point-in-time isotonic / Platt）先修低估与
+  slope>1，且必须单独做样本外；② 若仍无边际，改标签定义为「相对基准超额转折」
+  并换滚动 walk-forward；③ 网格尚未注册调度，也不建议注册 —— 它是研究工具不是日常产物。
+
