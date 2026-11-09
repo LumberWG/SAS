@@ -420,7 +420,8 @@ def estimate_grid(tag: str = Query("live", description="预估敏感性网格标
         raise HTTPException(status_code=400, detail="路径越界")
     empty = {
         "tag": tag, "available": False, "split": {}, "stage1_feature_sets": [],
-        "top_dev": [], "oos_rows": [], "conclusion": None,
+        "top_dev": [], "calibration_comparison": [], "oos_rows": [],
+        "walk_forward_rows": [], "multiple_tests": {}, "conclusion": None,
     }
     if not path.is_file():
         return with_disclaimer({
@@ -444,8 +445,11 @@ def estimate_grid(tag: str = Query("live", description="预估敏感性网格标
         "grid_size": data.get("grid_size"),
         "stage1_feature_sets": data.get("stage1_feature_sets") or [],
         "top_dev": data.get("top_dev") or [],
+        "calibration_comparison": data.get("calibration_comparison") or [],
         "threshold_sensitivity": data.get("threshold_sensitivity") or [],
         "oos_rows": data.get("oos_rows") or [],
+        "walk_forward_rows": data.get("walk_forward_rows") or [],
+        "multiple_tests": data.get("multiple_tests") or {},
         "conclusion": data.get("conclusion"),
         "conclusion_detail": data.get("conclusion_detail"),
         "note": data.get("note") or "纯研究产物，不参与交易",

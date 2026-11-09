@@ -38,9 +38,11 @@ from app.analysis.estimate import (  # noqa: E402
     BASE_FEATURES,
     EstimateConfig,
     EstimateDataset,
+    adjust_multiple_tests,
     build_dataset,
     evaluate_dataset,
     parse_features,
+    walk_forward_dataset,
 )
 from app.config import get_settings  # noqa: E402
 from swing_shadow import prepare_scans  # noqa: E402
@@ -72,13 +74,15 @@ TOP_K = 3
 
 _NOTE = (
     "纯研究产物：开发期选参、样本外只验证一次；排序用 brier_skill 而非命中率；"
-    "概率校准为等频十分箱，predicted<actual 表示低估；"
-    "网格不接评分/下单，样本外未达标即视为当前特征与尺度下无可交易边际。"
+    "概率校准为在线 Platt（只改水平不改排序），校准前后指标并列；"
+    "样本外再按时间等频分折做 walk-forward，并用 Bonferroni 校正试验次数；"
+    "网格不接评分/下单，折间不一致或未过校正阈值即视为无可交易边际。"
 )
 
 _SLIM_KEYS = (
     "estimated_queries", "predicted_signals", "hit_rate", "base_rate",
-    "brier_score", "brier_baseline", "brier_skill",
+    "brier_score", "brier_score_raw", "brier_baseline", "brier_skill",
+    "brier_skill_raw", "calibrated_share",
     "calibration_ece", "calibration_bias", "calibration_slope",
     "mean_realized_net_pct", "median_confirmed_pct", "breakeven_hit_pct",
     "p_turn_p99", "verdict",
@@ -158,6 +162,7 @@ def run_grid(
     max_symbols: int | None = None,
     lookback: int = 1200,
     dev_frac: float = 0.6,
+    folds: int = 5,
     stage1_only: bool = False,
     log=None,
 ) -> dict:
@@ -166,6 +171,8 @@ def run_grid(
         raise ValueError(f"非法 tag: {tag}")
     if not 0.3 <= dev_frac <= 0.8:
         raise ValueError("--dev-frac 需在 [0.3, 0.8]")
+    if not 2 <= folds <= 10:
+        raise ValueError("--folds 需在 [2, 10]")
 
     emit("读取真实 K 线并构造扫描输入…")
     prep = prepare_scans(
@@ -214,6 +221,34 @@ def run_grid(
             best_features.append(item["features"])
     if BASE_FEATURES not in best_features:
         best_features.append(BASE_FEATURES)
+
+    # ---- 校准消融：同一特征集与参数，只切 calibration 开关 ----
+    # #122 的结论是「概率被系统性低估、slope 1.58」，但那只说明有偏，
+    # 不说明「修好偏就能赚」。这一块专门回答校准本身值多少。
+    calibration_comparison: list[dict] = []
+    _CMP_KEYS = (
+        "brier_score", "brier_skill", "calibration_ece", "calibration_bias",
+        "calibration_slope", "predicted_signals", "hit_rate",
+        "mean_realized_net_pct", "verdict",
+    )
+    for kind in ("none", "platt"):
+        cfg_c = replace(cfg0, features=BASE_FEATURES, calibration=kind)
+        ds_c = dataset_for(BASE_FEATURES, cfg_c.horizon)
+        dev_c = evaluate_dataset(ds_c, cfg_c, bar_max=split)
+        oos_c = evaluate_dataset(ds_c, cfg_c, bar_min=split)
+        calibration_comparison.append({
+            "calibration": kind,
+            "dev": {k: dev_c.get(k) for k in _CMP_KEYS},
+            "oos": {k: oos_c.get(k) for k in _CMP_KEYS},
+            "calibrator": oos_c.get("calibrator"),
+            "calibration_before": oos_c.get("calibration_before"),
+        })
+        emit(
+            f"  校准 {kind:5} · 开发 skill {dev_c.get('brier_skill')} "
+            f"(bias {dev_c.get('calibration_bias')} / slope {dev_c.get('calibration_slope')})"
+            f" · 样本外 skill {oos_c.get('brier_skill')} "
+            f"(bias {oos_c.get('calibration_bias')} / slope {oos_c.get('calibration_slope')})"
+        )
 
     # ---- 阶段 2：参数网格（只在开发期） ----
     stage2: list[dict] = []
@@ -300,6 +335,67 @@ def run_grid(
         )
     oos_one("default", BASE_FEATURES, _cfg(cfg0, features=BASE_FEATURES))
 
+    # ---- 阶段 3：滚动 walk-forward（样本外区间分折）+ 多重检验校正 ----
+    # 单次 60/40 切分只能回答「这一段行不行」，回答不了「换个时间还行不行」。
+    # 这里把样本外再等频切成 folds 折，看 skill 的**符号一致性**。
+    wf_rows: list[dict] = []
+    for r in oos_rows:
+        spec = r["features"]
+        cfg_w = _cfg(
+            cfg0, features=spec, horizon=r["horizon"],
+            prior=r["prior_strength"], lift=r["entry_lift"],
+        )
+        wf = walk_forward_dataset(
+            dataset_for(spec, r["horizon"]), cfg_w, folds=folds, bar_min=split,
+        )
+        wf_rows.append({
+            "label": r["label"], "scope": "oos", "features": spec,
+            "horizon": r["horizon"], "prior_strength": r["prior_strength"],
+            "entry_lift": r["entry_lift"], "calibration": cfg_w.calibration,
+            "walk_forward": wf,
+        })
+    # 默认配置没参与选参，可以合法地在**全区间**上再跑一次，作为「无选择性偏差」参照：
+    # 如果连它在全区间都只有 4% 的技巧，说明问题不在挑参，而在特征本身。
+    cfg_def = _cfg(cfg0, features=BASE_FEATURES)
+    wf_default_full = walk_forward_dataset(
+        dataset_for(BASE_FEATURES, cfg_def.horizon), cfg_def, folds=folds,
+    )
+    wf_rows.append({
+        "label": "default_full", "scope": "full", "features": BASE_FEATURES,
+        "horizon": cfg_def.horizon, "prior_strength": cfg_def.prior_strength,
+        "entry_lift": cfg_def.entry_lift, "calibration": cfg_def.calibration,
+        "walk_forward": wf_default_full,
+    })
+    # 校准的稳定性能不能改善折间一致性？默认关闭校准，这里单独跑一遍作对照。
+    if cfg_def.calibration == "none":
+        cfg_pl = replace(cfg_def, calibration="platt")
+        wf_rows.append({
+            "label": "default_platt", "scope": "oos", "features": BASE_FEATURES,
+            "horizon": cfg_pl.horizon, "prior_strength": cfg_pl.prior_strength,
+            "entry_lift": cfg_pl.entry_lift, "calibration": "platt",
+            "walk_forward": walk_forward_dataset(
+                dataset_for(BASE_FEATURES, cfg_pl.horizon), cfg_pl,
+                folds=folds, bar_min=split,
+            ),
+        })
+    for r in wf_rows:
+        w = r["walk_forward"]
+        emit(
+            f"  walk-forward {r['label']:12} ({r['scope']}) · 折数 {w.get('fold_count')} "
+            f"· skill 均值 {w.get('skill_mean')} · 一致性 {w.get('consistency')} "
+            f"· p {w.get('p_value_one_sided')}"
+        )
+
+    n_tests = len(stage2) or len(stage1)
+    primary = next((r for r in wf_rows if r["label"] == "top1"), wf_rows[0] if wf_rows else None)
+    multiple_tests = adjust_multiple_tests(
+        (primary or {}).get("walk_forward", {}).get("p_value_one_sided"),
+        n_tests,
+        consistency=(primary or {}).get("walk_forward", {}).get("consistency"),
+    )
+    multiple_tests["applied_to"] = (primary or {}).get("label")
+    multiple_tests["scope"] = (primary or {}).get("scope")
+
     default = next((r for r in oos_rows if r["label"] == "default"), None)
     best = oos_rows[0] if oos_rows else None
     def_skill = (default or {}).get("oos", {}).get("brier_skill")
@@ -314,12 +410,22 @@ def run_grid(
             "样本外仍有概率信息量，但命中率未过盈亏平衡门槛 / 样本不足，"
             "实得期望净收益不足以覆盖成本与等确认口径。"
         )
+    elif not multiple_tests["significant"]:
+        conclusion = "unstable_out_of_sample"
+        detail = (
+            "样本外命中率表面过门槛，但滚动 walk-forward 的折间一致性不足，"
+            f"或未过 Bonferroni 阈值（{multiple_tests['alpha_bonferroni']}，"
+            f"{multiple_tests['n_tests']} 组试验），不能排除是挑参噪声。"
+        )
     elif def_skill is not None and best_skill <= def_skill:
         conclusion = "no_incremental_value_over_default"
         detail = "样本外最优组合未超过默认配置，网格带来的提升属于开发期过拟合。"
     else:
         conclusion = "needs_walk_forward_validation"
-        detail = "样本外出现正向信号，但只验证过一次，需滚动 walk-forward 与多重检验校正后再判断。"
+        detail = (
+            "样本外与滚动分折方向一致且过多重检验阈值，但只验证过一次；"
+            "仍需更长样本与影子交易累计，才能判断能否接评分。"
+        )
     detail += (
         " 注意：brier_skill 是相对各段自身常数基准的比值，跨时间段不可比 —— "
         "样本外 skill 变高不等于没有过拟合，必须同时看绝对 Brier、命中率与实得净收益。"
@@ -332,7 +438,7 @@ def run_grid(
         "run_at": time.strftime("%Y-%m-%d %H:%M:%S"),
         "split": {
             "start_bar": start_bar, "split_bar": split, "n": n,
-            "dev_frac": dev_frac,
+            "dev_frac": dev_frac, "folds": folds,
             "dev": [dates[start_bar], dates[split - 1]],
             "oos": [dates[split], dates[-1]],
         },
@@ -342,8 +448,11 @@ def run_grid(
         "stage2_param_grid": stage2,
         "grid_size": len(stage2) or len(stage1),
         "top_dev": top_dev,
+        "calibration_comparison": calibration_comparison,
         "threshold_sensitivity": threshold_sensitivity,
         "oos_rows": oos_rows,
+        "walk_forward_rows": wf_rows,
+        "multiple_tests": multiple_tests,
         "conclusion": conclusion,
         "conclusion_detail": detail,
         "note": _NOTE,
@@ -378,6 +487,16 @@ def report(data: dict) -> None:
                 f"    lift={r['entry_lift']} · 信号 {r['predicted_signals']} 条 · "
                 f"命中 {r['hit_rate']} · 实得净 {r['mean_realized_net_pct']}%"
             )
+    if data.get("calibration_comparison"):
+        print("  校准消融（同一特征集，仅切 calibration）：")
+        for r in data["calibration_comparison"]:
+            d, o = r["dev"], r["oos"]
+            print(
+                f"    {r['calibration']:5} 开发 skill={d.get('brier_skill')} "
+                f"bias={d.get('calibration_bias')} slope={d.get('calibration_slope')} "
+                f"→ 样本外 skill={o.get('brier_skill')} bias={o.get('calibration_bias')} "
+                f"slope={o.get('calibration_slope')} hit={o.get('hit_rate')}"
+            )
     print("  样本外（只评估一次，不回头调参）：")
     for r in data.get("oos_rows") or []:
         o = r["oos"]
@@ -386,6 +505,22 @@ def report(data: dict) -> None:
             f"(Δ {r.get('dev_to_oos_skill_delta')}) · 绝对 Brier {r.get('dev_brier_score')}→{o.get('brier_score')} "
             f"· hit={o.get('hit_rate')} 门槛={o.get('breakeven_hit_pct')}% "
             f"· 实得净={o.get('mean_realized_net_pct')}% · {o.get('verdict')}"
+        )
+    print("  滚动 walk-forward（样本外分折，看符号一致性）：")
+    for r in data.get("walk_forward_rows") or []:
+        w = r["walk_forward"]
+        print(
+            f"    {r['label']:12} ({r['scope']}) 折={w.get('fold_count')} "
+            f"skill 均值={w.get('skill_mean')} 中位={w.get('skill_median')} "
+            f"正折={w.get('positive_folds')}/{w.get('fold_count')} "
+            f"一致性={w.get('consistency')} p={w.get('p_value_one_sided')}"
+        )
+    mt = data.get("multiple_tests") or {}
+    if mt:
+        print(
+            f"  多重检验（作用于 {mt.get('applied_to')} / {mt.get('scope')}）："
+            f"试验 {mt.get('n_tests')} 组 · Bonferroni α={mt.get('alpha_bonferroni')} "
+            f"· p={mt.get('p_value_one_sided')} · 显著={mt.get('significant')}"
         )
     print(f"  结论：{data.get('conclusion')} — {data.get('conclusion_detail')}")
     print(f"  {data.get('note')}")
@@ -398,6 +533,7 @@ def main() -> None:
     ap.add_argument("--max-symbols", type=int, default=0, help="覆盖 Settings.swing_max_symbols（试跑用）")
     ap.add_argument("--lookback", type=int, default=1200, help="基准窗口保留最近多少根日线")
     ap.add_argument("--dev-frac", type=float, default=0.6, help="开发期占比 [0.3,0.8]")
+    ap.add_argument("--folds", type=int, default=5, help="样本外 walk-forward 折数 [2,10]")
     ap.add_argument("--stage1-only", action="store_true", help="只跑特征集筛选，跳过参数网格")
     ap.add_argument("--report", action="store_true", help="只打印已有产物，不重跑")
     args = ap.parse_args()
@@ -412,7 +548,8 @@ def main() -> None:
     data = run_grid(
         start=args.start, tag=args.tag,
         max_symbols=args.max_symbols or None, lookback=args.lookback,
-        dev_frac=args.dev_frac, stage1_only=args.stage1_only, log=print,
+        dev_frac=args.dev_frac, folds=args.folds,
+        stage1_only=args.stage1_only, log=print,
     )
     _save(path, data)
     print(f"已写入 {path}")

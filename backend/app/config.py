@@ -134,6 +134,10 @@ class Settings(BaseSettings):
     swing_est_min_exp_net: float = 0.0  # 期望净收益下限，低于此不发观测信号
     # 逗号分隔的因果特征（z 必选）：z/streak/since/vol/regime/bench_mom/lead/bench_z
     swing_est_features: str = "z,streak,since,vol,regime"  # 预估分箱特征集，#122 网格可热更切换
+    swing_est_calibration: str = "none"  # 概率校准：platt（在线 2 参数重标定）/ none（原始分箱概率）
+    swing_est_calib_min_samples: int = 200  # 少于这个已入库样本数就不启用校准，直接用原始概率
+    swing_est_calib_refit_every: int = 20   # 每多少根 bar 重拟合一次校准器（只用当时可见样本）
+    swing_est_calib_l2: float = 1.0         # 校准器向恒等映射 (a=1,b=0) 收缩的强度，防止少样本发散
 
     # ---------- 并行模拟账本（同一份信号、不同处置参数各自记账） ----------
     # 与影子账户的区别：影子账户是「日频、重跑整段、能复现选股侧差异」，

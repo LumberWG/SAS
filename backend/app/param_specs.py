@@ -132,6 +132,14 @@ _LAYOUT: tuple[tuple[str, str, tuple[tuple[str, str, tuple[str, ...]], ...]], ..
                 ),
             ),
             (
+                "概率校准",
+                "把分箱概率在线重标定到真实频率；只改水平不改排序，样本不足自动退化为不校准",
+                (
+                    "swing_est_calibration", "swing_est_calib_min_samples",
+                    "swing_est_calib_refit_every", "swing_est_calib_l2",
+                ),
+            ),
+            (
                 "并行账本",
                 "同一信号多种参数同时跑，实时对比净值",
                 ("paper_sim_enabled", "paper_sim_profiles", "paper_sim_capital"),
@@ -627,6 +635,10 @@ _SHORT_LABELS: dict[str, str] = {
     "swing_est_cost_pct": "双边成本",
     "swing_est_min_exp_net": "净收益下限",
     "swing_est_features": "分箱特征集",
+    "swing_est_calibration": "校准方式",
+    "swing_est_calib_min_samples": "校准最小样本",
+    "swing_est_calib_refit_every": "重拟合间隔",
+    "swing_est_calib_l2": "校准收缩强度",
     "paper_sim_enabled": "并行账本",
     "paper_sim_profiles": "账本方案",
     "paper_sim_capital": "账本本金",

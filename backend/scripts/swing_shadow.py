@@ -23,7 +23,7 @@ import os
 import re
 import sys
 import time
-from dataclasses import asdict
+from dataclasses import asdict, replace
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -234,6 +234,21 @@ def run(
             day["resonance"] += 1
 
     estimate_data = evaluate(scans, bench_close, est_cfg) if scans else {}
+    if estimate_data and est_cfg.calibration == "none":
+        # 线上默认不校准（#123 实测 Brier 无改善、实得净收益反而略降），
+        # 但把「若开启 Platt 会怎样」一起存进产物，接口侧才能回答校准值多少。
+        alt = evaluate(scans, bench_close, replace(est_cfg, calibration="platt"))
+        _ABL = (
+            "brier_score", "brier_skill", "calibration_ece", "calibration_bias",
+            "calibration_slope", "predicted_signals", "hit_rate",
+            "mean_realized_net_pct",
+        )
+        estimate_data["calibration_ablation"] = {
+            "none": {k: estimate_data.get(k) for k in _ABL},
+            "platt": {k: alt.get(k) for k in _ABL},
+            "platt_calibrator": alt.get("calibrator"),
+            "platt_calibration_before": alt.get("calibration_before"),
+        }
     emit(
         f"  事前预估：{estimate_data.get('estimated_queries')} 次 / "
         f"观测信号 {estimate_data.get('predicted_signals')} 条"

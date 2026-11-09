@@ -7594,3 +7594,71 @@ True（关掉后 `t_tick` 仍返回空）；`TestRotation` 新增 `test_rotation
   slope>1，且必须单独做样本外；② 若仍无边际，改标签定义为「相对基准超额转折」
   并换滚动 walk-forward；③ 网格尚未注册调度，也不建议注册 —— 它是研究工具不是日常产物。
 
+## 记录 #123 — 2026-11-09 · 在线 Platt 校准 + 滚动 walk-forward（只研究，概率读准了但仍无交易边际）
+
+- **起因**：按 #122 下轮计划做在线概率校准（Platt）与滚动 walk-forward，并补多重检验
+  校正。要回答两个问题：① 把概率重新校准能不能修好 #122 测出的 `bias −0.0115 / slope 1.7353`？
+  ② 样本外的 4%~5% 技巧在时间上稳不稳，会不会只是挑参挑出来的？
+- **条件**：同 #122 —— Top300 真实日线（257 只有效）/ 2025-01-01 ~ 2026-11-06 / 1200 根基准 /
+  60/40 时间切分（开发 2025-01-02~2026-02-05、样本外 2026-02-06~2026-11-06）。
+- **实现**（`app/analysis/estimate.py`）：
+  ① `PlattCalibrator`：`p' = sigmoid(a·logit(p) + b)`，加权 Newton + 回溯步长，
+     对 `(a−1)² + b²` 加 L2、参数裁剪到 `a∈[0.02,20] / b∈[−8,8]`。`a>0` 保序，
+     只改概率水平不改选股顺序；样本 <200 时严格返回原值。
+  ② 因果约束：训练对 `(logit(p_raw), y)` 用**最小堆按 `available_bar` 排队**
+     （查询按 bar 递增、标签可用时间可能更晚），到期才入库；每 20 根 bar 重拟合一次；
+     按 `x` 取两位小数聚合后加权拟合（10 万样本 → 千级桶）。
+  ③ `walk_forward_dataset()`：按查询条数等频切 5 折，边界落在同一 bar 内则后移；
+     逐折 skill + 均值/标准差/t/单边正态近似 p + 符号一致性。
+  ④ `adjust_multiple_tests()`：Bonferroni `α/n_tests`（n_tests = 81）+ `consistency ≥ 0.6`。
+  ⑤ 新增 4 项可热更参数 `swing_est_calibration / calib_min_samples / calib_refit_every / calib_l2`；
+     `swing_est_calibration` **默认 `none`**，线上口径不变。
+- **踩到一个方法论坑（本轮最值钱的教训）**：`evaluate_dataset(bar_min=split)` 初版只遍历
+  窗口内查询，而校准器的训练流完全靠 `observe()` 喂进来 → 样本外评估时校准器被**冷启动**，
+  Platt 的样本外 skill 被算成 **−0.0389（5 折仅 1 折为正）**，看起来「校准有害」。改成
+  「有校准器时从历史最早处重放全部查询、只统计窗口内指标」后，同一份数据变成
+  **0.0534（5 折全正）**。一般化结论：**切窗口切的是统计口径，不是状态推进**；
+  `calibration="none"` 时跳过窗口外查询仍等价（估计量只由 `advance_to` 驱动），有状态时不行。
+- **结果（校准消融，同一特征集与参数）**：
+  | 口径 | 开发 skill | 样本外 skill | 样本外 bias | 样本外 slope | 样本外 ECE | 样本外命中 | 样本外实得净 |
+  |---|---|---|---|---|---|---|---|
+  | `none` | 0.0350 | 0.0445 | −0.0115 | 1.7353 | 0.0199 | 0.3166 | −0.114% |
+  | `platt` | 0.0269 | **0.0534** | **−0.0028** | **1.2704** | **0.0119** | 0.2825 | −0.364% |
+  校准器样本外终态：`a=1.3412 / b=0.9102 / samples=103954 / refits=22`。
+- **结果（滚动 walk-forward，样本外 5 折）**：`default` 0.0443（5/5 正）、`default_platt`
+  0.0533（5/5 正）、`default_full`（全区间）0.0369（5/5 正）、`top1` 均值 0.0500 / sd 0.0152 /
+  t=7.365；`top2` 0.0485、`top3` 0.0454，均 5/5 正。**概率信息量在时间上是稳的**。
+- **结果（多重检验）**：81 组试验、`α_adj=0.000617`、p < 1e−6、一致性 1.0 → `significant=True`。
+  即「至少有一组配置真的含信息」这一层，过校正。
+- **结果（可交易性，仍未过）**：逐折命中率 0.4767 / 0.3449 / 0.3096 / 0.3975 / 0.4238，
+  对应动态门槛 64.2% / 56.0% / 75.4% / 78.9% / 78.0%，**5 折全部低于门槛**；
+  逐折实得净 +0.742 / −1.292 / −2.512 / +1.783 / +1.248%，符号来回翻。
+  样本外 top1/top2/top3/default 全部 `below_breakeven` → `conclusion = no_tradeable_edge`。
+- **归因**：`breakeven_hit_pct` 高达 56%~79%，因为确认后剩余波段中位数只有 3.5%~6.0%，
+  而误报下探 1.6% 加双边成本 0.3% 后，需要 60%+ 的命中率才划算；模型给的是 30%~48%。
+  **校准修的是「概率准不准」，不是「这段波段够不够厚」** —— 后者由摆动尺度、确认滞后与
+  出场规则决定，换特征/校准都补不上这 25~35 个百分点。
+- **建议**：① 不再在概率层面投研究时间；若继续，应改**标签定义**（转折改判「相对基准的
+  超额」而非 RS 摆动点）与**出场规则**（用 `swing_high` 做移动止盈，替代固定确认口径），
+  这两项才直接作用于「波段还剩多少」；② 若要接评分，必须先有正实得净，当前没有。
+- **人工判断**：校准默认关闭（`none`），线上产物数值与 #122 逐字段一致，只在 `estimate`
+  里额外附 `calibration_ablation` 对照；是否开启由用户在设置页「概率校准」小节决定。
+- **本轮变更**：`estimate.py`（Platt / walk-forward / 多重检验 / 校准前后指标）、
+  `config.py` + `param_specs.py`（4 项 `swing_est_calib*`，设置页新增「概率校准」小节）、
+  `scripts/estimate_grid.py`（校准消融 + 阶段 3 + `--folds` + 结论新增
+  `unstable_out_of_sample`）、`scripts/swing_shadow.py`（产物附 `calibration_ablation`）、
+  `app/api/ops.py`（`/ops/estimate-grid` 透出 `walk_forward_rows / multiple_tests /
+  calibration_comparison`）、`tests/test_swing_calibration.py`（新增 16 例）。
+  文档 `README` §8g / `docs/sas_formulas.md` §12 / `WORKLOG` 十一节 / 本记录。
+- **验证**：`ruff check .` All checks passed；全量 `pytest` **474 例全绿**（458 → 474）；
+  正式网格 81 组 + 6 行 walk-forward 耗时 1m49s；重扫 `swing_shadow_live.json` 后
+  `SASRestart` 09:03:09 触发，线上回读：`/api/ops/swing-shadow?tag=live` →
+  `verdict=below_breakeven / brier=0.0777 / brier_score_raw=0.0777 / calibrator.kind=none /
+  calibrated_share=0.0 / calibration_ablation{none,platt}`；
+  `/api/ops/estimate-grid?tag=live` → `grid_size=81 / conclusion=no_tradeable_edge /
+  walk_forward_rows=6 / n_tests=81 / α_adj=0.000617 / p<1e−6 / significant=true`。
+- **下轮计划**：① 若继续研究，先改标签为「相对基准超额转折」并重跑同一套 walk-forward +
+  多重检验，看门槛是否下降；② 试 `swing_high` 移动止盈替代固定确认口径，直接抬
+  `median_confirmed`；③ 两条都不做的话，本方向维持「只观测」状态，不再投入。
+
+
