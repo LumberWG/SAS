@@ -139,6 +139,15 @@ class Settings(BaseSettings):
     swing_est_calib_refit_every: int = 20   # 每多少根 bar 重拟合一次校准器（只用当时可见样本）
     swing_est_calib_l2: float = 1.0         # 校准器向恒等映射 (a=1,b=0) 收缩的强度，防止少样本发散
 
+    # ---------- 出场规则实验（只研究：比较固定持有与跟踪止盈，不接交易） ----------
+    # BACKTEST_LOG #124：确认后剩余波段只有 3.5%~6.0%，概率层面补不上，只能从出场找。
+    # 默认仍是 fixed（3 根），与 #120~#123 的既有口径一致；改这几项只影响报告对照。
+    swing_exit_mode: str = "fixed"     # fixed / atr_trail / swing_trail
+    swing_exit_hold_bars: int = 3      # fixed 的持有根数；跟踪模式下的最长持有上限
+    swing_exit_atr_k: float = 1.8      # 跟踪回撤宽度 = k × 入场时 ATR 占价格比例
+    swing_exit_floor_pct: float = 2.5  # 回撤宽度下限，ATR 很小时避免被噪声扫掉
+    swing_exit_take_profit_pct: float = 0.0  # >0 时触及该涨幅直接止盈，0 = 不封顶
+
     # ---------- 并行模拟账本（同一份信号、不同处置参数各自记账） ----------
     # 与影子账户的区别：影子账户是「日频、重跑整段、能复现选股侧差异」，
     # 并行账本是「tick 级、共享信号、只能复现处置侧差异」，两者互补。

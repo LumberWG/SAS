@@ -150,6 +150,7 @@ def prepare_scans(
         aligned = _align(df, dates)
         close = aligned["close"].astype(float).reset_index(drop=True)
         first_valid = close.first_valid_index()
+        last_valid = close.last_valid_index()
         if first_valid is None or int(first_valid) > n - warmup - 5:
             skipped += 1
             continue
@@ -165,11 +166,19 @@ def prepare_scans(
         signals.extend(s for s in sig if s["bar"] >= int(first_valid) + warmup)
         amplitudes.extend(a for a in amp if a["pivot_bar"] >= int(first_valid) + warmup)
         rs = relative_strength(close, bench_close)
+        # #124 出场实验需要价格与波动率：ATR 用补空后的收盘重算，避免上市前
+        # 的 NaN 传播；价格摆动高点用同一套 SwingConfig，保证「前高」与信号同尺度。
+        atr = wilder_atr(aligned.assign(close=close), 14).reset_index(drop=True)
+        price_points = detect_swings(close, atr=atr, config=swing_cfg)
         scans.append(SymbolScan(
             code=code,
             rs=rs,
             points=detect_swings(rs, config=swing_cfg),
             first_bar=max(int(first_valid) + warmup, start_bar),
+            close=close,
+            atr=atr,
+            price_highs=[p for p in price_points if p.kind == "high"],
+            last_valid_bar=int(last_valid) if last_valid is not None else None,
         ))
         if idx % 100 == 0:
             emit(f"  已扫描 {idx}/{len(symbols)} 只 · 累计信号 {len(signals)}")

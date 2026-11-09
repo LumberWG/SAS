@@ -124,12 +124,24 @@ def estimate_config_from_settings() -> EstimateConfig:
 
 @dataclass(frozen=True)
 class SymbolScan:
-    """一只票扫描后的最小输入；``first_bar`` 是 warmup + 起始日期之后的首根有效 bar。"""
+    """一只票扫描后的最小输入；``first_bar`` 是 warmup + 起始日期之后的首根有效 bar。
+
+    ``close`` / ``atr`` / ``price_highs`` 是 #124 为出场实验补的**可选**输入：
+    预估本身只用 ``rs`` 与 ``points``，出场模拟才需要价格与波动率。默认 ``None``
+    让 #121~#123 的既有调用与单测无需改动。
+    """
 
     code: str
     rs: pd.Series
     points: list[SwingPoint]
     first_bar: int
+    close: pd.Series | None = None
+    atr: pd.Series | None = None
+    price_highs: list[SwingPoint] | None = None
+    #: 个股真实数据的最后一根（退市/长期停牌后会被 ffill 成常数）。出场实验
+    #: 必须在这一根之前入场，否则会统计出一堆「收盘永远不变、收益恒为 0」的
+    #: 僵尸样本 —— #124 冒烟时 239 条信号里有 9 条来自 3 只已退市的票。
+    last_valid_bar: int | None = None
 
 
 @dataclass(frozen=True)
@@ -195,6 +207,9 @@ class _Query:
     confirmed_pct: float
     loss_pct: float
     available_bar: int = 0
+    #: #124：标签成立时的实际入场 bar（低点确认那根）；``y_truth == 0`` 时为 -1。
+    #: 出场实验只在这个 bar 之后模拟，绝不从 ``bar`` 直接入场（那是未确认的极值）。
+    entry_bar: int = -1
 
 
 @dataclass
@@ -348,11 +363,13 @@ def build_samples_and_queries(
             # 幅度用到了配对高点的 pivot 值，必须等该高点被确认才能入库
             available = high.confirmed_bar
             loss = 0.0
+            entry_bar = int(low.confirmed_bar)
         elif turning:
             y = 1
             downside = (low.value / arr[s] - 1.0) * 100.0
             upside, confirmed, loss = 0.0, 0.0, 0.0
             available = low.confirmed_bar + cfg.horizon + 1
+            entry_bar = int(low.confirmed_bar)
         else:
             y = 0
             window = arr[s:s + cfg.horizon + 1]
@@ -361,6 +378,7 @@ def build_samples_and_queries(
             loss = abs(downside)
             # 没有低点这一结论，也要等确认窗口走完才成立
             available = s + cfg.horizon + cfg.confirm_bars + 1
+            entry_bar = -1
 
         avail = max(available, s + 1)
         samples.append(TurnSample(
@@ -374,7 +392,7 @@ def build_samples_and_queries(
         queries.append(_Query(
             bar=s, code=scan.code, key=key, y_truth=y,
             forward_pct=upside, confirmed_pct=confirmed, loss_pct=loss,
-            available_bar=avail,
+            available_bar=avail, entry_bar=entry_bar,
         ))
     return samples, queries
 

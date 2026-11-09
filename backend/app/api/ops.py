@@ -454,3 +454,60 @@ def estimate_grid(tag: str = Query("live", description="预估敏感性网格标
         "conclusion_detail": data.get("conclusion_detail"),
         "note": data.get("note") or "纯研究产物，不参与交易",
     })
+
+
+@router.get("/exit-lab")
+def exit_lab(tag: str = Query("live", description="出场规则实验标签")) -> dict:
+    """出场规则实验的**只读**结果（BACKTEST_LOG #124）。
+
+    回答的是「换出场规则能不能把确认后剩余波段变厚」：固定持有 3/5/10 根、
+    ATR 跟踪止盈、前高移动止盈各跑一遍，绝对收益与相对基准的超额收益并列。
+
+    与 ``/ops/estimate-grid`` 的口径差异必须看 ``entry_basis``：``signal_next``
+    是信号次日收盘买入（可交易），``confirmed_low`` 是低点确认后买入（事后口径）。
+    含误报、已扣双边成本；不是净值曲线、不含持仓、不产生买卖指令。
+    """
+    if not _TAG_RE.fullmatch(tag):
+        raise HTTPException(status_code=400, detail="非法 tag")
+    log_dir = Path(get_settings().kline_dir).parent / "logs"
+    path = (log_dir / f"exit_lab_{tag}.json").resolve()
+    if log_dir.resolve() not in path.parents:
+        raise HTTPException(status_code=400, detail="路径越界")
+    empty = {
+        "tag": tag, "available": False, "all_rows": [], "dev_rows": [], "oos_rows": [],
+        "dev_selection": {}, "oos_best": {}, "oos_folds": [], "conclusion": None,
+    }
+    if not path.is_file():
+        return with_disclaimer({
+            **empty, "note": "出场规则实验尚无产物；运行 scripts/exit_lab.py 生成",
+        })
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        logger.debug("出场实验读取失败 %s: %s", path, exc)
+        return with_disclaimer({**empty, "note": "出场规则实验产物损坏"})
+    return with_disclaimer({
+        "tag": tag,
+        "available": True,
+        "as_of": data.get("as_of"),
+        "start": data.get("start"),
+        "run_at": data.get("run_at"),
+        "updated_at": _fmt_mtime(path),
+        "elapsed_sec": data.get("elapsed_sec"),
+        "symbols_scanned": data.get("symbols_scanned"),
+        "signals": data.get("signals"),
+        "signal_hit_rate": data.get("signal_hit_rate"),
+        "dev_cut_date": data.get("dev_cut_date"),
+        "entry_bases": data.get("entry_bases") or [],
+        "all_rows": data.get("all_rows") or [],
+        "dev_rows": data.get("dev_rows") or [],
+        "oos_rows": data.get("oos_rows") or [],
+        "dev_selection": data.get("dev_selection") or {},
+        "oos_best": data.get("oos_best") or {},
+        "oos_folds": data.get("oos_folds") or [],
+        "fold_positive": data.get("fold_positive"),
+        "fold_consistency": data.get("fold_consistency"),
+        "conclusion": data.get("conclusion"),
+        "conclusion_detail": data.get("conclusion_detail"),
+        "note": data.get("note") or "纯研究产物，不参与交易",
+    })

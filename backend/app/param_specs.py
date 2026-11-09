@@ -140,6 +140,14 @@ _LAYOUT: tuple[tuple[str, str, tuple[tuple[str, str, tuple[str, ...]], ...]], ..
                 ),
             ),
             (
+                "出场规则",
+                "确认后固定持有 vs ATR 跟踪止盈 vs 前高移动止盈（只研究，不接交易）",
+                (
+                    "swing_exit_mode", "swing_exit_hold_bars", "swing_exit_atr_k",
+                    "swing_exit_floor_pct", "swing_exit_take_profit_pct",
+                ),
+            ),
+            (
                 "并行账本",
                 "同一信号多种参数同时跑，实时对比净值",
                 ("paper_sim_enabled", "paper_sim_profiles", "paper_sim_capital"),
@@ -444,6 +452,9 @@ _MIN_EXCLUSIVE: dict[str, float] = {
     "paper_stop_loss": 0.0,
     "paper_take_profit": 0.0,
     "paper_single_position_max": 0.0,
+    # 出场规则：持有上限 0 根没有意义（等于入场即卖），ATR 倍数 0 会让跟踪退化成死止损
+    "swing_exit_hold_bars": 0.0,
+    "swing_exit_atr_k": 0.0,
 }
 
 #: 不允许为负的数值项（费率类：负费率会让回测/实盘 PnL 凭空变好）
@@ -639,6 +650,11 @@ _SHORT_LABELS: dict[str, str] = {
     "swing_est_calib_min_samples": "校准最小样本",
     "swing_est_calib_refit_every": "重拟合间隔",
     "swing_est_calib_l2": "校准收缩强度",
+    "swing_exit_mode": "出场模式",
+    "swing_exit_hold_bars": "持有上限",
+    "swing_exit_atr_k": "跟踪ATR倍数",
+    "swing_exit_floor_pct": "回撤下限",
+    "swing_exit_take_profit_pct": "止盈上限",
     "paper_sim_enabled": "并行账本",
     "paper_sim_profiles": "账本方案",
     "paper_sim_capital": "账本本金",

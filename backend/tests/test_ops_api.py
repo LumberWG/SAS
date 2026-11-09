@@ -285,3 +285,105 @@ def test_estimate_grid_returns_split_and_oos_only(monkeypatch, tmp_path):
     assert "净值" not in r["note"] and "持仓" not in r["note"]
     assert r["updated_at"]
     assert "disclaimer" in r
+
+
+def test_exit_lab_rejects_bad_tag_and_missing_file(monkeypatch, tmp_path):
+    """#124：出场实验产物不许路径穿越，未生成时优雅降级。"""
+    with pytest.raises(HTTPException):
+        ops.exit_lab("../secrets")
+    monkeypatch.setattr(
+        ops, "get_settings",
+        lambda: SimpleNamespace(kline_dir=tmp_path / "klines"),
+    )
+    r = ops.exit_lab("live")
+    assert r["available"] is False and r["all_rows"] == []
+    assert r["oos_rows"] == [] and r["conclusion"] is None
+    assert "尚无产物" in r["note"]
+
+
+def test_exit_lab_exposes_entry_basis_and_oos(monkeypatch, tmp_path):
+    """#124：必须把入场口径与样本外验证一起透出，否则「正收益」会被误读。"""
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    data = {
+        "tag": "live", "start": "2025-01-01", "as_of": "2026-11-06",
+        "run_at": "2026-11-09 10:00:00", "elapsed_sec": 16.8,
+        "symbols_scanned": 257, "signals": 2713, "signal_hit_rate": 0.3011,
+        "dev_cut_date": "2026-03-23",
+        "entry_bases": ["signal_next", "confirmed_low"],
+        "all_rows": [{"entry_basis": "signal_next", "exit": "atr12",
+                      "mean_net_pct": 0.379, "mean_excess_pct": 0.169,
+                      "verdict": "beta_only"}],
+        "oos_rows": [{"entry_basis": "signal_next", "exit": "atr25",
+                      "mean_net_pct": -3.045, "verdict": "negative_expectancy"}],
+        "dev_selection": {"entry_basis": "signal_next", "exit": "atr25"},
+        "oos_best": {"exit": "atr25", "mean_net_pct": -3.045},
+        "oos_folds": [{"fold": 1, "mean_net_pct": 1.142}],
+        "fold_positive": 1, "fold_consistency": 0.2,
+        "conclusion": "no_tradeable_edge", "conclusion_detail": "样本外均值为负",
+        "note": "纯研究产物，不参与交易",
+    }
+    (log_dir / "exit_lab_live.json").write_text(json.dumps(data), encoding="utf-8")
+    monkeypatch.setattr(
+        ops, "get_settings",
+        lambda: SimpleNamespace(kline_dir=tmp_path / "klines"),
+    )
+    r = ops.exit_lab("live")
+    assert r["available"] is True and r["as_of"] == "2026-11-06"
+    assert r["entry_bases"] == ["signal_next", "confirmed_low"]
+    assert r["dev_selection"]["exit"] == "atr25"
+    assert r["oos_best"]["mean_net_pct"] == -3.045
+    assert r["conclusion"] == "no_tradeable_edge"
+    assert "净值" not in r["note"] and "持仓" not in r["note"]
+    assert "disclaimer" in r
+
+
+def test_exit_lab_rejects_bad_tag_and_missing_file(monkeypatch, tmp_path):
+    """#124：出场实验产物不许路径穿越，未生成时优雅降级。"""
+    with pytest.raises(HTTPException):
+        ops.exit_lab("../secrets")
+    monkeypatch.setattr(
+        ops, "get_settings",
+        lambda: SimpleNamespace(kline_dir=tmp_path / "klines"),
+    )
+    r = ops.exit_lab("live")
+    assert r["available"] is False and r["all_rows"] == []
+    assert r["oos_rows"] == [] and r["conclusion"] is None
+    assert "尚无产物" in r["note"]
+
+
+def test_exit_lab_exposes_entry_basis_and_oos(monkeypatch, tmp_path):
+    """#124：必须把入场口径与样本外验证一起透出，否则「正收益」会被误读。"""
+    log_dir = tmp_path / "logs"
+    log_dir.mkdir()
+    data = {
+        "tag": "live", "start": "2025-01-01", "as_of": "2026-11-06",
+        "run_at": "2026-11-09 10:00:00", "elapsed_sec": 16.8,
+        "symbols_scanned": 257, "signals": 2713, "signal_hit_rate": 0.3011,
+        "dev_cut_date": "2026-03-23",
+        "entry_bases": ["signal_next", "confirmed_low"],
+        "all_rows": [{"entry_basis": "signal_next", "exit": "atr12",
+                      "mean_net_pct": 0.379, "mean_excess_pct": 0.169,
+                      "verdict": "beta_only"}],
+        "oos_rows": [{"entry_basis": "signal_next", "exit": "atr25",
+                      "mean_net_pct": -3.045, "verdict": "negative_expectancy"}],
+        "dev_selection": {"entry_basis": "signal_next", "exit": "atr25"},
+        "oos_best": {"exit": "atr25", "mean_net_pct": -3.045},
+        "oos_folds": [{"fold": 1, "mean_net_pct": 1.142}],
+        "fold_positive": 1, "fold_consistency": 0.2,
+        "conclusion": "no_tradeable_edge", "conclusion_detail": "样本外均值为负",
+        "note": "纯研究产物，不参与交易",
+    }
+    (log_dir / "exit_lab_live.json").write_text(json.dumps(data), encoding="utf-8")
+    monkeypatch.setattr(
+        ops, "get_settings",
+        lambda: SimpleNamespace(kline_dir=tmp_path / "klines"),
+    )
+    r = ops.exit_lab("live")
+    assert r["available"] is True and r["as_of"] == "2026-11-06"
+    assert r["entry_bases"] == ["signal_next", "confirmed_low"]
+    assert r["dev_selection"]["exit"] == "atr25"
+    assert r["oos_best"]["mean_net_pct"] == -3.045
+    assert r["conclusion"] == "no_tradeable_edge"
+    assert "净值" not in r["note"] and "持仓" not in r["note"]
+    assert "disclaimer" in r
