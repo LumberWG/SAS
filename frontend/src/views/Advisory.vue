@@ -24,6 +24,7 @@ import {
   getSellRecommendations,
   setQueueFilter,
   type EntryGuard,
+  type EntryRegime,
   type EntrySignal,
   type QueueFilter,
   type RecommendationItem,
@@ -44,6 +45,9 @@ const focusDate = ref<string | null>(null)
 const summary = ref<Awaited<ReturnType<typeof getAdvisorySummary>> | null>(null)
 const updatedAt = ref<string | null>(null)
 const entryGuard = ref<EntryGuard | null>(null)
+const buyBlocked = ref(false)
+const buyRawCount = ref(0)
+const buyRegime = ref<EntryRegime | null>(null)
 let timer: number | undefined
 
 async function load() {
@@ -60,6 +64,9 @@ async function load() {
     focusDate.value = focusData.for_date
     summary.value = summaryData
     updatedAt.value = buyData.updated_at ?? sellData.updated_at
+    buyBlocked.value = !!buyData.blocked_by_guard
+    buyRawCount.value = buyData.raw_buy_count ?? 0
+    buyRegime.value = buyData.regime ?? null
     staleNotice.value = false
     loadFailed = false
     // 入场护栏（影子层）：市场状态滤网 + 日内追高护栏，仅提示不参与交易
@@ -299,11 +306,26 @@ onUnmounted(() => {
         </div>
       </div>
       <div class="flex items-center gap-3">
-        <div class="rounded-lg border border-up/30 bg-up/10 px-4 py-2 text-center">
-          <div class="font-num text-[23.5px] font-bold leading-none text-up">
+        <div
+          class="rounded-lg border px-4 py-2 text-center"
+          :class="summary?.buy_blocked_by_guard
+            ? 'border-down/30 bg-down/10'
+            : 'border-up/30 bg-up/10'"
+        >
+          <div
+            class="font-num text-[23.5px] font-bold leading-none"
+            :class="summary?.buy_blocked_by_guard ? 'text-down' : 'text-up'"
+          >
             {{ summary?.buy_count ?? 0 }}
           </div>
           <div class="mt-1 text-[12.5px] text-content-faint">建议买入</div>
+        </div>
+        <div
+          v-if="summary?.buy_blocked_by_guard"
+          class="flex items-center gap-1.5 rounded-lg border border-down/40 bg-down/10 px-3 py-2 text-[12.5px] text-down"
+        >
+          <ShieldAlert class="h-4 w-4" />
+          硬屏蔽生效（下降市，已拦截 {{ summary?.blocked_buy_count ?? 0 }} 条）
         </div>
         <div class="rounded-lg border border-down/30 bg-down/10 px-4 py-2 text-center">
           <div class="font-num text-[23.5px] font-bold leading-none text-down">
@@ -476,9 +498,21 @@ onUnmounted(() => {
             </div>
           </div>
           <div v-if="buys.length === 0" class="flex flex-col items-center gap-2 py-10 text-content-faint">
-            <ArrowUpCircle class="h-8 w-8 opacity-30" />
-            <p class="text-[13.5px]">暂无买入建议</p>
-            <p class="text-[12.5px]">交易时段每分钟自动分析自选股，建议产生后即时撮合成交；未配置自选股时无建议</p>
+            <template v-if="buyBlocked">
+              <ShieldAlert class="h-8 w-8 text-down" />
+              <p class="text-[13.5px] font-medium text-down">
+                下降市硬屏蔽：已拦截 {{ buyRawCount }} 条新开仓买入建议
+              </p>
+              <p class="text-[12.5px]">
+                上证 {{ buyRegime?.close?.toFixed(2) }} &lt; MA20 {{ buyRegime?.ma20?.toFixed(2) }}（{{ buyRegime?.as_of }}），
+                按「入场护栏硬屏蔽」设置不开新仓；卖出与做T不受影响
+              </p>
+            </template>
+            <template v-else>
+              <ArrowUpCircle class="h-8 w-8 opacity-30" />
+              <p class="text-[13.5px]">暂无买入建议</p>
+              <p class="text-[12.5px]">交易时段每分钟自动分析自选股，建议产生后即时撮合成交；未配置自选股时无建议</p>
+            </template>
           </div>
         </div>
       </section>

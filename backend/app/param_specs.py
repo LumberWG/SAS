@@ -34,6 +34,8 @@ RUNTIME_KEYS: frozenset[str] = frozenset({
     # 弱市买入闸门：一天之内可能要多试几次（关掉看是否恢复买入/卖出），
     # 改 .env 重启代价太高，且它是「今天是否开仓」的唯一决定项。
     "paper_regime_weak_pause",
+    # 入场护栏硬屏蔽：盘中想立刻开/关「下降市拦截买入」，改 .env 重启代价太高
+    "entry_guard_block_declining_market",
     # 弱市保留仓位：属于风险偏好档位，盘中想从「全暂停」切到「留三成」要能立刻生效
     "paper_weak_exposure",
     # 动态机制降暴露：风险偏好档位，盘中切换要立刻生效（同弱市保留仓位）
@@ -291,7 +293,8 @@ _LAYOUT: tuple[tuple[str, str, tuple[tuple[str, str, tuple[str, ...]], ...]], ..
                 "指数在均线下方时收缩买入",
                 ("paper_regime_ma", "paper_regime_weak_pause", "paper_weak_exposure",
                  "paper_dynamic_exposure", "paper_regime_cap_calm", "paper_regime_cap_weak",
-                 "paper_regime_cap_shock", "paper_regime_cap_crisis"),
+                 "paper_regime_cap_shock", "paper_regime_cap_crisis",
+                 "entry_guard_block_declining_market"),
             ),
         ),
     ),
@@ -597,6 +600,7 @@ _SHORT_LABELS: dict[str, str] = {
     # ---- 大盘择时 ----
     "paper_regime_ma": "择时均线",
     "paper_regime_weak_pause": "弱市暂停买入",
+    "entry_guard_block_declining_market": "入场护栏硬屏蔽",
     "paper_weak_exposure": "弱市保留仓位",
     "paper_dynamic_exposure": "动态机制降暴露",
     "paper_regime_cap_calm": "平稳仓上限",

@@ -7830,3 +7830,45 @@ True（关掉后 `t_tick` 仍返回空）；`TestRotation` 新增 `test_rotation
   另增「入场护栏明细」面板，逐条列出近期信号（名称/代码/策略/日期 + flags 标签 + 追高提示），保证即便买入列表为空也有数据可见。
 - `Ops.vue`（复盘页）：同样补「入场护栏明细」面板，与信号卡片页一致。
 - 编译校验：前端 `npm run build` **✓ built**（Advisory/Ops 通过）；接口回读 `signals[].flags` 与 `intraday.triggered/note` 字段与前端映射一致。
+
+---
+
+## 记录 #127 — 2026-11-09 · 入场护栏升级为「可开关的硬屏蔽」（#126 续）
+
+### 起因
+用户授权把 #126 的「影子层提示」升级为「硬屏蔽」——下降市直接不生成/不撮合动量买仓。
+按一贯约束，做成了**可开关配置项 + 默认关闭**，不破坏线上默认行为。
+
+### 设计（双拦截，复用既有闸门）
+新增设置 `entry_guard_block_declining_market: bool = False`（默认关），由 `entry_guard.should_block_buy()`
+统一判定：仅当**开关打开 且 上证 close < MA20（declining）** 时返回 `(True, regime)`，否则 `(False, regime)`。
+- **展示层**（`app/api/advisory.py` 的 `/advisory/buy` 与 `/advisory/summary`）：下降市拦截时返回空列表 +
+  `blocked_by_guard=True` / `raw_buy_count` / `regime`；角标 `buy_count` 归零并附 `buy_blocked_by_guard`。
+- **执行层**（`app/paper/engine.py`）：两处注入 `should_block_buy()`——
+  (a) `execute_recommendations` 的 `buy_candidates` 构建处，拦掉新开仓买入并记 `skip`（原因「下降市硬屏蔽」），
+      卖出与做T买回不受影响；
+  (b) 实时 tick 的 `buy_paused` 闸门并入 `or _guard_blocked`，复用既有「弱市暂停买入」机制（日志自然含「暂停自动买入」）。
+- 与 #126 已有的 `paper_regime_weak_pause`（MA60 弱市暂停）**并存且独立**：本开关更紧（MA20）、且默认关。
+
+### 可开关 + 设置页可见
+- `app/param_specs.py`：加入 `RUNTIME_KEYS`（盘中可即时开/关）、「大盘择时」分组、`入场护栏硬屏蔽(MA20下降市)` 标签。
+- `app/api/ops.py` 的 `/api/ops/entry-guard`：新增 `block_enabled` 与 `block_state`（`off`/`armed`/`declining`），
+  前端据此显示「硬屏蔽：未启用 / 已布防（非下降市） / 已拦截新开仓」。
+
+### 前端（纯展示，不改后端逻辑）
+- `api/index.ts`：扩展 `getBuyRecommendations` / `getAdvisorySummary` 返回类型 + `EntryGuard.block_enabled/block_state`。
+- `Advisory.vue`：买入列表空态区分——`buyBlocked` 时显示红字「下降市硬屏蔽：已拦截 N 条新开仓买入建议」+
+  上证/MA20 数值；「建议买入」角标在拦截时转红并显示「硬屏蔽生效（已拦截 N 条）」。
+- `Ops.vue`：市场状态横幅右侧加「硬屏蔽」状态标签。
+
+### 验证
+- `ruff` 全过；`tests/test_entry_guard.py` 由 5→**9 例**（新增 `should_block_buy` 默认关/下降市拦截/布防未触发 +
+  `ops._entry_guard_block_state` 三态）；前端 `npm run build` **✓ built**。
+- 端到端（临时开开关后恢复）：开关 ON + 当前 declining → `/advisory/buy` 返回 `items=0 / blocked_by_guard=True /
+  raw_buy_count=26`，`/advisory/summary` 的 `buy_count=0 / buy_blocked_by_guard=True`；开关 OFF → 正常返回 26 条。
+- 引擎层：`should_block_buy()` 返回 True 时 `buy_candidates=[]`（卖出/做T不受影响）。
+- `SASRestart` 后接口回读：`/api/ops/entry-guard` 的 `block_enabled=false / block_state.state=off`（默认关，行为不变）。
+
+### 决策
+本开关默认关闭，维持「只研究、不改线上默认」；用户可在**设置页「大盘择时」分组**一键开启
+「入场护栏硬屏蔽(MA20下降市)」，开启后下降市真正拦截新开仓买入（展示+自动撮合双拦截）。

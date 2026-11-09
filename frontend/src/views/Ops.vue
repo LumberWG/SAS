@@ -227,6 +227,17 @@ onUnmounted(() => {
         </template>
       </span>
       <span class="opacity-80">下降市中动量信号 20 日超额转负，新开仓建议等待指数站回 MA20 上方</span>
+      <span
+        v-if="entryGuard?.block_state"
+        class="rounded border px-2 py-0.5 text-[11.5px]"
+        :class="entryGuard.block_state.enabled
+          ? (entryGuard.block_state.active ? 'border-down/40 bg-down/15 text-down' : 'border-up/40 bg-up/15 text-up')
+          : 'border-white/15 bg-white/5 text-content-faint'"
+      >
+        <template v-if="!entryGuard.block_state.enabled">硬屏蔽：未启用</template>
+        <template v-else-if="entryGuard.block_state.active">硬屏蔽：已拦截新开仓</template>
+        <template v-else>硬屏蔽：已布防（非下降市）</template>
+      </span>
     </div>
     <!-- 入场护栏明细：逐信号 flags 标签（影子层，仅提示，不参与交易） -->
     <div

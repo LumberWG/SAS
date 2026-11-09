@@ -50,3 +50,93 @@ def test_evaluate_entry_guards_shape_and_flags():
     # 当前为下降市时，新动量信号应被标注「慎开新仓」
     if out["regime"]["new_entry_advice"] == "avoid":
         assert all("下降市慎开新仓" in s["flags"] for s in out["signals"])
+
+
+def test_should_block_buy_off_by_default():
+    # 默认开关关闭：即使处于下降市也不拦截
+    s = eg.get_settings()
+    prev = s.entry_guard_block_declining_market
+    s.entry_guard_block_declining_market = False
+    try:
+        blocked, regime = eg.should_block_buy()
+        assert blocked is False
+        # regime 仍返回（供展示），但不触发拦截
+        assert isinstance(regime, dict)
+    finally:
+        s.entry_guard_block_declining_market = prev
+
+
+def test_should_block_buy_active_in_declining_market(monkeypatch):
+    # 开关打开 + 下降市 -> 拦截并附 regime
+    s = eg.get_settings()
+    prev = s.entry_guard_block_declining_market
+    s.entry_guard_block_declining_market = True
+    try:
+        monkeypatch.setattr(
+            eg, "market_regime",
+            lambda: {"state": "declining", "close": 3600.0, "ma20": 3680.0,
+                     "ma60": 3830.0, "as_of": "2026-11-09",
+                     "new_entry_advice": "avoid"},
+        )
+        blocked, regime = eg.should_block_buy()
+        assert blocked is True
+        assert regime["state"] == "declining"
+    finally:
+        s.entry_guard_block_declining_market = prev
+
+
+def test_should_block_buy_armed_but_not_declining(monkeypatch):
+    # 开关打开但非下降市（如上升市）-> 不拦截
+    s = eg.get_settings()
+    prev = s.entry_guard_block_declining_market
+    s.entry_guard_block_declining_market = True
+    try:
+        monkeypatch.setattr(
+            eg, "market_regime",
+            lambda: {"state": "uptrend", "close": 3700.0, "ma20": 3680.0,
+                     "ma60": 3830.0, "as_of": "2026-11-09",
+                     "new_entry_advice": "ok"},
+        )
+        blocked, regime = eg.should_block_buy()
+        assert blocked is False
+        assert regime["state"] == "uptrend"
+    finally:
+        s.entry_guard_block_declining_market = prev
+
+
+def test_ops_block_state_reflects_setting(monkeypatch):
+    # _entry_guard_block_state 应如实反映「未启用 / 已布防(非下降市) / 已拦截(下降市)」
+    from app.api import ops
+
+    s = eg.get_settings()
+    prev = s.entry_guard_block_declining_market
+    try:
+        # 1) 未启用
+        s.entry_guard_block_declining_market = False
+        st = ops._entry_guard_block_state()
+        assert st["enabled"] is False and st["state"] == "off"
+
+        # 2) 已启用 + 下降市 -> 拦截
+        s.entry_guard_block_declining_market = True
+        monkeypatch.setattr(
+            eg, "market_regime",
+            lambda: {"state": "declining", "close": 3600.0, "ma20": 3680.0,
+                     "ma60": 3830.0, "as_of": "2026-11-09",
+                     "new_entry_advice": "avoid"},
+        )
+        st = ops._entry_guard_block_state()
+        assert st["enabled"] is True and st["active"] is True and st["state"] == "declining"
+
+        # 3) 已启用 + 上升市 -> 布防但未触发
+        monkeypatch.setattr(
+            eg, "market_regime",
+            lambda: {"state": "uptrend", "close": 3700.0, "ma20": 3680.0,
+                     "ma60": 3830.0, "as_of": "2026-11-09",
+                     "new_entry_advice": "ok"},
+        )
+        st = ops._entry_guard_block_state()
+        assert st["enabled"] is True and st["active"] is False and st["state"] == "armed"
+    finally:
+        s.entry_guard_block_declining_market = prev
+
+

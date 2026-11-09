@@ -611,7 +611,9 @@ def entry_guard(
        尾盘 / 回踩均线买入，勿追当根尖峰。
 
     返回 ``regime``（当前市场状态）、``guards``（阈值）、``signals``（逐条叠加 flags）。
-    只读，不改动选股 / 评分 / 下单逻辑。
+    另返回 ``block_enabled``（硬屏蔽开关是否打开）与 ``block_state``（实际生效状态：
+    off / armed 已布防但非下降市 / declining 已生效拦截）。只读，不改选股 / 评分 / 下单逻辑；
+    硬屏蔽本身由 ``entry_guard_block_declining_market`` 开关控制，默认关闭。
     """
     from app.analysis.entry_guard import evaluate_entry_guards
 
@@ -627,4 +629,24 @@ def entry_guard(
             "note": f"\u5165\u573a\u62a4\u680f\u8ba1\u7b97\u5931\u8d25\uff1a{exc}",
         })
     result["available"] = True
+    result["block_enabled"] = bool(
+        getattr(get_settings(), "entry_guard_block_declining_market", False)
+    )
+    result["block_state"] = _entry_guard_block_state()
     return with_disclaimer(result)
+
+
+def _entry_guard_block_state() -> dict:
+    """当前硬屏蔽的实际生效状态（供前端展示「已布防 / 未启用 / 已启用但非下降市」）。"""
+    from app.analysis.entry_guard import should_block_buy
+
+    blocked, regime = should_block_buy()
+    enabled = bool(getattr(get_settings(), "entry_guard_block_declining_market", False))
+    if not enabled:
+        return {"enabled": False, "active": False, "state": "off"}
+    return {
+        "enabled": True,
+        "active": blocked,
+        "state": "declining" if blocked else "armed",
+        "regime": regime or None,
+    }

@@ -817,6 +817,9 @@ export function getBuyRecommendations(): Promise<{
   items: RecommendationItem[]
   batch: string | null
   updated_at: string | null
+  blocked_by_guard?: boolean
+  raw_buy_count?: number
+  regime?: EntryRegime | null
 }> {
   return http.get('/advisory/buy').then((r) => r.data)
 }
@@ -847,6 +850,9 @@ export function getAdvisorySummary(): Promise<{
   trading_day: boolean
   auto_watch_enabled: boolean
   auto_watch_top_n: number
+  buy_blocked_by_guard?: boolean
+  blocked_buy_count?: number
+  regime?: EntryRegime | null
 }> {
   return http.get('/advisory/summary').then((r) => r.data)
 }
@@ -1478,6 +1484,13 @@ export interface EntryGuard {
   guards: { gap_threshold: number; spike_threshold: number }
   signals: EntrySignal[]
   note?: string
+  block_enabled?: boolean
+  block_state?: {
+    enabled: boolean
+    active: boolean
+    state: 'off' | 'armed' | 'declining'
+    regime?: EntryRegime | null
+  }
 }
 export function getEntryGuard(limit = 20): Promise<EntryGuard> {
   return http.get('/ops/entry-guard', { params: { limit } }).then((r) => r.data)

@@ -38,6 +38,7 @@ import pandas as pd
 
 from app.analysis.regime import detect_regime
 from app.analysis.policy_floor import detect_policy_floor, circuit_breaker_state
+from app.analysis.entry_guard import should_block_buy
 from app.config import get_settings
 from app.data.cache import db
 from app.data.service import get_kline_cached
@@ -962,6 +963,24 @@ class PaperEngine:
         buy_candidates = [r for r in recommendations if r.action == "buy"]
         sell_candidates = [r for r in recommendations if r.action == "sell"]
 
+        # 入场护栏硬屏蔽（#126 续）：下降市且开关打开时，硬拦截新开仓买入，不送进引擎。
+        # 只拦「新开仓」，卖出与做T买回不受影响；开关默认关闭，零行为变更。复用
+        # should_block_buy()（上证 < MA20 才触发），与展示层 /advisory/buy 同一口径。
+        _guard_blocked, _guard_regime = should_block_buy()
+        if _guard_blocked:
+            for rec in buy_candidates:
+                results.append(TradeResult(
+                    rec.code, getattr(rec, "name", ""), "skip", 0,
+                    0.0, 0.0, 0.0, "下降市硬屏蔽（入场护栏）",
+                ))
+            logger.info(
+                "入场护栏硬屏蔽：下降市（上证 %.2f < MA20 %.2f）拦截 %d 条新开仓买入",
+                float(_guard_regime.get("close") or 0),
+                float(_guard_regime.get("ma20") or 0),
+                len(buy_candidates),
+            )
+            buy_candidates = []
+
         # ---- 卖出优先（释放资金与仓位名额） ----
         for rec in sell_candidates:
             pos = positions.get(rec.code)
@@ -1022,7 +1041,12 @@ class PaperEngine:
             #: 回测 #59/#60：0.3~0.5 在急跌月小亏、换震荡/反弹时的收益，代价是涨市初期踏空。
             weak_exposure = float(getattr(self.settings, "paper_weak_exposure", 0.0) or 0.0)
             weak_pause_all = market_weak and weak_exposure <= 0
-        # ---- 硬性回撤熔断：最高优先级，凌驾于机制层与任何买入信号 ----
+        # 入场护栏硬屏蔽（#126 续）：下降市且开关打开时，并入既有买入暂停闸门。
+        # 复用 should_block_buy()（上证 < MA20 才触发），与展示层 /advisory/buy 同一口径。
+        _guard_blocked = should_block_buy()[0]
+        if _guard_blocked:
+            logger.info("入场护栏硬屏蔽：下降市（上证在 MA20 下方）并入买入暂停闸门，新开仓买入全部拦截")
+    # ---- 硬性回撤熔断：最高优先级，凌驾于机制层与任何买入信号 ----
         # 开启时计算当前组合回撤；一旦触发，强制全暂停买入 + 总仓位压到 target。
         cb_tripped = False
         cb_target = 0.0
@@ -1085,7 +1109,7 @@ class PaperEngine:
         )
         open_delayed = self._open_delayed(datetime.now())
         open_cooldown = self._open_cooldown(datetime.now())
-        buy_paused = weak_pause_all or crash_pause_buy or open_delayed or open_cooldown
+        buy_paused = weak_pause_all or crash_pause_buy or open_delayed or open_cooldown or _guard_blocked
         # 轮动冻结只认「开盘保护」（跳空护栏/延迟/冷静期）；弱市全暂停档不冻结轮动，
         # 让轮动能「清出弱票腾名额」（P1）。开盘利空/刚开盘不操作，连轮动也停。
         rotation_paused = open_delayed or open_cooldown or crash_pause_buy

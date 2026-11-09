@@ -24,10 +24,25 @@ def buy_recommendations() -> dict:
     前端优先展示 realtime，避免看到几分钟（或昨天）的价格。
     """
     items = _latest_by_action(("intraday", "premarket"), "buy")
+    # 入场护栏硬屏蔽（#126 续）：下降市且开关打开时，拦截新开仓买入的展示。
+    # 只拦「展示」，不删数据；卖出与做T不受影响。开关默认关闭。
+    from app.analysis.entry_guard import should_block_buy
+
+    blocked, regime = should_block_buy()
+    if blocked:
+        return with_disclaimer({
+            "items": [],
+            "batch": _batch_of(items),
+            "updated_at": _latest_time(items),
+            "blocked_by_guard": True,
+            "raw_buy_count": len(items),
+            "regime": regime,
+        })
     return with_disclaimer({
         "items": with_realtime(_with_detail(items)),
         "batch": _batch_of(items),
         "updated_at": _latest_time(items),
+        "blocked_by_guard": False,
     })
 
 
@@ -66,8 +81,14 @@ def advisory_summary() -> dict:
     sell = _sell_items()
     # 明日关注取最新批次即可（盘后生成、对应下一开盘日，本就不该按今日过滤）
     focus = db.list_recommendations("focus", "focus", dedupe_by_code=True)
+    # 入场护栏硬屏蔽（#126 续）：下降市且开关打开时，买入角标归零并附拦截标记，
+    # 与 /advisory/buy 的空列表保持一致。
+    from app.analysis.entry_guard import should_block_buy
+
+    blocked, regime = should_block_buy()
+    buy_count = 0 if blocked else len(buy)
     return with_disclaimer({
-        "buy_count": len(buy),
+        "buy_count": buy_count,
         "sell_count": len(sell),
         "focus_count": len(focus),
         "focus_batch": db.latest_batch("focus"),
@@ -75,6 +96,9 @@ def advisory_summary() -> dict:
         "trading_day": is_trading_day(),
         "auto_watch_enabled": settings.auto_watch_enabled,
         "auto_watch_top_n": settings.auto_watch_top_n,
+        "buy_blocked_by_guard": blocked,
+        "blocked_buy_count": len(buy) if blocked else 0,
+        "regime": regime if blocked else None,
     })
 
 

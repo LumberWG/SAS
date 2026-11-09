@@ -185,3 +185,22 @@ def evaluate_entry_guards(limit: int = 20, signal_table: str = "signals") -> dic
         },
         "signals": items,
     }
+
+
+def should_block_buy() -> tuple[bool, dict]:
+    """是否应因入场护栏硬屏蔽新开仓买入。
+
+    仅当设置 ``entry_guard_block_declining_market=True`` 且当前市场状态为
+    ``declining``（上证 close < MA20）时返回 ``(True, regime)``；其余一律
+    ``(False, regime)``。纯只读、不抛异常、不 500。
+
+    这是把影子层「提示」升级为「硬屏蔽」的唯一开关：开启后由调用方（买入建议
+    展示 + 自动交易引擎）据此拦截新开仓买入，但不影响卖出与做T买回。
+    """
+    s = get_settings()
+    if not getattr(s, "entry_guard_block_declining_market", False):
+        return (False, {})
+    regime = market_regime()
+    if regime.get("state") == "declining":
+        return (True, regime)
+    return (False, regime)

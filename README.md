@@ -850,6 +850,8 @@ SAS/
 
 **落地（不改选股/评分/下单逻辑）**：`app/analysis/entry_guard.py` 提供 `market_regime()`（上证 vs MA20/MA60 判上升/震荡/下降市）、`intraday_spike()`（信号日高开 >3% 或盘中冲高 >5% 触发追高提示）、`evaluate_entry_guards()`；`GET /api/ops/entry-guard` 透出 `regime / guards / signals[].flags`；前端「智能建议」与「运维复盘」页顶部加**市场状态横幅**（下降市显红「慎开新仓」+ 上证/MA20 数值）。详见 `BACKTEST_LOG` #126。
 
+**升级为可开关硬屏蔽（#127）**：在 #126 影子层提示基础上，新增设置 `entry_guard_block_declining_market`（默认 **关闭**），开启后下降市（上证 < MA20）**硬拦截所有新开仓买入**——既不在「智能建议 / 买入」列表展示，也不送进自动交易引擎成交；卖出与做T买回不受影响。与既有 `paper_regime_weak_pause`（MA60 弱市暂停）并存独立。开关可在**设置页「大盘择时」分组**一键开启；开启后前端买入列表与角标转为红字「硬屏蔽生效（已拦截 N 条）」，复盘页横幅显示「硬屏蔽：已布防 / 已拦截新开仓」。详见 `BACKTEST_LOG` #127。
+
 ---
 
 **再次提醒：本系统仅供学习研究，不构成投资建议。**
