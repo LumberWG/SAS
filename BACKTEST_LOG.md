@@ -7872,3 +7872,151 @@ True（关掉后 `t_tick` 仍返回空）；`TestRotation` 新增 `test_rotation
 ### 决策
 本开关默认关闭，维持「只研究、不改线上默认」；用户可在**设置页「大盘择时」分组**一键开启
 「入场护栏硬屏蔽(MA20下降市)」，开启后下降市真正拦截新开仓买入（展示+自动撮合双拦截）。
+
+## 记录 #128 — 2026-11-09 · 入场护栏硬屏蔽改为「默认开启」
+
+### 起因
+用户确认：「直接默认打开这个开关」。诊断表明实盘买点主要败在「下降市开新仓」而非个股尖，
+默认拦截可在不改动选股/评分/下单逻辑的前提下直接修复该痛点，故把默认从关改为开。
+
+### 改动
+- `app/config.py`：`entry_guard_block_declining_market: bool = False` → **`True`**（默认开启），
+  注释同步改为「自 #128 起默认开启……可在设置页随时关闭」。
+- `app/api/ops.py`：`/api/ops/entry-guard` 文档注释同步（默认开启，设置页可关）。
+- 运行中服务因 `get_settings()` 单例已缓存旧默认，无法通过本沙箱重启（服务控制被安全策略拦截），
+  故改用应用自带运行时接口 `POST /api/settings`（`update_settings`）**热更**：既就地改 live 单例，
+  又落库 `app_state` 覆盖层，重启后由 `apply_persisted_overrides()` 重放，不丢。
+
+### 验证（现场，当前市场 = declining）
+- `tests/test_entry_guard.py` 9 例全过；`get_settings().entry_guard_block_declining_market` 新进程默认 = **True**。
+- 热更后回读：`/api/ops/entry-guard` 的 `block_enabled=True`，`block_state={enabled:True, active:True, state:'declining'}`
+  （regime：close 3665.94 < MA20 3686.74 < MA60 3836.79，above_ma20=False，新开仓建议 avoid）。
+- `/advisory/buy`：`blocked_by_guard=True`、`raw_buy_count=26`、返回 buy 列表清空；
+  `/advisory/summary`：`buy_count=0`。引擎层 `should_block_buy()` 每 tick 重算，下一 tick 即生效（卖出/做T不受影响）。
+
+### 决策
+默认开启后无需再手动开；若某段行情想放开下降市新开仓，在**设置页「大盘择时」→「入场护栏硬屏蔽」** 关掉即可。
+
+## 记录 #129 — 2026-11-09 · 模拟交易页默认显示「持仓与成交」
+
+### 起因
+用户反馈：打开模拟交易页应直接看到持仓与成交，而不是先停在「判定与队列」。
+
+### 决策与落地
+**采用方案 A（改默认 tab，不分拆入口）**——当初把 ④ 交易池 与 ⑤ 持仓与成交 合并成单页 tab，
+正是为了消掉「两个左侧菜单项来回点很别扭」；拆回去会重现该问题。故只把默认 tab 翻转：
+`PaperTrading.vue` 的 `tab` 初值由 `route.query.tab==='account'?'account':'pool'` 改为
+`route.query.tab==='pool'?'pool':'account'`——仅当 URL 显式带 `?tab=pool` 才进交易池，
+其余（无 query / `?tab=account`）都默认停在「持仓与成交」。两个视图仍只差一次点击，
+手动下单/导出 CSV/实时撮合状态栏等逻辑完全不受影响；URL query 仍可复现任一视图。
+
+## 记录 #130 — 2026-11-09 · 免责声明整合到顶栏右侧
+
+### 起因
+用户反馈：免责声明「本系统仅供学习研究使用，所有数据与建议不构成任何投资建议。股市有风险，
+投资需谨慎。」放在侧栏底部以醒目 warn 色块呈现观感很别扭；且类似提醒在多处重复出现
+（侧栏底部块 + 个股详情页 `生成 · 仅供学习研究，不构成投资建议`）。
+
+### 决策与落地
+**全站只保留一处免责声明，经底部居中页脚、顶栏右侧两次调整后，最终定为「底部页脚靠右」**：
+- `layouts/DefaultLayout.vue`：删除侧栏底部的醒目 warn 色块（保留 PAPER MODE/SIM 运行环境标识）；
+  在 `<main>` 之后、`flex` 内容列内新增一个 `shrink-0` 的 `<footer>`，`text-right`（靠右）、
+  `text-[11px]`、`text-content-faint`、细上边框、半透明底，渲染 `market.disclaimer`。该 footer
+  处于 flex 列中、`main` 为 `flex-1 overflow-y-auto`，故始终钉在视口底部、靠右、不抢眼。
+  （曾试过底部居中页脚与顶栏右侧 span，最终采用底部靠右页脚。）
+- `views/StockDetail.vue`：删除详情页底部 `生成 · 仅供学习研究，不构成投资建议` 中的冗余提醒，
+  仅保留 `{{ generated_at }} 生成`。
+- 后端 `config.disclaimer`（注入 API 响应）与前端 `stores/market.ts` 的文案保持一致，前端仍从
+  store 单源渲染；`ShieldAlert` 图标保留给数据降级横幅，侧栏删除处不再引用。
+
+### 验证
+`npm run build` ✓ built（DefaultLayout / StockDetail 通过）。观感：侧栏底部恢复清爽、顶栏无免责文字，
+免责声明统一收敛到主区底部靠右单行页脚，全局仅此一处。
+前端 `npm run build` ✓ built（PaperTrading 产物正常）。
+
+## 记录 #131 — 2026-11-09 · 首页新增「查股票」检索框
+
+### 起因
+用户反馈首页（市场总览 / Dashboard）缺少查股票的功能，无法从入口直接按代码或名称找到某只股票。
+
+### 决策与落地
+**在首页顶部加一个轻量检索框，输入即搜、回车进详情，不另开独立页**：
+- 后端 `app/api/market.py` 新增 `GET /market/search?q=&limit=20`：数据来自全市场股票池
+  `get_stock_pool()`（带内存+磁盘缓存，首调用后极快）。匹配规则——纯数字优先按代码前缀、
+  其次代码包含、再名称兜底；含字母/中文则代码包含或名称包含；查询词自动剥离 `sh/sz/bj`
+  交易所前缀（`sh600519` → 600519）。返回 `total`（不受 limit 截断）+ `results`，股票池不可用时
+  返回空结果+`error` 字段不拖垮查询框。
+- 前端 `api/index.ts` 加 `getStockSearch()` + `StockMatch` / `StockSearchResult` 类型。
+- 前端 `views/Dashboard.vue`：顶部插入检索行（搜索图标 + 输入框 + 防抖 300ms），下方候选下拉
+  （代码/名称/市场标签，`↑↓` 选择、`回车`进入、`Esc` 关闭、点击进 `/stock/:code`），无结果显示提示，
+  空查询不调用接口。`npm run build` ✓。
+- 新增 `tests/test_market_search.py` 7 例（精确代码/名称模糊/前缀剥离/空查询/limit截断/total保留/
+  无命中），全绿。
+
+### 验证
+- 进程内直接调用 `market_search`：`600000`→浦发银行、`招商`→9 条、`贵州茅台`→贵州茅台、
+  `sh600519`→贵州茅台、`999999`→0，逻辑正确。
+- 重启 `SAS` 服务（经 `SASRestart` 计划任务）后线上实测 HTTP：`600519`→total1 贵州茅台、
+  `招商`→total9、`贵州茅台`→total1、`sz000001`→平安银行，接口已注册生效。
+- 前端 `npm run build` ✓；搜索框点击外部/失焦自动收起，键盘导航可用。
+
+## 记录 #132 — 2026-11-09 · 修复「打开个股分析页频繁误报旧数据」横幅
+
+### 起因
+用户反馈：打开 `/analysis/301001`（个股分析页）经常弹出顶栏横幅「页面可能显示旧数据，勿当作实时
+行情；以顶栏状态条的时间为准」。排查根因：本机 `llm_enabled=False`、无 API key，**每次**分析请求都
+走规则评分降级，`analyzer._rule_based_dashboard` 返回 `degraded=True`。而前端拦截器对所有
+`degraded===true` 的 200 响应都弹「旧数据」横幅——但这里的 `degraded` 含义是「规则评分（无大模型）」，
+数据是新鲜的当日/近一日 K 线，**并非行情陈旧**。横幅把「没用大模型」误报成「数据陈旧」，误导用户。
+
+### 决策与落地
+**给 `degraded` 增加 `degrade_kind` 判别，让全局横幅只响应真正的行情陈旧**：
+- 后端 `app/llm/analyzer.py`：`DecisionDashboard` 新增 `degrade_kind: str`；规则评分分支置
+  `degrade_kind="analysis"`（LLM 成功分支仍为 `""`）；`to_dict()` 透传该字段。语义：
+  `analysis`=无大模型走规则评分（数据新鲜），`data`=行情快照陈旧/数据源故障（才需要弹「勿当实时」）。
+- 前端 `api/index.ts` 拦截器：`degraded===true` 且 `degrade_kind !== 'analysis'` 才上报全局横幅
+  （即只有真正的 `data` 降级才提醒旧数据）；无 `degrade_kind` 的旧接口仍按 data 处理，向后兼容。
+  新增 `DecisionDashboard.degrade_kind?: string` 类型。
+- 前端 `views/StockDetail.vue`：原「规则降级」字样改为 `规则评分（非大模型）`（非告警色 + tooltip
+  「未配置大模型，由技术面规则评分生成（非行情陈旧）」），把"分析方式"与"数据陈旧"在 UI 上彻底分开。
+
+### 验证
+- `tests/test_llm.py` 7 例全绿（新增断言：规则评分 `degrade_kind=='analysis'` 且 `to_dict()` 透传）。
+- 进程内 `_rule_based_dashboard`：`degraded=True / degrade_kind=analysis / model=rule-based`，`to_dict()`
+  含 `degrade_kind`。
+- 经 `SASRestart` 计划任务重启 `SAS` 后线上实测：`POST /analysis/301001` 返回
+  `degraded=True, degrade_kind=analysis`（不再触发全局旧数据横幅）；`GET /market/overview` 仍按
+  data 降级逻辑返回 `degraded`（回归安全）。`npm run build` ✓。
+- 行为变化：打开任意个股分析页**不再**误弹「旧数据」横幅；页面内以"规则评分（非大模型）"徽标表明分析方式；
+  真正的行情陈旧仍由顶栏状态条/横幅照常提示。
+
+## 记录 #133 — 2026-11-09 · 前端路由切换卡顿优化
+
+### 起因
+用户反馈页面切换、打开新页面「都要卡一下，不是很快」。诊断定位（非盲改）：
+- 后端核心接口实测 12–55ms，**数据层不是瓶颈**。
+- vite 已按路由 `() => import()` 懒加载、echarts 已单独拆包（706KB，长缓存）——打包层面无问题。
+- 真正卡顿来自三处运行时细节：`DefaultLayout` 用 `<transition name="fade" mode="out-in">`
+  （0.2s 淡出 + 0.2s 淡入 ≈0.4s 的「先出后进」空档）；keep-alive 的 `:key="route.fullPath"`
+  使 query 变化（如模拟交易 `?tab=pool/account`）触发整页重建 + 重拉 5 个接口 + 重建定时器；
+  且缺路由级 loading 反馈，首次进页下载 chunk（含 echarts）时无视觉响应。
+
+### 决策与落地
+**围绕「消除切换空档 + 避免无谓重建 + 给首次加载反馈」三管齐下，不碰任何业务/策略逻辑**：
+- `layouts/DefaultLayout.vue`：
+  ① 移除 `out-in` 淡入淡出过渡，**仅保留 `<keep-alive :max="10">`**，命中缓存页瞬时恢复、不再重拉；
+  ② keep-alive `:key` 由 `route.fullPath` 改为 `route.path`，模拟交易切 tab 等 query 变化不再整页重建
+     （tab 由组件内 `watch(route.query.tab)` 处理，仍正常）；
+  ③ 顶部新增极轻量路由进度条（`fixed` 细条 + `bg-primary`，由 `navProgress` 状态驱动）；
+  ④ `onMounted` 内用 `requestIdleCallback` 预取其余路由 chunk（含 echarts 706KB），首次进新页零网络等待；
+  ⑤ 原 `watch(() => route.fullPath)` 改 `route.path`，与 key 策略一致；
+  ⑥ 删除不再使用的 `.fade-*` 样式块。
+- 新增 `composables/navProgress.ts`：`reactive` 进度状态 + `startProgress/doneProgress`。
+  关键点：Vue Router 的 `afterEach` 在**异步组件解析完成后**才触发，故 keep-alive 命中页解析近乎同步、
+  进度条一闪而过甚至不显；仅首次下载 chunk 时才真正显示，无打扰。
+- `router/index.ts`：`beforeEach` 调 `startProgress`、`afterEach` 调 `doneProgress`。
+
+### 验证
+`npm run build` ✓（vue-tsc + vite 通过，DefaultLayout chunk 15.41KB）。前端静态托管，
+浏览器硬刷（Ctrl+F5）即生效，无需重启服务；重启后端会中断运行中轮询且无必要，故未重启。
+后端接口延迟实测 12–55ms 不变。

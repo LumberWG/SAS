@@ -72,6 +72,9 @@ class PendingSignal:
     #: ⑤ 回踩确认：tick 期间是否曾触及「信号价 ×(1-pullback)」。置位后不再要求
     #: 成交时刻价格仍在回踩线下方（避免反弹一次就永久错过）。
     armed: bool = False
+    #: 选股来源标记（仅由扫描命中送交易时填充）：{"task_id": ..., "strategy": ...}。
+    #: 透传到 provenance（source=scan），让成交溯源明确显示「来自选股」。
+    scan: dict | None = None
 
     def to_dict(self) -> dict:
         return {
@@ -84,6 +87,7 @@ class PendingSignal:
             "waiting_seconds": int((datetime.now() - self.created_at).total_seconds()),
             "price_at_signal": self.price_at_signal,
             "score": round(self.score, 1),
+            "scan": self.scan,
         }
 
 
@@ -93,6 +97,17 @@ def _signal_score(rec) -> float:
         return float(getattr(rec, "score", 0.0) or 0.0)
     except (TypeError, ValueError):
         return 0.0
+
+
+def _parse_scan(raw: Any) -> dict | None:
+    """把持久化的 scan JSON 还原成 dict（重启回填用）。非法/缺失返回 None。"""
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw) if isinstance(raw, str) else raw
+        return data if isinstance(data, dict) else None
+    except (ValueError, TypeError):
+        return None
 
 
 @dataclass
@@ -223,6 +238,7 @@ class LiveTrader:
                 expire_at=self._expiry(now, action),
                 price_at_signal=getattr(rec, "price", None),
                 score=_signal_score(rec),
+                scan=getattr(rec, "_scan", None),
             )
             self._pending[code] = signal
             # 并行账本各存一份：主账本成交后信号就出队了，而账本可能因自己的
@@ -977,6 +993,7 @@ class LiveTrader:
                 "created_at": s.created_at.isoformat(timespec="seconds"),
                 "expire_at": s.expire_at.isoformat(timespec="seconds"),
                 "price_at_signal": s.price_at_signal, "score": s.score,
+                "scan": json.dumps(s.scan, ensure_ascii=False) if s.scan else None,
             })
         for s in self._backlog.values():
             items.append({
@@ -985,6 +1002,7 @@ class LiveTrader:
                 "created_at": s.created_at.isoformat(timespec="seconds"),
                 "expire_at": s.expire_at.isoformat(timespec="seconds"),
                 "price_at_signal": s.price_at_signal, "score": s.score,
+                "scan": json.dumps(s.scan, ensure_ascii=False) if s.scan else None,
             })
         try:
             db.save_paper_pending_snapshot(items)
@@ -1019,6 +1037,7 @@ class LiveTrader:
                 expire_at=expire,
                 price_at_signal=r.get("price_at_signal"),
                 score=float(r.get("score") or 0.0),
+                scan=_parse_scan(r.get("scan")),
             )
             if r.get("kind") == "backlog":
                 self._backlog[sig.code] = sig

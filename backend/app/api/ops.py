@@ -613,7 +613,8 @@ def entry_guard(
     返回 ``regime``（当前市场状态）、``guards``（阈值）、``signals``（逐条叠加 flags）。
     另返回 ``block_enabled``（硬屏蔽开关是否打开）与 ``block_state``（实际生效状态：
     off / armed 已布防但非下降市 / declining 已生效拦截）。只读，不改选股 / 评分 / 下单逻辑；
-    硬屏蔽本身由 ``entry_guard_block_declining_market`` 开关控制，默认关闭。
+    硬屏蔽本身由 ``entry_guard_block_declining_market`` 开关控制，自 #128 起默认开启
+    （下降市自动拦截新开仓买入），可在设置页随时关闭。
     """
     from app.analysis.entry_guard import evaluate_entry_guards
 

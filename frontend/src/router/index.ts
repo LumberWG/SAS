@@ -17,6 +17,7 @@
  * meta.stage 保留五段式的阶段序号，供以后做流程可视化/引导使用（当前未消费）。
  */
 import { createRouter, createWebHistory, type RouteLocation } from 'vue-router'
+import { startProgress, doneProgress } from '../composables/navProgress'
 
 const routes = [
   {
@@ -95,7 +96,14 @@ const router = createRouter({
   routes,
 })
 
+// 路由切换进度条：首次进入需下载动态 chunk（含 echarts 706KB）时给出顶部细条反馈，
+// keep-alive 命中的页面解析近乎同步，条一闪而过甚至不显，无打扰。
+router.beforeEach(() => {
+  startProgress()
+})
+
 router.afterEach((to) => {
+  doneProgress()
   const title = to.meta.title as string | undefined
   document.title = title ? `${title} · SAS 智能投研终端` : 'SAS 智能投研终端'
   // 导航成功说明入口与懒加载 chunk 匹配，解除「已尝试重载」标记

@@ -361,14 +361,14 @@ class Scanner:
                 task.total, len(task.hits), task.skipped, auto_added,
             )
             # 选股 → 建议 → 实时交易：盘中命中立即分析并送入实时队列
-            await self._trade_top_hits(task.hits)
+            await self._trade_top_hits(task.hits, getattr(task, "task_id", None))
         except Exception as exc:  # noqa: BLE001 - 整轮失败记录状态
             task.status = "error"
             task.error = str(exc)
             task.finished_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
             logger.exception("扫描任务失败: %s", exc)
 
-    async def _trade_top_hits(self, hits: list[dict]) -> None:
+    async def _trade_top_hits(self, hits: list[dict], task_id: str | None = None) -> None:
         """把命中 TopN 立即送入「建议 → 实时交易」队列（打通选股到成交）。
 
         盘中：分析完立刻入队，下个 tick（≤5s）按实时价成交。
@@ -419,7 +419,20 @@ class Scanner:
 
         try:
             results = await asyncio.gather(*(analyze(h) for h in picked))
-            recommendations = [r for r in results if r is not None]
+            recommendations = []
+            for rec, hit in zip(results, picked):
+                if rec is None:
+                    continue
+                # 标记「选股命中」来源：把扫描任务 id + 命中策略写进推荐对象，
+                # 随成交溯源（provenance.source=scan / trigger=scan_buy）一路透传到
+                # 持仓批次与成交流水，让「选股—交易一体」在 UI 上可见（#选股交易一体）。
+                strat = str(hit.get("strategy", "") or "")
+                rec._scan = {"task_id": task_id or "", "strategy": strat}
+                # 前缀标「选股命中·策略X」；用 getattr 兜底（测试替身/异常对象可能缺 reason）
+                existing_reason = getattr(rec, "reason", "") or ""
+                if strat:
+                    rec.reason = f"选股命中·{strat}｜{existing_reason}"
+                recommendations.append(rec)
             queued = live_trader.submit(
                 recommendations,
                 source="选股命中(盘后顺延开盘)" if overnight else "选股命中",

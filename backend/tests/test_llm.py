@@ -59,6 +59,10 @@ class TestRuleBasedDashboard:
         result = analyzer._rule_based_dashboard("600000", "测试股", df)
         assert result.degraded is True
         assert result.model == "rule-based"
+        # degrade_kind=analysis 让前端把「规则评分」与「行情陈旧」区分开，
+        # 否则打开个股页会误弹「勿当实时行情」横幅（见 #132）。
+        assert result.degrade_kind == "analysis"
+        assert result.to_dict().get("degrade_kind") == "analysis"
         assert result.conclusion in ("买入", "持有", "卖出")
         assert len(result.checklist) == 6
         assert result.stop_loss is not None and result.target_price is not None

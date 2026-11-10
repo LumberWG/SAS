@@ -496,8 +496,12 @@ function statusColor(status: string) {
         <template v-else-if="dashboard">
           <div class="mb-4 flex flex-wrap items-center gap-3">
             <ConclusionBadge :conclusion="dashboard.conclusion" size="lg" />
-            <span class="text-[12.5px] text-content-faint">
-              {{ dashboard.degraded ? '规则降级' : dashboard.model }}
+            <span
+              class="text-[12.5px]"
+              :class="dashboard.degraded ? 'text-content-muted' : 'text-content-faint'"
+              :title="dashboard.degraded ? '未配置大模型，由技术面规则评分生成（非行情陈旧）' : '由大模型生成'"
+            >
+              {{ dashboard.degraded ? '规则评分（非大模型）' : dashboard.model }}
             </span>
             <!-- 市场情绪上下文 -->
             <span
@@ -565,7 +569,7 @@ function statusColor(status: string) {
           </div>
 
           <div class="mt-4 border-t border-base-600/50 pt-3 text-[11.5px] leading-relaxed text-content-faint">
-            {{ dashboard.generated_at }} 生成 · 仅供学习研究，不构成投资建议
+            {{ dashboard.generated_at }} 生成
           </div>
         </template>
 

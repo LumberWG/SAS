@@ -64,8 +64,15 @@ http.interceptors.request.use((config) => {
 
 http.interceptors.response.use((response) => {
   const cfg = response.config
-  const body = response.data as { degraded?: boolean; message?: string } | undefined
-  if (body?.degraded === true) {
+  const body = response.data as {
+    degraded?: boolean
+    degrade_kind?: string
+    message?: string
+  } | undefined
+  // 仅「数据陈旧/降级」(degrade_kind 为空或显式为 'data') 才上报全局横幅，
+  // 提醒「页面可能显示旧数据，勿当实时行情」。分析走规则评分(degrade_kind='analysis')时，
+  // 数据是新鲜计算的当日/近一日 K 线，只是没用大模型，不应误导成「行情陈旧」。
+  if (body?.degraded === true && body?.degrade_kind !== 'analysis') {
     for (const fn of _degradeListeners) {
       try {
         fn({ path: cfg.url ?? '', message: body.message })
@@ -99,6 +106,29 @@ http.interceptors.response.use(undefined, (error) => {
   }
   return Promise.reject(error)
 })
+
+// ---- GET 并发去重：一次渲染里多个组件同时打同一 GET（如建议页 buy/sell/focus/summary）----
+// 复用同一个 Promise，避免一页里多个股票列表接口重复打后端、互相挤占带宽把列表加载拖慢。
+// 新鲜窗短路（≤20s）仍由上面的响应缓存拦截器处理；这里只负责「飞行中去重」。
+// 仅包裹 http.get（被所有列表接口使用）；写操作走 post/delete，不参与去重。
+const _getInflight = new Map<string, Promise<unknown>>()
+
+const _origGet = http.get.bind(http)
+http.get = (function (orig: typeof _origGet) {
+  return function dedupGet(url: string, cfg?: import('axios').AxiosRequestConfig) {
+    const refresh = (cfg?.params as { refresh?: boolean } | undefined)?.refresh
+    if (refresh) return orig(url, cfg)
+    const key = (url ?? '') + '|' + JSON.stringify(cfg?.params ?? {})
+    const flying = _getInflight.get(key)
+    if (flying) return flying
+    const p = orig(url, cfg) as Promise<unknown>
+    _getInflight.set(key, p)
+    p.finally(() => {
+      if (_getInflight.get(key) === p) _getInflight.delete(key)
+    })
+    return p
+  }
+})(_origGet) as unknown as typeof http.get
 
 // 每个响应都带 disclaimer 字段（后端统一注入），页面顶栏展示
 
@@ -241,6 +271,28 @@ export function getStockQuote(code: string): Promise<StockQuote> {
 /** 个股分时（逐分钟价格 / 均价 / 成交量）。 */
 export function getStockIntraday(code: string): Promise<IntradayData> {
   return http.get(`/market/stocks/${code}/intraday`).then((r) => r.data)
+}
+
+// ==================== 股票查询 ====================
+
+/** 单个候选：代码 / 名称 / 市场（sh/sz/bj）。 */
+export interface StockMatch {
+  code: string
+  name: string
+  market: string
+}
+
+/** 模糊查询结果：命中列表 + 总数（不受 limit 截断）。 */
+export interface StockSearchResult {
+  query: string
+  results: StockMatch[]
+  total: number
+  error?: string
+}
+
+/** 首页「查股票」输入框：代码或名称片段模糊匹配。 */
+export function getStockSearch(q: string, limit = 20): Promise<StockSearchResult> {
+  return http.get('/market/search', { params: { q, limit } }).then((r) => r.data)
 }
 
 // ==================== 选股 ====================
@@ -836,6 +888,10 @@ export function getFocusList(): Promise<{
   items: RecommendationItem[]
   batch: string | null
   for_date: string | null
+  /** for_date 的开盘是否已过去（前端据其把「开盘重点关注」换成「盘中关注」） */
+  open_passed: boolean
+  /** for_date 相对今天的阶段：future/today/past，前端据其把标题「明日关注」动态化为「今日关注」 */
+  phase: 'future' | 'today' | 'past'
   updated_at: string | null
 }> {
   return http.get('/advisory/focus').then((r) => r.data)
@@ -911,6 +967,8 @@ export interface PaperPendingSignal {
   price_at_signal: number | null
   /** 排序分（第 3 次排序按评分降序执行、加权仓位） */
   score?: number
+  /** 选股来源标记（仅由扫描命中送交易时填充）：{ task_id, strategy } */
+  scan?: { task_id: string; strategy: string } | null
 }
 
 export interface PaperLiveTrade {
@@ -1056,6 +1114,10 @@ export function getPaperTrades(
 /** 持仓批次（lot）建仓决策溯源（BACKTEST_LOG #115）。provenance 为 null 表示历史批次未记录。 */
 export interface PaperLotProvenance {
   trigger: string
+  /** 来源：scan=选股扫描命中 / manual=手动建仓 / analysis=盘中/盘前分析 */
+  source?: 'scan' | 'manual' | 'analysis'
+  /** 选股来源标记（仅 source=scan 时存在）：{ task_id, strategy } */
+  scan?: { task_id: string; strategy: string } | null
   reason: string
   score: number
   detail: string
@@ -1194,6 +1256,8 @@ export interface DecisionDashboard {
   checklist: ChecklistItem[]
   model: string
   degraded: boolean
+  /** 降级原因：'analysis'=无大模型走规则评分（数据仍新鲜）；'data'=行情陈旧 */
+  degrade_kind?: string
   generated_at: string
   sentiment: Sentiment | null
   indicators?: Record<string, number | null>

@@ -62,11 +62,19 @@ def focus_list() -> dict:
     """明日关注（盘后生成，含生成日期；附带当前行情）。"""
     items = db.list_recommendations("focus", "focus", dedupe_by_code=True)
     batch = db.latest_batch("focus")
+    for_date = _focus_for_date(batch)
     return with_disclaimer({
         "items": with_realtime(_with_detail(items)),
         "batch": batch,
         # focus_<生成日> 对应下一交易日开盘关注，for_date = 生成日之后的首个交易日
-        "for_date": _focus_for_date(batch),
+        "for_date": for_date,
+        # 该 for_date 的开盘是否已过去：已过去则前端把「开盘重点关注」改为「盘中关注」，
+        # 避免下午临近收盘仍显示「开盘重点关注」的误导（#135）。
+        "open_passed": _focus_open_passed(for_date),
+        # for_date 相对今天所处阶段：future=尚未开盘(明日关注) / today=今日(今日关注) /
+        # past=已过期。前端据此把「明日关注」标题动态改成「今日关注」，避免标题与实际
+        # 所关注日期不符的误导（#136）。
+        "phase": _focus_phase(for_date),
         "updated_at": _latest_time(items),
     })
 
@@ -179,3 +187,46 @@ def _focus_for_date(batch: str | None) -> str | None:
         if is_trading_day(d):
             return d.strftime("%Y-%m-%d")
     return None
+
+
+def _focus_open_passed(for_date: str | None) -> bool:
+    """for_date（开盘关注日）的开盘是否已经过去。
+
+    用于前端动态措辞：开盘前显示「开盘重点关注」，开盘后（盘中/尾盘）显示「盘中关注」，
+    避免下午临近收盘仍挂着「开盘重点关注」的误导（#135）。
+    """
+    if not for_date:
+        return False
+    try:
+        d = datetime.strptime(for_date, "%Y-%m-%d").date()
+    except ValueError:
+        return False
+    now = datetime.now()
+    if now.date() < d:
+        return False  # 未来的开盘日，尚未开始
+    if now.date() > d:
+        return True  # 早已过去的交易日
+    # 同一天：以 9:30 开盘为界
+    open_dt = datetime(d.year, d.month, d.day, 9, 30)
+    return now >= open_dt
+
+
+def _focus_phase(for_date: str | None) -> str:
+    """for_date 相对今天所处阶段，供前端决定标题措辞（#136）。
+
+    - ``future``：for_date 是未来交易日（开盘尚未发生）→ 标题「明日关注」
+    - ``today``：for_date 就是今天 → 标题「今日关注」
+    - ``past``：for_date 已过（理论上不会出现，latest 批次不会过期）→ 标题「重点关注」
+    """
+    if not for_date:
+        return "future"
+    try:
+        d = datetime.strptime(for_date, "%Y-%m-%d").date()
+    except ValueError:
+        return "future"
+    today = datetime.now().date()
+    if d > today:
+        return "future"
+    if d < today:
+        return "past"
+    return "today"

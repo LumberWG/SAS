@@ -861,7 +861,7 @@ class PaperEngine:
         exposure_cap: float = 0.0, weak_pause_all: bool = False,
         crash_pause: bool = False, open_delayed: bool = False,
         open_cooldown: bool = False, weak_score: float | None = None,
-        full_score: float = 40.0, today: str = "",
+        full_score: float = 40.0, today: str = "", scan: dict | None = None,
     ) -> str:
         """构造成交决策溯源 JSON：触发信号 + regime 快照 + 决策理由。
 
@@ -906,6 +906,9 @@ class PaperEngine:
         )
         prov = {
             "trigger": trigger,
+            # 来源：选股命中(scanner 注入) → scan；手动建仓 → manual；其余分析 → analysis
+            "source": "scan" if scan else ("manual" if trigger == "manual" else "analysis"),
+            "scan": scan,
             "reason": reason,
             "score": round(score, 2),
             "detail": detail or "",
@@ -1415,7 +1418,9 @@ class PaperEngine:
             # 避免高波动票被固定 8% 的噪声打掉、也便于复盘「当时定的止损是多少」
             stop_distance = self._stop_distance_for_buy(rec.code, _regime_state)
             stop_price = round(cost_price * (1 - stop_distance), 3)
-            trigger = "rotation_buyin" if rec.code in rotation_targets else "fresh_buy"
+            rec_scan = getattr(rec, "scan", None)
+            trigger = "scan_buy" if rec_scan else (
+                "rotation_buyin" if rec.code in rotation_targets else "fresh_buy")
             prov = self._build_provenance(
                 trigger=trigger,
                 reason=getattr(rec, "reason", "买入信号"),
@@ -1433,6 +1438,7 @@ class PaperEngine:
                 weak_score=rotation_targets.get(rec.code),
                 full_score=full_score,
                 today=today,
+                scan=rec_scan,
             )
             db.add_paper_lot(
                 rec.code, name, shares, cost_price, today,

@@ -316,6 +316,7 @@ CREATE TABLE IF NOT EXISTS paper_pending (
     expire_at       TEXT NOT NULL,   -- ISO 时间
     price_at_signal REAL,
     score           REAL DEFAULT 0,
+    scan            TEXT,           -- JSON: {"task_id":..,"strategy":..}（选股扫描命中来源，重启后回填徽标用）
     PRIMARY KEY (code, kind)
 );
 -- 并行模拟账本（同一份信号 + 不同处置参数各自记账；与 paper_* 完全隔离，
@@ -502,6 +503,7 @@ class Database:
             self._migrate_position_lots(conn)
             self._migrate_lots_tag(conn)
             self._migrate_lots_provenance(conn)
+            self._migrate_pending_scan(conn)
             self._migrate_backtest_extra(conn)
             self._dedupe_signals(conn)
 
@@ -626,6 +628,17 @@ class Database:
             # 表不存在时 PRAGMA 返回空（未启用并行账本的老库），跳过即可
             if cols and "provenance" not in cols:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN provenance TEXT")
+
+    @staticmethod
+    def _migrate_pending_scan(conn: sqlite3.Connection) -> None:
+        """老库给 paper_pending 补 scan 列：记录信号是否来自选股扫描命中。
+
+        重启后（每日 SASRestart / 部署重启）从库回填撮合队列时，若没有该列，
+        选股来源的「选股扫描」徽标会在重启后消失。见 #137 续。
+        """
+        cols = {row["name"] for row in conn.execute("PRAGMA table_info(paper_pending)")}
+        if "scan" not in cols:
+            conn.execute("ALTER TABLE paper_pending ADD COLUMN scan TEXT")
 
     @staticmethod
     def _migrate_signal_rank(conn: sqlite3.Connection) -> None:
@@ -902,12 +915,12 @@ class Database:
             for it in items:
                 conn.execute(
                     f"INSERT OR REPLACE INTO {led.t('paper_pending')}"
-                    "(code,kind,name,action,reason,created_at,expire_at,price_at_signal,score)"
-                    " VALUES(?,?,?,?,?,?,?,?,?)",
+                    "(code,kind,name,action,reason,created_at,expire_at,price_at_signal,score,scan)"
+                    " VALUES(?,?,?,?,?,?,?,?,?,?)",
                     (
                         it["code"], it["kind"], it.get("name"), it.get("action"),
                         it.get("reason"), it.get("created_at"), it.get("expire_at"),
-                        it.get("price_at_signal"), it.get("score"),
+                        it.get("price_at_signal"), it.get("score"), it.get("scan"),
                     ),
                 )
 

@@ -562,3 +562,60 @@ async def stock_kline(
         "amounts": [None if pd.isna(v) else float(v) for v in df["amount"]],
         "pct_changes": [None if pd.isna(v) else float(v) for v in df["pct_change"]],
     })
+
+
+@router.get("/search")
+def market_search(
+    q: str = Query("", max_length=20, description="查询词：股票代码（可带 sh/sz/bj 前缀）或名称片段"),
+    limit: int = Query(20, ge=1, le=50),
+) -> dict:
+    """股票模糊查询（代码 / 名称）—— 首页「查股票」输入框用。
+
+    数据来自全市场股票池 ``get_stock_pool``（带内存 + 磁盘缓存，首调用后极快）。
+    匹配规则：
+
+    - 纯数字：优先按代码前缀（``600`` → ``600xxx``），其次代码包含、名称包含；
+    - 含字母 / 中文：代码包含或名称包含（会去掉 ``sh/sz/bj`` 交易所前缀后再比代码）；
+    - 返回 ``total`` 为命中总数（不受 ``limit`` 截断影响），前端可显示「共 N 条」。
+
+    股票池不可用时返回空结果 + ``error`` 字段，不拖垮查询框。
+    """
+    q = (q or "").strip()
+    if not q:
+        return _with_disclaimer({"query": q, "results": [], "total": 0})
+
+    # 去掉交易所前缀（sh/sz/bj），便于「sh600000」「600000」都能查到
+    q_norm = re.sub(r"^(sh|sz|bj)", "", q.lower())
+    try:
+        from app.data.service import get_stock_pool  # 延迟导入，避免循环依赖
+
+        pool = get_stock_pool()
+    except Exception as exc:  # noqa: BLE001 - 股票池不可用就返回空，不拖垮查询框
+        logger.warning("股票池不可用，搜索返回空: %s", exc)
+        return _with_disclaimer({"query": q, "results": [], "total": 0, "error": "股票池暂不可用"})
+
+    if pool is None or pool.empty:
+        return _with_disclaimer({"query": q, "results": [], "total": 0})
+
+    code = pool["code"].astype(str)
+    name = pool["name"].astype(str)
+
+    if q_norm.isdigit():
+        # 纯数字：代码前缀优先，其次代码包含；都为 0 才用名称兜底
+        mask = code.str.startswith(q_norm) | code.str.contains(q_norm, regex=False)
+        if int(mask.sum()) == 0:
+            mask = name.str.contains(q_norm, regex=False)
+    else:
+        mask = code.str.contains(q_norm, regex=False) | name.str.contains(q, regex=False)
+
+    total = int(mask.sum())
+    matched = pool[mask].head(limit)
+    results = [
+        {
+            "code": str(r["code"]),
+            "name": str(r["name"]),
+            "market": str(r["market"]) if "market" in pool.columns and pd.notna(r["market"]) else "",
+        }
+        for r in matched.to_dict("records")
+    ]
+    return _with_disclaimer({"query": q, "results": results, "total": total})

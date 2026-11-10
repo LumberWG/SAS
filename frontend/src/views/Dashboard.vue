@@ -4,7 +4,7 @@
  * 30 秒自动轮询（可暂停）。
  */
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
-import { Pause, Play, RefreshCw, Thermometer } from 'lucide-vue-next'
+import { Pause, Play, RefreshCw, Search, Thermometer } from 'lucide-vue-next'
 import VChart from 'vue-echarts'
 import { use } from 'echarts/core'
 import { CanvasRenderer } from 'echarts/renderers'
@@ -12,7 +12,7 @@ import { BarChart, LineChart } from 'echarts/charts'
 import { GridComponent, TooltipComponent } from 'echarts/components'
 
 import { useRouter } from 'vue-router'
-import { getAlerts, getIndexKline, getOverview, type MarketAlert, type MarketOverview } from '../api'
+import { getAlerts, getIndexKline, getOverview, getStockSearch, type MarketAlert, type MarketOverview, type StockMatch } from '../api'
 import { chartNarrow, chartTheme, tooltipStyle } from '../lib/chartTheme'
 import { POLL } from '../lib/polling'
 import { useMarketStore } from '../stores/market'
@@ -97,6 +97,77 @@ function toggleAuto() {
 const router = useRouter()
 function goDetail(code: string) {
   router.push(`/stock/${code}`)
+}
+
+// ---------------- 首页查股票 ----------------
+// 顶部检索框：输入代码或名称片段 → 实时候选下拉 → 选中进入个股详情。
+const searchText = ref('')
+const searchResults = ref<StockMatch[]>([])
+const searchTotal = ref(0)
+const searching = ref(false)
+const showResults = ref(false)
+const activeIndex = ref(-1)
+let searchTimer: number | undefined
+
+function runSearch() {
+  const q = searchText.value.trim()
+  if (!q) {
+    searchResults.value = []
+    searchTotal.value = 0
+    showResults.value = false
+    return
+  }
+  searching.value = true
+  getStockSearch(q, 20)
+    .then((res) => {
+      searchResults.value = res.results ?? []
+      searchTotal.value = res.total ?? 0
+      showResults.value = true
+      activeIndex.value = -1
+    })
+    .catch(() => {
+      searchResults.value = []
+      searchTotal.value = 0
+    })
+    .finally(() => {
+      searching.value = false
+    })
+}
+
+function onSearchInput() {
+  if (searchTimer) window.clearTimeout(searchTimer)
+  // 输入即搜：300ms 防抖，避免每敲一个字就打一次接口
+  searchTimer = window.setTimeout(runSearch, 300)
+}
+
+function selectStock(m: StockMatch) {
+  showResults.value = false
+  searchText.value = ''
+  router.push(`/stock/${m.code}`)
+}
+
+function onSearchKeydown(e: KeyboardEvent) {
+  if (!showResults.value || searchResults.value.length === 0) return
+  if (e.key === 'ArrowDown') {
+    e.preventDefault()
+    activeIndex.value = (activeIndex.value + 1) % searchResults.value.length
+  } else if (e.key === 'ArrowUp') {
+    e.preventDefault()
+    activeIndex.value = (activeIndex.value - 1 + searchResults.value.length) % searchResults.value.length
+  } else if (e.key === 'Enter') {
+    e.preventDefault()
+    const idx = activeIndex.value >= 0 ? activeIndex.value : 0
+    selectStock(searchResults.value[idx])
+  } else if (e.key === 'Escape') {
+    showResults.value = false
+  }
+}
+
+function closeResults() {
+  // 延迟关闭，给下拉项的 mousedown 选择留出时间
+  window.setTimeout(() => {
+    showResults.value = false
+  }, 120)
 }
 
 onMounted(() => {
@@ -231,6 +302,62 @@ const breadthOption = computed(() => {
 
 <template>
   <div class="space-y-3">
+    <!-- 查股票：首页顶部快速检索入口 -->
+    <div class="relative">
+      <div
+        class="flex items-center gap-2 rounded-lg border border-base-600/60 bg-base-800/60 px-3 py-2 transition-colors focus-within:border-primary/50"
+      >
+        <Search class="h-4 w-4 shrink-0 text-content-faint" />
+        <input
+          v-model="searchText"
+          type="text"
+          placeholder="查股票：输入代码或名称，回车进入详情"
+          class="w-full bg-transparent text-[13.5px] text-content placeholder:text-content-faint focus:outline-none"
+          @input="onSearchInput"
+          @focus="onSearchInput"
+          @keydown="onSearchKeydown"
+          @blur="closeResults"
+        />
+        <span v-if="searching" class="shrink-0 text-[11px] text-content-faint">搜索中…</span>
+      </div>
+
+      <!-- 候选下拉 -->
+      <div
+        v-if="showResults && searchResults.length > 0"
+        class="absolute z-20 mt-1 w-full overflow-hidden rounded-lg border border-base-600/60 bg-base-800 shadow-xl"
+      >
+        <div class="flex items-center justify-between border-b border-base-700 px-3 py-1.5 text-[11.5px] text-content-faint">
+          <span>共 {{ searchTotal }} 条匹配 · ↑↓ 选择 · 回车进入</span>
+        </div>
+        <ul class="max-h-72 overflow-y-auto py-1">
+          <li
+            v-for="(m, i) in searchResults"
+            :key="m.code"
+            :class="[
+              'flex cursor-pointer items-center justify-between gap-3 px-3 py-1.5',
+              i === activeIndex ? 'bg-primary/15' : 'hover:bg-base-700/60',
+            ]"
+            @mousedown.prevent="selectStock(m)"
+            @mouseenter="activeIndex = i"
+          >
+            <div class="flex min-w-0 items-center gap-2">
+              <span class="font-num text-[13.5px] font-medium text-content">{{ m.code }}</span>
+              <span class="truncate text-[13.5px] text-content-muted">{{ m.name }}</span>
+            </div>
+            <span class="shrink-0 rounded border border-base-600 px-1.5 py-0.5 text-[10.5px] uppercase text-content-faint">{{ m.market }}</span>
+          </li>
+        </ul>
+      </div>
+
+      <!-- 无结果提示 -->
+      <div
+        v-else-if="showResults && searchText.trim() && !searching && searchTotal === 0"
+        class="absolute z-20 mt-1 w-full rounded-lg border border-base-600/60 bg-base-800 px-3 py-2 text-[12.5px] text-content-faint shadow-xl"
+      >
+        未找到匹配「{{ searchText.trim() }}」的股票
+      </div>
+    </div>
+
     <div v-if="staleNotice" class="banner-warn flex items-center justify-between gap-3 rounded-lg px-4 py-2 text-[12.5px]">
       <span>大盘概览加载失败，当前显示的是上一次成功加载的结果（{{ staleNotice }}）。</span>
       <button class="shrink-0 rounded border border-current/30 px-2 py-0.5 hover:opacity-80" @click="load(true)">重试</button>

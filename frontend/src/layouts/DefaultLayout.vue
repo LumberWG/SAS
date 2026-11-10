@@ -24,6 +24,7 @@ import {
   Wallet,
 } from 'lucide-vue-next'
 
+import { navProgress } from '../composables/navProgress'
 import { useMarketStore } from '../stores/market'
 import {
   getDataStatus,
@@ -43,7 +44,7 @@ const scopeStats = ref<ScopeStats | null>(null)
 const sidebarOpen = ref(false)
 // 手机顶栏放不下 4 个状态灯，收进一个可点开的状态面板 —— 信息不能整块藏掉
 const statusPanelOpen = ref(false)
-watch(() => route.fullPath, () => {
+watch(() => route.path, () => {
   sidebarOpen.value = false
   statusPanelOpen.value = false
 })
@@ -201,6 +202,22 @@ function tick() {
   phase.value = computePhase(d)
 }
 
+// 悬停/聚焦导航项即定向预取该路由 chunk：比空闲全量预取更确定——
+// 鼠标移到「决策建议」上，点下去时它的包已经在内存里，切页零等待。
+function prefetchRoute(path: string) {
+  const r = router.getRoutes().find((x) => x.path === path)
+  const comp = (r?.components?.default ?? (r as { component?: unknown })?.component) as
+    | (() => Promise<unknown>)
+    | undefined
+  if (typeof comp === 'function') {
+    try {
+      comp()
+    } catch {
+      /* 预取失败静默，不影响正常导航 */
+    }
+  }
+}
+
 onMounted(() => {
   tick()
   timer = window.setInterval(tick, POLL.clockMs)
@@ -213,6 +230,27 @@ onMounted(() => {
     degradeNotice.value = e.message || `接口 ${e.path} 返回降级数据`
   })
   window.addEventListener('keydown', onKeydown)
+
+  // 空闲时预取其余路由 chunk（含 echarts 706KB），使首次进入新页面零网络等待。
+  // 本地/内网部署带宽充足，收益明显；用 requestIdleCallback 避免抢占首屏交互。
+  const prefetchRoutes = () => {
+    router.getRoutes().forEach((r) => {
+      const comp = (r.components?.default ?? (r as { component?: unknown }).component) as
+        | (() => Promise<unknown>)
+        | undefined
+      if (typeof comp === 'function') {
+        try {
+          comp()
+        } catch {
+          /* 预取失败静默，不影响正常导航 */
+        }
+      }
+    })
+  }
+  const ric = (window as unknown as { requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => void })
+    .requestIdleCallback
+  if (typeof ric === 'function') ric(prefetchRoutes, { timeout: 3000 })
+  else window.setTimeout(prefetchRoutes, 1500)
 })
 onUnmounted(() => {
   if (timer) window.clearInterval(timer)
@@ -236,6 +274,16 @@ const currentGroup = computed(() =>
 
 <template>
   <div class="flex h-full">
+    <!-- 路由切换进度条：首次进入需下载动态 chunk 时显示，keep-alive 命中页近乎无感 -->
+    <div
+      v-if="navProgress.active"
+      class="fixed inset-x-0 top-0 z-[100] h-[2px] overflow-hidden"
+    >
+      <div
+        class="h-full bg-primary shadow-[0_0_6px] shadow-primary/60 transition-[width] duration-200 ease-out"
+        :style="{ width: navProgress.value + '%' }"
+      ></div>
+    </div>
     <!-- 左侧导航（固定） -->
     <div
       v-if="sidebarOpen"
@@ -273,6 +321,8 @@ const currentGroup = computed(() =>
             :to="item.path"
             class="group relative flex items-center gap-2.5 rounded-control px-2.5 py-[9px] text-[13.5px] font-medium transition-colors duration-150"
             @click="sidebarOpen = false"
+            @mouseenter="prefetchRoute(item.path)"
+            @focus="prefetchRoute(item.path)"
             :class="
               activePath === item.path
                 ? 'bg-primary/[0.12] text-content'
@@ -297,15 +347,9 @@ const currentGroup = computed(() =>
         </div>
       </nav>
 
-      <!-- 侧栏底部：免责声明 + 运行环境标识 -->
+      <!-- 侧栏底部：仅保留运行环境标识（免责声明移到主内容区底部统一呈现，避免多处重复） -->
       <div class="border-t border-base-600/60 px-3 py-3">
-        <div
-          class="flex items-start gap-2 rounded-lg border border-warn/25 bg-warn/[0.07] px-2.5 py-2 text-[12px] leading-relaxed text-warn/90"
-        >
-          <ShieldAlert class="mt-px h-3.5 w-3.5 shrink-0" />
-          <span>{{ market.disclaimer }}</span>
-        </div>
-        <div class="mt-2.5 flex items-center justify-between px-1">
+        <div class="flex items-center justify-between px-1">
           <span class="inline-flex items-center gap-1.5 text-[10.5px] font-medium tracking-[0.1em] text-content-faint">
             <span class="h-1.5 w-1.5 rounded-full bg-warn/70"></span>
             PAPER MODE
@@ -438,25 +482,23 @@ const currentGroup = computed(() =>
             </button>
           </div>
           <router-view v-slot="{ Component, route }">
-            <transition name="fade" mode="out-in">
-              <keep-alive :max="10">
-                <component :is="Component" :key="route.fullPath" />
-              </keep-alive>
-            </transition>
+            <!-- 去掉 out-in 淡入淡出（约 0.44s 的「先出后进」空档是切换卡顿的主因），
+                 仅保留 keep-alive：命中缓存的页面瞬时恢复，不再重拉数据/重建定时器。
+                 key 用 route.path（而非 fullPath）：模拟交易 ?tab=pool/account 等 query 变化
+                 不再触发整页重建，tab 切换由组件内 watch 处理。 -->
+            <keep-alive :max="10">
+              <component :is="Component" :key="route.path" />
+            </keep-alive>
           </router-view>
         </div>
       </main>
+
+      <!-- 全局免责声明：全站仅此一处，置于主内容区底部、靠右轻量展示 -->
+      <footer
+        class="shrink-0 border-t border-base-600/40 bg-base-900/60 px-3 py-1.5 text-right text-[11px] leading-tight text-content-faint sm:px-5"
+      >
+        {{ market.disclaimer }}
+      </footer>
     </div>
   </div>
 </template>
-
-<style scoped>
-.fade-enter-active,
-.fade-leave-active {
-  transition: opacity 0.2s ease;
-}
-.fade-enter-from,
-.fade-leave-to {
-  opacity: 0;
-}
-</style>

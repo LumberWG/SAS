@@ -68,7 +68,9 @@ const route = useRoute()
 // 合并页：④ 交易池（判定/队列/候补）与 ⑤ 持仓与成交（账户复盘）是同一份数据的两种视角，
 // 页内用 tab 切换（原来占两个左侧菜单项，来回点很别扭）。
 // tab 写进 URL query（?tab=pool|account）：刷新、收藏、旧链接 /paper-pool 都能复现。
-const tab = ref<'pool' | 'account'>(route.query.tab === 'account' ? 'account' : 'pool')
+// 默认停在「持仓与成交」：打开模拟交易页先看到持仓/流水/净值（BACKTEST_LOG #129 用户诉求）。
+// 仅当 URL 显式带 ?tab=pool 时才进交易池，其余（无 query 或 ?tab=account）都落持仓与成交。
+const tab = ref<'pool' | 'account'>(route.query.tab === 'pool' ? 'pool' : 'account')
 
 function switchTab(next: 'pool' | 'account') {
   if (tab.value === next) return
@@ -101,6 +103,12 @@ const lotsByCode = computed<Record<string, PaperLot[]>>(() => {
 function toggleLot(code: string) {
   expandedCode.value = expandedCode.value === code ? null : code
 }
+/** 该代码是否有「选股扫描」来源的建仓批次（持仓行顶部显眼徽标用） */
+function hasScanLot(code: string): boolean {
+  const lots = lotsByCode.value[code]
+  if (!lots || lots.length === 0) return false
+  return lots.some((l) => l.provenance?.source === 'scan')
+}
 /** 建仓触发类型 → 中文标签 */
 const TRIGGER_LABEL: Record<string, string> = {
   fresh_buy: '自动买入',
@@ -108,6 +116,7 @@ const TRIGGER_LABEL: Record<string, string> = {
   manual: '手动买入',
   t_buyback: '做T买回',
   t_add: '做T加仓',
+  scan_buy: '选股扫描买入',
 }
 /** 批次标签 → 中文 */
 const TAG_LABEL: Record<string, string> = {
@@ -831,6 +840,10 @@ onUnmounted(() => {
             {{ p.action === 'buy' ? '买' : '卖' }}
           </span>
           {{ p.name }}
+          <span
+            v-if="p.scan"
+            class="rounded border border-primary/40 bg-primary/10 px-1 py-0.5 text-[11px] text-primary-light"
+          >选股</span>
           <span class="font-num text-content-faint">{{ p.code }}</span>
           <span v-if="p.score" class="font-num text-primary-light">{{ p.score }}分</span>
           <span class="font-num text-content-faint">· {{ p.waiting_seconds }}s</span>
@@ -856,6 +869,10 @@ onUnmounted(() => {
           >
             <span class="text-up">候</span>
             {{ b.name }}
+            <span
+              v-if="b.scan"
+              class="rounded border border-primary/40 bg-primary/10 px-1 py-0.5 text-[11px] text-primary-light"
+            >选股</span>
             <span class="font-num text-content-faint">{{ b.code }}</span>
             <span v-if="b.score" class="font-num text-primary-light">{{ b.score }}分</span>
           </span>
@@ -1022,7 +1039,13 @@ onUnmounted(() => {
                 @click="router.push(`/stock/${p.code}`)"
               >
                 <td class="font-num px-3 py-2.5 text-content-muted">{{ p.code }}</td>
-                <td class="px-3 py-2.5 font-medium text-content">{{ p.name }}</td>
+                <td class="px-3 py-2.5 font-medium text-content">
+                  {{ p.name }}
+                  <span
+                    v-if="hasScanLot(p.code)"
+                    class="ml-1.5 inline-flex items-center rounded border border-primary/40 bg-primary/10 px-1.5 py-0.5 align-middle text-[11px] font-medium text-primary-light"
+                  >选股扫描</span>
+                </td>
                 <td class="font-num px-3 py-2.5 text-right text-content">{{ p.shares }}</td>
                 <td class="font-num px-3 py-2.5 text-right text-content-muted">{{ p.cost_price.toFixed(2) }}</td>
                 <td class="font-num px-3 py-2.5 text-right text-content">{{ p.price.toFixed(2) }}</td>
@@ -1068,6 +1091,12 @@ onUnmounted(() => {
                       <template v-if="lot.provenance">
                         <div class="mb-1.5 flex flex-wrap items-center gap-2 text-[12.5px]">
                           <span class="font-medium text-content">{{ TRIGGER_LABEL[lot.provenance.trigger] || lot.provenance.trigger }}</span>
+                          <span
+                            v-if="lot.provenance.source === 'scan'"
+                            class="rounded border border-primary/40 bg-primary/10 px-1.5 py-0.5 text-primary-light"
+                          >
+                            选股扫描<span v-if="lot.provenance.scan && lot.provenance.scan.strategy"> · {{ lot.provenance.scan.strategy }}</span>
+                          </span>
                           <span class="rounded border border-primary/40 bg-primary/10 px-1.5 py-0.5 text-primary-light">
                             {{ REGIME_LABEL[lot.provenance.regime.state] || lot.provenance.regime.state }}
                           </span>

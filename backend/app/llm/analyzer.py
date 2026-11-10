@@ -78,6 +78,11 @@ class DecisionDashboard:
     checklist: list[ChecklistItem] = field(default_factory=list)
     model: str = ""                       # 生成所用的模型（降级时为 "rule-based"）
     degraded: bool = False                # 是否为规则降级结果
+    # 降级原因：``analysis`` = 无 LLM，改用技术面规则评分（数据仍是新鲜的当日/近一日 K 线，
+    #   不属于「行情陈旧」）；``data`` = 行情快照陈旧/数据源故障（页面可能显示旧数据）。
+    # 前端全局横幅仅对 ``data`` 类降级提示「勿当实时行情」，``analysis`` 类只在分析页内
+    # 以「规则评分」徽标呈现，避免把「没用大模型」误报成「数据陈旧」。
+    degrade_kind: str = ""
     generated_at: str = ""
     sentiment: dict | None = None         # 市场情绪上下文（可选）
     indicators: dict | None = None        # 最新一行实测指标值（前端「指标明细」展示）
@@ -90,6 +95,7 @@ class DecisionDashboard:
             "target_price": self.target_price,
             "checklist": [c.__dict__ for c in self.checklist],
             "model": self.model, "degraded": self.degraded,
+            "degrade_kind": self.degrade_kind,
             "generated_at": self.generated_at,
             "sentiment": self.sentiment,
             "indicators": self.indicators,
@@ -400,6 +406,7 @@ ATR(14)={f(last['atr'], '{:.3f}')}
                     f"{sentiment_note}（规则降级结论）",
             entry_price=round(price, 2), stop_loss=stop, target_price=target,
             checklist=checklist, model="rule-based", degraded=True,
+            degrade_kind="analysis",
             generated_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
             sentiment=sentiment,
         )

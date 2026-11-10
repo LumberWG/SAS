@@ -42,6 +42,15 @@ const buys = ref<RecommendationItem[]>([])
 const sells = ref<RecommendationItem[]>([])
 const focus = ref<RecommendationItem[]>([])
 const focusDate = ref<string | null>(null)
+const focusOpenPassed = ref(false)
+const focusPhase = ref<'future' | 'today' | 'past'>('future')
+// 标题随目标日期动态变化：盘中/今日显示「今日关注」，盘后下一批生成后显示「明日关注」，
+// 避免固定「明日关注」标题在交易时段误标为明天（#136）。
+const focusTitle = computed(() => {
+  if (focusPhase.value === 'today') return '今日关注'
+  if (focusPhase.value === 'past') return '重点关注'
+  return '明日关注'
+})
 const summary = ref<Awaited<ReturnType<typeof getAdvisorySummary>> | null>(null)
 const updatedAt = ref<string | null>(null)
 const entryGuard = ref<EntryGuard | null>(null)
@@ -62,6 +71,8 @@ async function load() {
     sells.value = sellData.items
     focus.value = focusData.items
     focusDate.value = focusData.for_date
+    focusOpenPassed.value = !!focusData.open_passed
+    focusPhase.value = focusData.phase ?? 'future'
     summary.value = summaryData
     updatedAt.value = buyData.updated_at ?? sellData.updated_at
     buyBlocked.value = !!buyData.blocked_by_guard
@@ -337,7 +348,7 @@ onUnmounted(() => {
           <div class="font-num text-[23.5px] font-bold leading-none text-warn">
             {{ summary?.focus_count ?? 0 }}
           </div>
-          <div class="mt-1 text-[12.5px] text-content-faint">明日关注</div>
+          <div class="mt-1 text-[12.5px] text-content-faint">{{ focusTitle }}</div>
         </div>
         <span v-if="updatedAt" class="text-[12.5px] text-content-faint">更新于 {{ updatedAt }}</span>
       </div>
@@ -628,12 +639,12 @@ onUnmounted(() => {
       <div class="mb-4 flex flex-wrap items-center justify-between gap-2">
         <div class="flex items-center gap-2">
           <CalendarClock class="h-4 w-4 text-warn" />
-          <h3 class="text-subheading">明日关注</h3>
+          <h3 class="text-subheading">{{ focusTitle }}</h3>
           <span
             v-if="focusDate"
             class="rounded-md border border-warn/40 bg-warn/10 px-2 py-0.5 text-[12.5px] text-warn"
           >
-            {{ focusDate }} 开盘重点关注
+            {{ focusDate }} {{ focusOpenPassed ? '盘中关注' : '开盘重点关注' }}
           </span>
         </div>
         <span class="text-[12.5px] text-content-faint">
@@ -671,7 +682,7 @@ onUnmounted(() => {
           class="col-span-full flex flex-col items-center gap-2 py-10 text-content-faint"
         >
           <CalendarClock class="h-8 w-8 opacity-30" />
-          <p class="text-[13.5px]">暂无明日关注</p>
+          <p class="text-[13.5px]">暂无{{ focusTitle }}</p>
           <p class="text-[12.5px]">每个交易日 15:35 盘后自动生成（需后端保持运行）</p>
         </div>
       </div>
