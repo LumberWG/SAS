@@ -1,4 +1,4 @@
-# Launch the minute5 preloader (pure ASCII on purpose: cmd breaks on non-ASCII paths).
+﻿# Launch the minute5 preloader (pure ASCII on purpose: cmd breaks on non-ASCII paths).
 #
 # --proxy is REQUIRED as of 2026-10-29 20:00: the direct (home) IP got banned by
 # Baostock (error 10001011) after ~14 min at ~25 req/min. The SOCKS5 proxy uses a

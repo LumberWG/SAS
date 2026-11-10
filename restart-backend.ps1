@@ -1,4 +1,4 @@
-# SAS services restart (silent; executed by scheduled task SASRestart)
+﻿# SAS services restart (silent; executed by scheduled task SASRestart)
 # Restarts:
 #   SAS          - backend API  (uvicorn, :8000)
 #   SAS-frontend - static dist + /api reverse proxy (:8080)

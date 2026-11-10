@@ -1,4 +1,4 @@
-# Stop all preload_minutes worker/launcher processes (pure ASCII on purpose).
+﻿# Stop all preload_minutes worker/launcher processes (pure ASCII on purpose).
 # Run this in YOUR OWN PowerShell/terminal - the sandbox cannot kill other sessions' processes.
 
 $procs = Get-CimInstance Win32_Process -Filter "name='python.exe'" |

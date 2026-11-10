@@ -13,7 +13,8 @@
  * 启动时就被静态挂载、CORS、缓存目录捕获，运行中改只会造成「显示改了实际没变」，
  * 后端压根不返回它们。
  */
-import { computed, onMounted, ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import { Info, RefreshCw, RotateCcw, Save, Search } from 'lucide-vue-next'
 
 import ConfirmDialog from '../components/ConfirmDialog.vue'
@@ -38,6 +39,16 @@ const verify = ref<{ ok: boolean; keys: number; mismatches: string[] } | null>(n
 const keyword = ref('')
 const activeGroup = ref('')
 const onlyChanged = ref(false)
+
+/**
+ * 外部带 `?focus=k1,k2` 进来时的定位状态。
+ * `flashKeys` = 高亮的目标行；`focusGroups` = 这些行所在分组（可跨组，例如机制层的
+ * 熔断/托底落在「交易执行」、动态降暴露落在「做T 与择时」）。
+ */
+const route = useRoute()
+const flashKeys = ref<string[]>([])
+const focusGroups = ref<string[]>([])
+let flashTimer: number | undefined
 
 /** 主题切换的反馈（真正的切换在 ThemeSelect 组件里做，存 localStorage） */
 function onThemeChange(name: string) {
@@ -178,10 +189,14 @@ const navGroups = computed(() =>
   })),
 )
 
-/** 右侧内容：无筛选时只渲染当前分组；搜索/筛选时按分组分段展示全部命中 */
+/** 右侧内容：无筛选时只渲染当前分组；深链接可一次带出多个分组；搜索时按分组展示全部命中 */
 const visibleGroups = computed(() => {
   const all = data.value?.groups ?? []
-  const list = searching.value ? all : all.filter((g) => g.name === activeGroup.value)
+  const list = searching.value
+    ? all
+    : focusGroups.value.length
+      ? all.filter((g) => focusGroups.value.includes(g.name))
+      : all.filter((g) => g.name === activeGroup.value)
   return list
     .map((g) => ({
       name: g.name,
@@ -342,7 +357,59 @@ function discardAll() {
   draft.value = { ...baseline.value }
 }
 
-onMounted(load)
+/**
+ * 外部入口带 `?focus=k1,k2` 进来：带出目标分组 → 滚动到第一项 → 焦点落到控件，
+ * 并高亮全部目标行。允许一条横幅对应多个开关（如机制层的熔断 / 托底 / 动态降暴露）。
+ *
+ * 必须先清掉搜索 / 「只看已覆盖」，否则目标行可能压根没渲染，滚过去也是空白；
+ * 分组名由后端 `param_specs` 决定，这里从数据里反查，不写死「大盘择时」。
+ * 控件可能是开关按钮（bool）也可能是 input，统一用 `data-setting-control` 找。
+ */
+async function focusFromQuery() {
+  const raw = route.query.focus
+  const parts = Array.isArray(raw) ? raw : [raw]
+  const keys = parts
+    .flatMap((v) => (typeof v === 'string' ? v.split(',') : []))
+    .map((v) => v.trim())
+    // key 只可能是下划线标识符，顺手挡掉任意 selector 注入
+    .filter((v) => /^[a-z_][a-z0-9_]*$/i.test(v))
+  // 每次重新解析都先复位：从设置页点菜单回到无 query 的 /settings 时也要退出多组视图
+  focusGroups.value = []
+  flashKeys.value = []
+  if (!keys.length || !data.value) return
+  const allGroups = data.value.groups
+  const groups = [...new Set(keys
+    .map((k) => allGroups.find((g) => g.items.some((it) => it.key === k))?.name)
+    .filter((n): n is string => Boolean(n)))]
+  if (!groups.length) return
+  keyword.value = ''
+  onlyChanged.value = false
+  focusGroups.value = groups
+  activeGroup.value = groups[0]
+  await nextTick()
+  let row: HTMLElement | null = null
+  for (const k of keys) {
+    row = document.querySelector<HTMLElement>(`[data-setting-key="${k}"]`)
+    if (row) break
+  }
+  if (!row) return
+  row.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  const control = row.querySelector<HTMLElement>('[data-setting-control]') ?? row
+  control.focus({ preventScroll: true })
+  flashKeys.value = keys
+  if (flashTimer) window.clearTimeout(flashTimer)
+  flashTimer = window.setTimeout(() => (flashKeys.value = []), 3000)
+}
+
+onMounted(async () => {
+  await load()
+  await focusFromQuery()
+})
+// 已经停留在设置页时，query 变化不会重新挂载组件，靠 watch 补上
+watch(() => route.query.focus, () => { void focusFromQuery() })
+onUnmounted(() => {
+  if (flashTimer) window.clearTimeout(flashTimer)
+})
 </script>
 
 <template>
@@ -497,7 +564,7 @@ onMounted(load)
                 ? 'bg-primary/[0.12] text-primary-light'
                 : 'text-content-muted hover:bg-base-700/60 hover:text-content'
             "
-            @click="activeGroup = g.name; keyword = ''; onlyChanged = false"
+            @click="activeGroup = g.name; keyword = ''; onlyChanged = false; focusGroups = []"
           >
             <span
               class="absolute left-0 top-1/2 h-4 w-0.5 -translate-y-1/2 rounded-full transition-colors"
@@ -600,11 +667,14 @@ onMounted(load)
               <div
                 v-for="it in sg.items"
                 :key="it.key"
+                :data-setting-key="it.key"
                 class="flex h-9 min-w-0 items-center gap-1.5 rounded-md px-1.5 transition-colors"
                 :class="
-                  isDirty(it)
-                    ? 'bg-primary/[0.10] ring-1 ring-inset ring-primary/25'
-                    : 'hover:bg-base-700/50'
+                  flashKeys.includes(it.key)
+                    ? 'bg-primary/[0.12] ring-2 ring-inset ring-primary/70'
+                    : isDirty(it)
+                      ? 'bg-primary/[0.10] ring-1 ring-inset ring-primary/25'
+                      : 'hover:bg-base-700/50'
                 "
                 :title="tipOf(it)"
               >
@@ -623,8 +693,12 @@ onMounted(load)
                   <template v-if="it.kind === 'bool'">
                     <button
                       type="button"
+                      data-setting-control
                       class="relative h-4 w-8 shrink-0 rounded-full transition-colors"
-                      :class="draft[it.key] ? 'bg-primary' : 'bg-base-600'"
+                      :class="[
+                        draft[it.key] ? 'bg-primary' : 'bg-base-600',
+                        flashKeys.includes(it.key) ? 'setting-spotlight' : '',
+                      ]"
                       :title="draft[it.key] ? '点击关闭' : '点击开启'"
                       @click="draft[it.key] = !draft[it.key]"
                     >
@@ -640,20 +714,22 @@ onMounted(load)
                   <input
                     v-else-if="it.kind === 'number'"
                     v-model.number="draft[it.key]"
+                    data-setting-control
                     type="number"
                     step="any"
                     class="field field-num h-7 w-full px-1.5 text-[13.5px]"
-                    :class="isDirty(it) ? 'border-primary/60' : 'border-base-600'"
+                    :class="[isDirty(it) ? 'border-primary/60' : 'border-base-600', flashKeys.includes(it.key) ? 'setting-spotlight' : '']"
                   />
 
                   <!-- 文本（密钥类显示掩码，直接输入新值即可覆盖） -->
                   <input
                     v-else-if="it.kind === 'text'"
                     v-model="draft[it.key]"
+                    data-setting-control
                     :type="it.secret ? 'password' : 'text'"
                     :placeholder="it.secret ? '未设置' : ''"
                     class="field field-num h-7 w-full px-1.5 text-[13.5px]"
-                    :class="isDirty(it) ? 'border-primary/60' : 'border-base-600'"
+                    :class="[isDirty(it) ? 'border-primary/60' : 'border-base-600', flashKeys.includes(it.key) ? 'setting-spotlight' : '']"
                   />
 
                   <span v-else class="text-[11.5px] text-content-faint">需重启</span>
@@ -738,3 +814,11 @@ onMounted(load)
     />
   </div>
 </template>
+
+<style scoped>
+/* 由鼠标点链接跳过来时，程序性 focus 不一定匹配 :focus-visible；显式轮廓保证看得见焦点 */
+.setting-spotlight {
+  outline: 2px solid rgb(var(--c-primary) / 0.7);
+  outline-offset: 2px;
+}
+</style>

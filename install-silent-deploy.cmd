@@ -1,4 +1,4 @@
-@echo off
+﻿@echo off
 REM 一次性安装：注册静默任务 SASDeploy（构建+重启）与 SASRestart（只重启后端）
 REM 双击本文件，在 UAC 弹窗点“是”；安装完成后此文件不再需要。
 REM 装好后：双击 scripts\ops\restart-backend.vbs 或 scripts\ops\deploy-silent.vbs，均无窗口、无 UAC。

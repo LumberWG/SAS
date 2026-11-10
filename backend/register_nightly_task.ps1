@@ -1,4 +1,4 @@
-# Register the nightly 5-min preload as a Windows Scheduled Task.
+﻿# Register the nightly 5-min preload as a Windows Scheduled Task.
 # Run this script AS ADMINISTRATOR in your own PowerShell:
 #   Right-click PowerShell -> Run as Administrator, then:
 #   cd E:\Study\SAS\backend

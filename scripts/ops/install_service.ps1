@@ -1,4 +1,4 @@
-# Register SAS backend as a Windows service (auto-start on boot + auto-restart on crash)
+﻿# Register SAS backend as a Windows service (auto-start on boot + auto-restart on crash)
 # Usage (Administrator required):
 #   powershell -ExecutionPolicy Bypass -File e:\Study\SAS\scripts\ops\install_service.ps1
 #

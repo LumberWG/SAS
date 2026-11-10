@@ -331,13 +331,15 @@ onUnmounted(() => {
           </div>
           <div class="mt-1 text-[12.5px] text-content-faint">建议买入</div>
         </div>
-        <div
+        <RouterLink
           v-if="summary?.buy_blocked_by_guard"
-          class="flex items-center gap-1.5 rounded-lg border border-down/40 bg-down/10 px-3 py-2 text-[12.5px] text-down"
+          :to="{ path: '/settings', query: { focus: 'entry_guard_block_declining_market' } }"
+          class="flex items-center gap-1.5 rounded-lg border border-down/40 bg-down/10 px-3 py-2 text-[12.5px] text-down hover:underline"
+          title="去设置页定位「入场护栏硬屏蔽」开关"
         >
           <ShieldAlert class="h-4 w-4" />
           硬屏蔽生效（下降市，已拦截 {{ summary?.blocked_buy_count ?? 0 }} 条）
-        </div>
+        </RouterLink>
         <div class="rounded-lg border border-down/30 bg-down/10 px-4 py-2 text-center">
           <div class="font-num text-[23.5px] font-bold leading-none text-down">
             {{ summary?.sell_count ?? 0 }}
@@ -518,6 +520,13 @@ onUnmounted(() => {
                 上证 {{ buyRegime?.close?.toFixed(2) }} &lt; MA20 {{ buyRegime?.ma20?.toFixed(2) }}（{{ buyRegime?.as_of }}），
                 按「入场护栏硬屏蔽」设置不开新仓；卖出与做T不受影响
               </p>
+              <RouterLink
+                :to="{ path: '/settings', query: { focus: 'entry_guard_block_declining_market' } }"
+                class="text-[12.5px] text-primary-light hover:underline"
+                title="定位到「入场护栏硬屏蔽」开关"
+              >
+                去设置页调整护栏
+              </RouterLink>
             </template>
             <template v-else>
               <ArrowUpCircle class="h-8 w-8 opacity-30" />

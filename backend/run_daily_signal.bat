@@ -1,4 +1,4 @@
-@echo off
+﻿@echo off
 REM Daily T-candidate cross-sectional signal runner (Windows Task Scheduler target).
 REM Default data dir = SAS_DATA_DIR in app.config (D:\Backup\SAS\data). To switch source,
 REM set it above, e.g.:  set SAS_DATA_DIR=E:\Study\SAS\data

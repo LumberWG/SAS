@@ -560,6 +560,19 @@ const mechanismOn = computed(() => {
   return !!(r && (r.dynamic || r.circuit_breaker?.enabled || r.floor))
 })
 
+/**
+ * 「去设置页调整机制层」的目标开关：只带当前真正开着的机制，按紧急度排序
+ * （熔断 > 托底 > 动态降暴露）。三者分属不同分组，设置页 `?focus` 支持逗号分隔多 key。
+ */
+const mechanismFocus = computed(() => {
+  const r = live.value?.regime
+  const keys: string[] = []
+  if (r?.circuit_breaker?.enabled) keys.push('paper_circuit_breaker_enabled')
+  if (r?.floor) keys.push('paper_policy_floor_enabled')
+  if (r?.dynamic) keys.push('paper_dynamic_exposure')
+  return keys.length ? keys : ['paper_dynamic_exposure']
+})
+
 /** 徽章：熔断优先级最高（它凌驾于机制层与任何信号之上），其次是当日机制态 */
 const mechanismBadge = computed(() => {
   const r = live.value?.regime
@@ -899,8 +912,9 @@ onUnmounted(() => {
         <span class="font-num">{{ live.regime.paused_count }}</span> 次
       </span>
       <RouterLink
-        to="/settings"
+        :to="{ path: '/settings', query: { focus: 'paper_regime_weak_pause,paper_weak_exposure' } }"
         class="ml-auto text-[12.5px] text-primary-light hover:underline"
+        title="定位到「弱市暂停买入」与「弱市保留仓位」"
       >
         去设置页关闭闸门
       </RouterLink>
@@ -951,8 +965,9 @@ onUnmounted(() => {
       </span>
 
       <RouterLink
-        to="/settings"
+        :to="{ path: '/settings', query: { focus: mechanismFocus.join(',') } }"
         class="ml-auto text-[12.5px] text-primary-light hover:underline"
+        :title="`定位到机制层 ${mechanismFocus.length} 项开关`"
       >
         去设置页调整机制层
       </RouterLink>

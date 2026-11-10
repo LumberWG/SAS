@@ -1,4 +1,4 @@
-# SAS production update script (ASCII only for PowerShell 5.1 compatibility)
+﻿# SAS production update script (ASCII only for PowerShell 5.1 compatibility)
 # Usage (Administrator required):
 #   powershell -ExecutionPolicy Bypass -File e:\Study\SAS\deploy.ps1
 #

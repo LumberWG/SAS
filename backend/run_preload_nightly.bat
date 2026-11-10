@@ -1,4 +1,4 @@
-@echo off
+﻿@echo off
 REM ============================================================
 REM  Nightly auto pre-download of 5-min bars (Baostock, sharded)
 REM  Called by Windows Task Scheduler daily, or run manually.
