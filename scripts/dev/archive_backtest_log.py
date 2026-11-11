@@ -185,10 +185,11 @@ def main() -> int:
     cut = lines[:first or 0]
     for i, line in enumerate(cut):
         if line.startswith(">") and "⚠️" in line:
-            block = []
-            while i < len(cut) and line.startswith(">"):
-                block.append(line)
-                i += 1
+            block: list[str] = []
+            j = i
+            while j < len(cut) and cut[j].startswith(">"):
+                block.append(cut[j])
+                j += 1
             notice = "\n".join(block) + "\n\n"
             break
 
