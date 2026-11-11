@@ -10,7 +10,16 @@
   - 未列出的键沿用 ``PipelineParams`` 默认值（即线上配置）。
 """
 from app.analysis import factors
-from app.backtest.pipeline import MAIN_BOARD_PREFIXES
+
+
+def _live_board_prefixes() -> tuple[str, ...]:
+    """当前实盘「交易板块」(twin_t_boards) 设置对应的代码前缀。
+
+    回测板块口径跟随实盘设置，不硬编码主板+创业板；供 mb / rev_ic2_mb 等
+    对比 profile 使用，使回测板块范围与实盘保持一致。
+    """
+    from app.data.scope import _allowed_board_prefixes
+    return _allowed_board_prefixes()
 
 
 def _w(**group_mult: float) -> dict[str, float]:
@@ -332,11 +341,11 @@ PROFILES: dict[str, dict] = {
     },
     # ---- E34b：池子口径对齐（记录 #22 选项 B） ----
     # 只买沪深主板 + 创业板（用户实际交易范围），过滤在排名取 TopN 之前生效。
-    "mb": {"board_prefixes": MAIN_BOARD_PREFIXES},
+    "mb": {"board_prefixes": _live_board_prefixes()},
     # 反转 + 板块过滤：看两者是否互相加成，还是只是少买了几只票。
     "rev_ic2_mb": {
         "invert_score": True,
-        "board_prefixes": MAIN_BOARD_PREFIXES,
+        "board_prefixes": _live_board_prefixes(),
         "factor_weights": _W_IC2,
     },
     # ---- E35：分位数买入门槛（记录 #24 的下一步） ----

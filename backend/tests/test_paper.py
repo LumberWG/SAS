@@ -5,10 +5,9 @@ from dataclasses import dataclass
 import pandas as pd
 import pytest
 
+from app.config import get_settings
 from app.paper.engine import (
-    FEE_COMMISSION_MIN,
     LOT_SIZE,
-    SINGLE_POSITION_MAX_RATIO,
     PaperEngine,
     TradeResult,
 )
@@ -41,6 +40,15 @@ def _disable_pool_gate(monkeypatch):
     monkeypatch.setattr(settings, "paper_t_crash_guard", 0.0, raising=False)
     monkeypatch.setattr(settings, "paper_circuit_breaker_enabled", False, raising=False)
     monkeypatch.setattr(settings, "paper_dynamic_exposure", False, raising=False)
+    # #181 涨停禁买读真实快照的昨收；本文件用 10 元级别的假价格配真实代码
+    # （600004 等），可能被偶发判成触板而让仓位/轮动断言失去意义。
+    # 规则本身由本文件末尾 TestBoardLimitUpGuard 单独覆盖（那边会显式打开开关）。
+    monkeypatch.setattr(settings, "paper_block_limit_up_buy", False, raising=False)
+    # 线上默认 twin_t_boards 自 2026-11-10 起改为「创业板」，但本文件用例用的是
+    # 600004/600001 等主板代码（旧「主板+创业板」口径）。显式放宽到两套板块，
+    # 否则所有买入/轮动用例都会被 board_excluded 判成 skip。
+    # 板块白名单规则本身由 tests/test_exec_rules.py 覆盖。
+    monkeypatch.setattr(settings, "twin_t_boards", "主板,创业板", raising=False)
     # 同理关闭「大盘股过滤」：它读本机真实快照的 total_mv，用例里的票（000001/600036 等）
     # 在真实市值下都会被判成大盘股而跳过。规则本身由 tests/test_exec_rules.py 覆盖。
     monkeypatch.setattr(paper_engine, "large_cap_rule", lambda: (False, 0.0))
@@ -255,7 +263,8 @@ class TestFee:
         """小额买入触发最低佣金 5 元 + 过户费。"""
         eng, _, _ = engine
         fee = eng.calc_fee("buy", 1000.0)  # 佣金=1000*2.5/万=0.25 → 兜底5元
-        assert fee == FEE_COMMISSION_MIN + 1000.0 * 0.1 / 10000
+        s = get_settings()
+        assert fee == s.trade_fee_commission_min + 1000.0 * s.trade_fee_transfer_rate
 
     def test_sell_fee_includes_stamp(self, engine):
         """卖出含印花税千1。"""
@@ -294,7 +303,7 @@ class TestExecute:
         pos = db.get_paper_position("600004")
         # 上限 20000 → 2000股
         assert pos["shares"] == 2000
-        assert pos["shares"] * 10.0 <= 100000 * SINGLE_POSITION_MAX_RATIO + 1
+        assert pos["shares"] * 10.0 <= 100000 * get_settings().paper_single_position_max + 1
 
     def test_sell_releases_cash(self, engine):
         """卖出后现金增加（扣卖出费用）。"""
@@ -1975,4 +1984,58 @@ class TestProvenance:
         prov = _json.loads(lots[0]["provenance"])
         assert prov["trigger"] == "manual"
         assert prov["regime"]["state"] in ("normal", "weak", "shock", "crisis")
+
+
+class TestBoardLimitUpGuard:
+    """#181 涨停禁买：按板块真实涨跌停幅度判定，昨收缺失时失败开放。
+
+    切入点是「新开仓/轮动换入」链路，做 T 买回、卖出、止盈止损不走这里，
+    因此补这道闸不影响「卖出与止盈止损照常」。
+    """
+
+    @staticmethod
+    def _rec(code, name=""):
+        from types import SimpleNamespace
+        return SimpleNamespace(
+            code=code, name=name, action="buy", score=60.0,
+            reason="测试", price=100.0, entry_armed=True,
+        )
+
+    @pytest.fixture
+    def eng(self, engine, monkeypatch):
+        eng, _, _ = engine
+        # 显式打开（全局 autouse 为了旧用例稳定性默认关掉）
+        monkeypatch.setattr(eng.settings, "paper_block_limit_up_buy", True, raising=False)
+        monkeypatch.setattr(eng.settings, "paper_entry_max_chase", 0.0, raising=False)
+        monkeypatch.setattr(eng.settings, "paper_entry_pullback", 0.0, raising=False)
+        from app.paper import engine as paper_engine
+        monkeypatch.setattr(
+            paper_engine, "_prev_close_map",
+            lambda: {"600519": 100.0, "300750": 100.0, "688981": 100.0, "920002": 100.0},
+        )
+        return eng
+
+    @pytest.mark.parametrize("code,name,price,blocked", [
+        ("600519", "", 119.6, True),    # 主板 ±10%（判定线 109.50）
+        ("600519", "", 108.0, False),
+        ("300750", "", 119.6, True),    # 创业板 ±20%（判定线 119.50）
+        ("300750", "", 115.0, False),   # +15% 在创业板是真实可成交价
+        ("688981", "", 119.6, True),    # 科创板 ±20%
+        ("688981", "", 115.0, False),
+        ("920002", "", 129.6, True),    # 北交所 ±30%（判定线 129.50）
+        ("920002", "", 125.0, False),
+        ("600519", "ST测试", 104.6, True),   # ST ±5%（判定线 104.50）
+        ("999999", "", 200.0, False),   # 无昨收 → 失败开放，绝不误杀
+    ])
+    def test_limit_up_blocked_per_board(self, eng, code, name, price, blocked):
+        ok, why = eng.entry_price_ok(self._rec(code, name), price, 100.0)
+        assert ok is (not blocked)
+        if blocked:
+            assert "涨停" in why
+
+    def test_switch_off_allows(self, eng, monkeypatch):
+        """开关关闭时回到旧行为（便于排查成交异常/复现历史结果）。"""
+        monkeypatch.setattr(eng.settings, "paper_block_limit_up_buy", False, raising=False)
+        ok, why = eng.entry_price_ok(self._rec("300750"), 119.6, 100.0)
+        assert ok is True and why == ""
 

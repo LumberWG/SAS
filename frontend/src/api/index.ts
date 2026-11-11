@@ -612,33 +612,197 @@ const BACKTEST_POLL_MS = 1500
 // 上限影响，即使前端放弃也会继续跑完并落库（可按 run_id 查历史）。
 const BACKTEST_TIMEOUT_MS = 40 * 60 * 1000
 
+// 网关层瞬时故障：cpolar 隧道抖动、SAS 服务重启窗口、反代 502/503/504。
+// 这类错误 axios 的 message 是 "Request failed with status code 502"，直接抛给页面
+// 会显示成「回测出错」，用户无从判断是参数错、服务挂了还是等几秒就好。
+const GATEWAY_STATUS = new Set([502, 503, 504])
+/** 无 response = 网络层断开 / 连接被掐；有 4xx/5xx 且非网关码 = 真实业务错误，不重试。 */
+function isTransientGatewayError(e: unknown): boolean {
+  const resp = (e as { response?: { status?: number } } | undefined)?.response
+  return !resp || GATEWAY_STATUS.has(resp.status ?? 0)
+}
+/** 把 axios 原始错误翻成用户能照做的中文提示（回测链路专用）。 */
+export function backtestErrorMessage(e: unknown): string {
+  if (e instanceof Error && e.message && !/^Request failed with status code/.test(e.message)) {
+    return e.message
+  }
+  const status = (e as { response?: { status?: number } } | undefined)?.response?.status
+  if (status && GATEWAY_STATUS.has(status)) {
+    return `服务暂时不可达（网关 ${status}）：通常是服务正在重启或公网隧道瞬断，已自动重试仍未恢复。请稍等几秒后重新点击「运行回测」。`
+  }
+  if (status === 404) {
+    return '回测任务已失效：服务重启会清空内存任务表，正在运行的回测不会跨重启保留。请重新点击「运行回测」；已完成的回测仍在「历史回测」里。'
+  }
+  if (status === 422) {
+    return '回测参数不合法（422）：请检查日期区间、板块勾选与各数值项。'
+  }
+  if (!status) return '网络连接中断：请确认 SAS 服务与公网隧道在线后重试。'
+  return `回测请求失败（HTTP ${status}）`
+}
+
 /**
  * 提交回测并轮询结果。
  *
  * 回测要逐只股票逐日滚动评估策略，几百只 × 一年常需 1~3 分钟，
  * 单个长请求会被浏览器/代理超时掐断，所以后端改为任务化。
+ *
+ * 网关容错：提交做 3 次退避重试（POST /run 幂等——后端同时只允许一个 running 任务，
+ * 重复提交会直接复用同一个 job_id）；轮询允许连续 6 次瞬时失败（约 10s 窗口），
+ * 覆盖服务重启/隧道抖动，不会因一次 502 就整个回测失败。
  */
 export async function runBacktest(req: BacktestRequest): Promise<BacktestResult> {
-  const { data } = await http.post<BacktestJob>('/backtest/run', req, { timeout: 0 })
+  let data: BacktestJob | undefined
+  let lastErr: unknown
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      const res = await http.post<BacktestJob>('/backtest/run', req, { timeout: 0 })
+      data = res.data
+      break
+    } catch (e) {
+      if (!isTransientGatewayError(e) || attempt === 2) throw e
+      lastErr = e
+      await new Promise((resolve) => window.setTimeout(resolve, 1200 * (attempt + 1)))
+    }
+  }
+  if (!data) throw lastErr ?? new Error('回测提交失败')
   // 兼容旧后端：仍返回完整结果时直接使用
-  if (!data.job_id) return data as unknown as BacktestResult
+  if (!data.job_id) return normalizeBacktestResult(data)
 
   const deadline = Date.now() + BACKTEST_TIMEOUT_MS
+  let transientFailures = 0
   while (Date.now() < deadline) {
     await new Promise((resolve) => window.setTimeout(resolve, BACKTEST_POLL_MS))
-    const res = await http.get<BacktestJob>(`/backtest/jobs/${data.job_id}`, {
-      timeout: 0,
-      // refresh 绕过 GET 缓存，否则轮询会一直读到第一次的 running 状态
-      params: { refresh: true },
-    })
-    if (res.data.status === 'done' && res.data.result) return res.data.result
+    let res: import('axios').AxiosResponse<BacktestJob>
+    try {
+      res = await http.get<BacktestJob>(`/backtest/jobs/${data.job_id}`, {
+        timeout: 0,
+        // refresh 绕过 GET 缓存，否则轮询会一直读到第一次的 running 状态
+        params: { refresh: true },
+      })
+      transientFailures = 0
+    } catch (e) {
+      const status = (e as { response?: { status?: number } } | undefined)?.response?.status
+      // 服务重启后内存任务表清空：任务本身也没了，必须让用户重跑，别显示成 404 天书
+      if (status === 404) {
+        throw new Error(backtestErrorMessage(e))
+      }
+      if (isTransientGatewayError(e)) {
+        transientFailures += 1
+        if (transientFailures >= 6) {
+          throw new Error('与服务连接持续中断（网关 502/503/504 或网络断开），已连续多次查不到回测进度。请确认服务在线后重新运行回测。')
+        }
+        continue
+      }
+      throw e
+    }
+    if (res.data.status === 'done' && res.data.result) return normalizeBacktestResult(res.data.result)
     if (res.data.status === 'error') throw new Error(res.data.error || '回测失败')
   }
   throw new Error('回测超时（已等待 40 分钟）。任务可能仍在后台运行并会落库，可稍后查询回测记录，或缩小股票池/时间区间后重试')
 }
 
+/**
+ * 历史回测详情归一化：把「老库缺列 / 半截数据」补成模板可安全渲染的形状。
+ *
+ * 背景：43 条历史里 38 条的 ``review`` 是空对象 ``{}``（归因功能上线前的记录）。
+ * 空对象在 JS 里是 truthy，``v-if="result.review"`` 照样进入并访问
+ * ``review.cost.fee_total.toFixed(0)`` → TypeError → Vue 渲染崩溃、整页白屏。
+ * 后端已在 ``/backtest/{id}`` 边界把残缺 review 置 null，这里再兜一层：任何来源
+ * （浏览器旧缓存、未来脏数据、旧后端）都不会让模板对 undefined 调数值方法。
+ */
+function normalizeBacktestResult(raw: unknown): BacktestResult {
+  const d = { ...((raw ?? {}) as Record<string, unknown>) }
+  const num = (v: unknown): number => {
+    const n = Number(v)
+    return Number.isFinite(n) ? n : 0
+  }
+  const text = (v: unknown): string => (v == null ? '' : String(v))
+  const list = (v: unknown): unknown[] => (Array.isArray(v) ? v : [])
+
+  // metrics：所有被 .toFixed / .toLocaleString 调用的字段必须是有限数
+  const m = { ...((d.metrics ?? {}) as Record<string, unknown>) }
+  const metricKeys = ['total_return', 'annualized_return', 'max_drawdown', 'sharpe',
+    'win_rate', 'trade_count', 'trading_days', 'final_equity'] as const
+  for (const k of metricKeys) m[k] = num(m[k])
+  for (const k of ['avg_pnl_pct', 'open_positions'] as const) {
+    if (m[k] !== undefined) m[k] = num(m[k])
+  }
+  if (m.benchmark_return == null) delete m.benchmark_return
+  else m.benchmark_return = num(m.benchmark_return)
+  d.metrics = m
+
+  // 曲线与逐笔：保证是数组，逐笔价格/收益率是数字（模板会直接 .toFixed）
+  d.equity_curve = list(d.equity_curve).map((p) => {
+    const x = (p ?? {}) as Record<string, unknown>
+    return {
+      date: text(x.date), equity: num(x.equity),
+      benchmark: x.benchmark == null ? undefined : num(x.benchmark),
+    }
+  })
+  d.trades = list(d.trades).map((t) => {
+    const x = (t ?? {}) as Record<string, unknown>
+    return {
+      code: text(x.code), name: text(x.name),
+      buy_date: text(x.buy_date), sell_date: text(x.sell_date),
+      buy_price: num(x.buy_price), sell_price: num(x.sell_price),
+      shares: num(x.shares), pnl: num(x.pnl), pnl_pct: num(x.pnl_pct),
+      reason: text(x.reason),
+    }
+  })
+
+  // ML 诊断：oos_rank_ic 会被 .toFixed(4)，缺字段给安全默认
+  const md = d.ml_diagnostics as Record<string, unknown> | null | undefined
+  if (md && typeof md === 'object') {
+    d.ml_diagnostics = {
+      mode: text(md.mode) || 'factors', model: text(md.model),
+      label_horizon: num(md.label_horizon), industry_neutral: Boolean(md.industry_neutral),
+      oos_rank_ic: num(md.oos_rank_ic), pred_pairs: num(md.pred_pairs),
+      effective: Boolean(md.effective),
+    }
+  } else {
+    delete d.ml_diagnostics
+  }
+
+  // 归因：只有结构完整才保留，否则整段不渲染（等价于老记录没有归因）
+  const rv = d.review as Record<string, unknown> | null | undefined
+  if (!rv || typeof rv !== 'object' || !Array.isArray(rv.reasons)
+    || !Array.isArray(rv.hold_buckets) || !rv.cost || typeof rv.cost !== 'object') {
+    delete d.review
+  } else {
+    const grp = (g: unknown) => {
+      const x = (g ?? {}) as Record<string, unknown>
+      return {
+        name: text(x.name), count: num(x.count), pnl: num(x.pnl),
+        avg_pnl_pct: num(x.avg_pnl_pct), win_rate: num(x.win_rate),
+      }
+    }
+    const cost = rv.cost as Record<string, unknown>
+    d.review = {
+      summary: text(rv.summary),
+      reasons: rv.reasons.map(grp),
+      score_buckets: list(rv.score_buckets).map(grp),
+      hold_buckets: rv.hold_buckets.map(grp),
+      avg_hold_days: num(rv.avg_hold_days),
+      cost: {
+        fee_total: num(cost.fee_total), pnl_total: num(cost.pnl_total),
+        fee_vs_loss_pct: num(cost.fee_vs_loss_pct),
+      },
+      extremes: { worst: [], best: [] },
+      suggestions: list(rv.suggestions).map((s) => {
+        const x = (s ?? {}) as Record<string, unknown>
+        return {
+          target: text(x.target), current: x.current == null ? '' : x.current,
+          suggest: x.suggest == null ? '' : x.suggest,
+          reason: text(x.reason), priority: text(x.priority),
+        }
+      }),
+    }
+  }
+  return d as unknown as BacktestResult
+}
+
 export function getBacktest(runId: number): Promise<BacktestResult> {
-  return http.get(`/backtest/${runId}`).then((r) => r.data)
+  return http.get(`/backtest/${runId}`).then((r) => normalizeBacktestResult(r.data))
 }
 
 /** 历史回测记录列表（按 id 倒序，最多 200 条）。 */
@@ -658,8 +822,10 @@ export interface ParamItem {
   restart_required: boolean
   /** 是否允许页面修改（路径/列表类为 false） */
   writable: boolean
-  /** 渲染控件：bool 开关 / number 数字框 / text 文本框 / readonly 只读 */
-  kind: 'bool' | 'number' | 'text' | 'readonly'
+  /** 渲染控件：bool 开关 / number 数字框 / text 文本框 / multiselect 多选 / readonly 只读 */
+  kind: 'bool' | 'number' | 'text' | 'multiselect' | 'readonly'
+  /** 多选控件的可选项列表（kind === 'multiselect' 时存在），顺序即展示与规范化顺序 */
+  options?: string[]
   runtime: boolean
   /** 敏感项（API Key / 机器人地址）：`value` 是掩码，原样回传视为未修改 */
   secret?: boolean
@@ -1342,7 +1508,11 @@ http.interceptors.response.use(
     const status = error.response?.status
     const isDown =
       status === 502 || status === 503 || status === 504 || !error.response
-    if (isDown) {
+    // 回测链路的网关错误含义不同：服务重启 / 隧道瞬断，而非「行情源挂了」。
+    // runBacktest 会自己重试并给出可操作的中文提示，这里不要弹误导性的行情横幅。
+    const url = String(error.config?.url ?? '')
+    const isBacktestFlow = url.startsWith('/backtest/')
+    if (isDown && !isBacktestFlow) {
       try {
         useNotifyStore().markDataSourceDown()
       } catch {
@@ -1358,12 +1528,24 @@ http.interceptors.response.use(
 export interface ScopeStats {
   source_total: number
   in_scope: number
+  /** 兼容旧字段：非创业板合计（含科创/北交所），真实拆分请看 by_board */
   mainboard: number
   cyb: number
-  excluded: { board_excluded: number; st: number; giant: number; invalid: number }
+  /** #181：各板块真实拆分，键为 sh_main/sz_main/cyb/star/bse */
+  by_board?: Record<string, number>
+  /** #181：选股板块(bottom_boards) 与交易板块(twin_t_boards) 不一致时给出提示 */
+  board_consistency?: {
+    ok: boolean
+    trade_boards: string[]
+    scan_boards: string[]
+    missing_in_trade: string[]
+    extra_in_trade: string[]
+    message: string
+  }
+  excluded: { board_excluded: number; st: number; giant?: number; invalid: number }
 }
 
-/** 当前可交易范围规模（沪深主板+创业板，剔 ST/巨无霸），见后端 /api/scope/stats。 */
+/** 当前可交易范围规模（按 twin_t_boards 板块白名单，剔 ST/巨无霸），见后端 /api/scope/stats。 */
 export function getScopeStats(): Promise<ScopeStats> {
   return http.get('/scope/stats').then((r) => r.data)
 }

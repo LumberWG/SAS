@@ -47,7 +47,7 @@ def get_access_log(
 ):
     """最近访客访问记录。
 
-    - ``exclude_dev=true``（默认）：剔除 localhost / 局域网 / `dev_ips` / `X-Dev-Key` 命中项；
+    - ``exclude_dev=true``（默认）：剔除本机 / 局域网等私有地址的调试流量；
     - ``unique=true``：同一 IP 只保留最新一条，便于看「都有哪些人」。
     """
     records = _read_recent(days)

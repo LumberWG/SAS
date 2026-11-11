@@ -638,7 +638,11 @@ def entry_guard(
 
 
 def _entry_guard_block_state() -> dict:
-    """当前硬屏蔽的实际生效状态（供前端展示「已布防 / 未启用 / 已启用但非下降市」）。"""
+    """当前硬屏蔽的实际生效状态（供前端展示「已布防 / 未启用 / 未达危机档」）。
+
+    双层宏观风险改造后，硬屏蔽只在统一大盘风险为 crisis 档时生效；
+    weak/shock 仅压仓位上限、买入照常，因此「armed」不再等同「下降市」。
+    """
     from app.analysis.entry_guard import should_block_buy
 
     blocked, regime = should_block_buy()

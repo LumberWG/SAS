@@ -352,6 +352,29 @@ function revertRow(it: ParamItem) {
   draft.value[it.key] = baseline.value[it.key]
 }
 
+/** 多选控件：某选项当前是否勾选（draft 里是逗号分隔字符串） */
+function msSelected(it: ParamItem, opt: string): boolean {
+  const cur = String(draft.value[it.key] ?? '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean)
+  return cur.includes(opt)
+}
+
+/** 多选控件：勾选/取消勾选，写回规范化逗号串（按 options 声明顺序重排，便于 dirty/verify 稳定对比） */
+function toggleBoard(it: ParamItem, opt: string) {
+  const order = (it.options ?? []) as string[]
+  const cur = String(draft.value[it.key] ?? '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean)
+  const idx = cur.indexOf(opt)
+  if (idx >= 0) cur.splice(idx, 1)
+  else cur.push(opt)
+  cur.sort((a, b) => order.indexOf(a) - order.indexOf(b))
+  draft.value[it.key] = cur.join(',')
+}
+
 /** 放弃全部未保存改动（底部悬浮条用）：草稿整体拉回生效值，不触库 */
 function discardAll() {
   draft.value = { ...baseline.value }
@@ -668,14 +691,15 @@ onUnmounted(() => {
                 v-for="it in sg.items"
                 :key="it.key"
                 :data-setting-key="it.key"
-                class="flex h-9 min-w-0 items-center gap-1.5 rounded-md px-1.5 transition-colors"
-                :class="
+                class="flex min-w-0 items-center gap-1.5 rounded-md px-1.5 transition-colors"
+                :class="[
+                  it.kind === 'multiselect' ? 'h-auto py-1' : 'h-9',
                   flashKeys.includes(it.key)
                     ? 'bg-primary/[0.12] ring-2 ring-inset ring-primary/70'
                     : isDirty(it)
                       ? 'bg-primary/[0.10] ring-1 ring-inset ring-primary/25'
                       : 'hover:bg-base-700/50'
-                "
+                ]"
                 :title="tipOf(it)"
               >
                 <span
@@ -687,8 +711,12 @@ onUnmounted(() => {
                   :class="isDirty(it) ? 'font-medium text-primary-light' : 'text-content-muted'"
                 >{{ it.label }}</span>
 
-                <!-- 控件槽：统一 112px，数字框/文本框同宽，右侧来源胶囊才能纵向对齐 -->
-                <span class="flex w-[112px] shrink-0 items-center gap-1.5">
+                <!-- 控件槽：统一 112px，数字框/文本框同宽，右侧来源胶囊才能纵向对齐；
+                     多选控件（板块芯片）放宽到自适应宽度并允许换行，避免 4 个板块挤爆 -->
+                <span
+                  class="flex shrink-0 items-center gap-1.5"
+                  :class="it.kind === 'multiselect' ? 'w-auto flex-wrap' : 'w-[112px]'"
+                >
                   <!-- 开关（补「开/关」字样，免得槽里空一大截） -->
                   <template v-if="it.kind === 'bool'">
                     <button
@@ -731,6 +759,23 @@ onUnmounted(() => {
                     class="field field-num h-7 w-full px-1.5 text-[13.5px]"
                     :class="[isDirty(it) ? 'border-primary/60' : 'border-base-600', flashKeys.includes(it.key) ? 'setting-spotlight' : '']"
                   />
+
+                  <!-- 多选（板块白名单）：一组可勾选芯片，写入逗号分隔字符串 -->
+                  <template v-else-if="it.kind === 'multiselect'">
+                    <span data-setting-control class="flex flex-wrap items-center gap-1">
+                      <button
+                        v-for="opt in it.options"
+                        :key="opt"
+                        type="button"
+                        class="rounded border px-1.5 py-px text-[12px] leading-4 transition-colors"
+                        :class="msSelected(it, opt)
+                          ? 'border-primary/60 bg-primary/15 text-primary-light'
+                          : 'border-base-600 bg-base-700/40 text-content-faint hover:text-content'"
+                        :title="msSelected(it, opt) ? '点击取消勾选' : '点击勾选'"
+                        @click="toggleBoard(it, opt)"
+                      >{{ opt }}</button>
+                    </span>
+                  </template>
 
                   <span v-else class="text-[11.5px] text-content-faint">需重启</span>
                 </span>

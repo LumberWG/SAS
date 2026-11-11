@@ -167,18 +167,16 @@ class Recommender:
         已持仓的例外——仍然需要卖出建议。
         """
         from app.data.scope import is_tradable
-        from app.paper.engine import large_cap_rule
 
         watchlist = await asyncio.to_thread(db.list_watchlist)
         if not watchlist:
             return []
         held = {p["code"] for p in await asyncio.to_thread(db.list_paper_positions)}
-        large_on, _limit = large_cap_rule()
         before = len(watchlist)
         watchlist = [
             row for row in watchlist
             if str(row["code"]) in held
-            or is_tradable(str(row["code"]), str(row.get("name") or ""), exclude_giant=large_on)[0]
+            or is_tradable(str(row["code"]), str(row.get("name") or ""))[0]
         ]
         if len(watchlist) < before:
             logger.info("自选分析跳过 %d 只范围外股票（科创板/北交所/ST/大盘股）", before - len(watchlist))

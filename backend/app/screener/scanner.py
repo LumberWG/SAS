@@ -291,17 +291,17 @@ class Scanner:
                 pool = filter_pool_by_scope(pool, scope)
             # 范围过滤（项目原则：只分析沪深主板+创业板，剔除 ST 与巨无霸）。
             # 统一作用于所有分支（显式 codes / 成交额 TopN / scope），
-            # 保证选股中心候选池不出科创板/北交所/ST/巨无霸。
+            # 保证选股中心候选池不出科创板/北交所/ST。
             before = len(pool)
             if "name" not in pool.columns:
                 pool["name"] = pool["code"]
-            # 巨无霸黑名单与「交易队列」页的大盘股开关同一口径：开关关闭时黑名单也放开，
+            # 大市值市值阈值与交易队列页的大盘股开关同一口径：开关关闭时阈值也放开，
             # 否则页面上关掉开关，候选池里仍然永远看不到银行/石油，开关等于没用
             from app.paper.engine import large_cap_rule  # 延迟导入避免循环依赖
 
             large_on, large_limit = large_cap_rule()
             keep = [
-                is_tradable(str(c), str(n), exclude_giant=large_on)[0]
+                is_tradable(str(c), str(n))[0]
                 for c, n in zip(pool["code"].astype(str), pool["name"].astype(str))
             ]
             pool = pool[pd.Series(keep, index=pool.index)].reset_index(drop=True)
@@ -312,7 +312,7 @@ class Scanner:
             task.excluded_by_scope = before - len(pool)
             if task.excluded_by_scope:
                 logger.info(
-                    "范围过滤：剔除 %d 只范围外股票（科创板/北交所/ST/巨无霸），剩余 %d 只",
+                    "范围过滤：剔除 %d 只范围外股票（科创板/北交所/ST），剩余 %d 只",
                     task.excluded_by_scope, len(pool),
                 )
             task.total = len(pool)
@@ -344,7 +344,6 @@ class Scanner:
 
             # 第 1 次排序：按技术面评分降序，同股并列同一名次
             rank_hits(task.hits)
-            task.status = "done"
             task.finished_at = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
             # 信号持久化
@@ -360,6 +359,9 @@ class Scanner:
                 "扫描完成: %d 只股票, 命中 %d 个信号, 跳过 %d 只, 程序自选新增 %d",
                 task.total, len(task.hits), task.skipped, auto_added,
             )
+            # status 必须等信号 / 落盘 / 程序自选全部落地后再置位：前端轮询到
+            # done 会立刻刷新「程序自选」，提前置位会偶发读到空列表（既有竞态）。
+            task.status = "done"
             # 选股 → 建议 → 实时交易：盘中命中立即分析并送入实时队列
             await self._trade_top_hits(task.hits, getattr(task, "task_id", None))
         except Exception as exc:  # noqa: BLE001 - 整轮失败记录状态
@@ -567,6 +569,7 @@ class Scanner:
         df = await loop.run_in_executor(self._io, add_all_indicators, df)
 
         signals: list[Signal] = []
+        df.attrs["code"] = code  # #181：供策略按板块缩放止盈目标
         for strategy in strategies:
             if len(df) < strategy.min_bars:
                 continue

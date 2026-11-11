@@ -67,20 +67,28 @@ def test_should_block_buy_off_by_default():
 
 
 def test_should_block_buy_active_in_declining_market(monkeypatch):
-    # 开关打开 + 下降市 -> 拦截并附 regime
+    # #180 起按统一大盘风险四档判定：只有 crisis 档才全暂停新开仓
     s = eg.get_settings()
     prev = s.entry_guard_block_declining_market
     s.entry_guard_block_declining_market = True
     try:
         monkeypatch.setattr(
             eg, "market_regime",
-            lambda: {"state": "declining", "close": 3600.0, "ma20": 3680.0,
-                     "ma60": 3830.0, "as_of": "2026-11-09",
+            lambda: {"tier": "crisis", "state": "declining", "close": 3600.0,
+                     "ma20": 3680.0, "ma60": 3830.0, "as_of": "2026-11-09",
                      "new_entry_advice": "avoid"},
         )
         blocked, regime = eg.should_block_buy()
         assert blocked is True
-        assert regime["state"] == "declining"
+        assert regime["tier"] == "crisis"
+        # weak/shock 只压仓位上限、买入照常（「582 次误拦」的修复点）
+        for tier in ("calm", "weak", "shock"):
+            monkeypatch.setattr(
+                eg, "market_regime",
+                lambda t=tier: {"tier": t, "state": "declining",
+                                "new_entry_advice": "avoid"},
+            )
+            assert eg.should_block_buy()[0] is False
     finally:
         s.entry_guard_block_declining_market = prev
 
@@ -93,13 +101,13 @@ def test_should_block_buy_armed_but_not_declining(monkeypatch):
     try:
         monkeypatch.setattr(
             eg, "market_regime",
-            lambda: {"state": "uptrend", "close": 3700.0, "ma20": 3680.0,
-                     "ma60": 3830.0, "as_of": "2026-11-09",
+            lambda: {"tier": "calm", "state": "uptrend", "close": 3700.0,
+                     "ma20": 3680.0, "ma60": 3830.0, "as_of": "2026-11-09",
                      "new_entry_advice": "ok"},
         )
         blocked, regime = eg.should_block_buy()
         assert blocked is False
-        assert regime["state"] == "uptrend"
+        assert regime["tier"] == "calm"
     finally:
         s.entry_guard_block_declining_market = prev
 
@@ -116,22 +124,22 @@ def test_ops_block_state_reflects_setting(monkeypatch):
         st = ops._entry_guard_block_state()
         assert st["enabled"] is False and st["state"] == "off"
 
-        # 2) 已启用 + 下降市 -> 拦截
+        # 2) 已启用 + crisis 档 -> 拦截（#180：不再按「下降市」判定）
         s.entry_guard_block_declining_market = True
         monkeypatch.setattr(
             eg, "market_regime",
-            lambda: {"state": "declining", "close": 3600.0, "ma20": 3680.0,
-                     "ma60": 3830.0, "as_of": "2026-11-09",
+            lambda: {"tier": "crisis", "state": "declining", "close": 3600.0,
+                     "ma20": 3680.0, "ma60": 3830.0, "as_of": "2026-11-09",
                      "new_entry_advice": "avoid"},
         )
         st = ops._entry_guard_block_state()
         assert st["enabled"] is True and st["active"] is True and st["state"] == "declining"
 
-        # 3) 已启用 + 上升市 -> 布防但未触发
+        # 3) 已启用 + shock 档 -> 布防但未触发（只压仓位，买入照常）
         monkeypatch.setattr(
             eg, "market_regime",
-            lambda: {"state": "uptrend", "close": 3700.0, "ma20": 3680.0,
-                     "ma60": 3830.0, "as_of": "2026-11-09",
+            lambda: {"tier": "shock", "state": "uptrend", "close": 3700.0,
+                     "ma20": 3680.0, "ma60": 3830.0, "as_of": "2026-11-09",
                      "new_entry_advice": "ok"},
         )
         st = ops._entry_guard_block_state()

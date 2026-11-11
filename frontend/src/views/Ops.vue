@@ -545,7 +545,7 @@ onUnmounted(() => {
         <div>
           <h3 class="text-subheading">访客访问记录</h3>
           <p class="mt-1 text-[12.5px] text-content-faint">
-            默认剔除本机 / 局域网 / dev_ips / X-Dev-Key 的调试流量；记录按天落 JSONL
+            默认剔除本机 / 局域网等私有地址的调试流量；记录按天落 JSONL
           </p>
         </div>
         <div class="flex flex-wrap items-center gap-3 text-[12.5px] text-content-muted">

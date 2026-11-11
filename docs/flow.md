@@ -43,7 +43,7 @@
 「本地历史 · 某日」）——这不是缓存 bug，是分钟库没导出。
 
 **第 3 步 · 定扫描范围（仅 15:30 那一路）。** 优先级从高到低：指定代码列表 > 成交额前 N（`top_amount:N`，解析失败默认 500）> 板块（沪/深/创业板/科创/北交）> 全市场。
-定完范围后**所有分支统一再过一道** `is_tradable`：只留沪深主板 + 创业板（600/601/603/605/000/001/002/003/300/301），剔除 ST、退市、巨无霸黑名单；再按总市值不超过 100 亿过滤（受设置页开关控制）。
+定完范围后**所有分支统一再过一道** `is_tradable`：只留沪深主板 + 创业板（600/601/603/605/000/001/002/003/300/301），剔除 ST、退市；再按总市值不超过 100 亿过滤（受设置页开关控制）。
 
 **第 4 步 · 并发单元。** 并发闸 `scan_concurrency=20`。扫描路每只票：取 K 线（不足 30 根跳过）→ 加指标 → 逐个策略 `evaluate`（K 线不足该策略 `min_bars`，默认 60，也跳过）→ 命中产出 Signal，并立刻算**技术面分**（均线 ±2、MACD ±1.5、KDJ ±1.5、量比 ±1、乖离 ±1，合计 ±8）。分析路每只自选股：取 K 线 → 加指标 → 算 14 因子。
 
@@ -100,7 +100,7 @@ flowchart TD
 
     subgraph S["② 扫描选股（scanner._run）"]
         S1["范围优先级：codes ＞ top_amount:N ＞ 板块 ＞ all"]
-        S2["统一过滤 is_tradable<br/>沪深主板+创业板，剔 ST / 巨无霸<br/>total_mv ≤ paper_large_cap_yi（100 亿）"]
+        S2["统一过滤 is_tradable<br/>沪深主板+创业板，剔 ST<br/>total_mv ≤ paper_large_cap_yi（100 亿）"]
         S3["并发 scan_concurrency=20<br/>逐股取 K 线，不足 30 根跳过"]
         S4["逐策略 evaluate<br/>K 线不足 min_bars（60）跳过"]
         S5["命中 → Signal + 技术面打分 score_technical（±8）"]
@@ -194,7 +194,7 @@ flowchart TD
     G4 --> H
 
     H{"③ 准入五道闸 _buy_allowed<br/>永久性拒绝，先于弱市判断"}
-    H -- "北交所（paper_exclude_bj）" --> Y1["skip"]
+    H -- "不在交易板块勾选范围（twin_t_boards）" --> Y1["skip"]
     H -- "不在沪深主板 + 创业板" --> Y1
     H -- "total_mv 超过 100 亿" --> Y1
     H -- "名称缺失 / 乱码" --> Y1
@@ -233,7 +233,7 @@ flowchart TD
 | `paper_entry_max_chase` | **0（关闭）** | 2026-11-01 由 0.015 改为 0：6 段配对中位 **−4.54pp**、正占比 2/6、最差段 −22.46pp，且成交笔数没减少（是「买差」不是「少买」），**不采纳**（`BACKTEST_LOG` #89）。此前「放开到全时段买入」的 −1.18pp 结论见 #58 |
 | `paper_buy_open_window_minutes` | 5（**本机线上 0 = 窗口关闭**） | 与回测「次日开盘价成交」同口径；盘中信号若在窗口外产生，买单顺延到下一个开盘。线上置 0 后交易时段全时段可买，**与回测口径不一致**（`WORKLOG` 2026-11-02） |
 | `paper_pool_top_n` | 300 | 线上池子，`/api/backtest/defaults` 让 `universe_size` 跟随它；但 `BacktestParams` 数据类默认是 **500**，直接跑 `scripts\*.py` 要显式 `--universe 300`，否则写死 500 再和线上比 = 两个实验（`#70` 口径红线） |
-| `paper_large_cap_yi` | 100 亿 | 排除银行/石油这类「买了也不动」的票；关掉开关时 `GIANT_CODES` 黑名单同时失效 |
+| `paper_large_cap_yi` | 100 亿 | 排除银行/石油这类「买了也不动」的票；关掉开关时市值阈值过滤同时失效 |
 | `paper_trade_queue_top_m` | 5 | 同一轮最多 5 只争钱，否则预算被 20 只平摊成「每只都不够一手」 |
 
 ---
@@ -342,7 +342,7 @@ stop_price    = 成本价 × (1 − stop_distance)          # 建仓时写死，
 | | `paper_t_active` 等 8 项 | **True**（2026-11-02 起） | 做T 引擎；数值参数默认保守（下跌加仓 0.2 ≈ 关闭） |
 | 费用 | `trade_fee_commission_rate` / `_min` | 0.00025 / 5 元 | 佣金万 2.5、最低 5 元，双边 |
 | | `trade_fee_stamp_rate` / `_transfer_rate` | 0.001 / 0.00001 | 印花税（仅卖）、过户费（双边） |
-| 池子 | `paper_pool_top_n` / `paper_exclude_bj` / `paper_exclude_large_cap` | 300 / True / True | 成交额池、北交所、大市值 |
+| 池子 | `paper_pool_top_n` / `paper_exclude_large_cap` | 300 / True | 成交额池、大市值 |
 
 > 以上全部可在「系统设置」页调，改完下一个 tick / 下一轮扫描即生效。
 > **判断是否真的生效要看 `GET /api/settings` 的 `source` 字段**——`app_state` 的 `cfg:` 覆盖层

@@ -88,9 +88,10 @@ def test_default_on_and_switch_off_blocks(monkeypatch, tmp_path):
 def test_limit_sell_half(monkeypatch, eng):
     _seed(engine_module.db, 1000)
     from app.data.snapshot_store import snapshot_store
-    # 涨停：high=11 ≥ prev_close 10*1.095=10.95
+    # 涨停（#181 板块口径）：票是 300001 创业板 ±20%，判定线 = 10×1.195=11.95；
+    # high 必须到 12 才算触板（旧全市场 ±9.5% 口径下 11 就够了）
     monkeypatch.setattr(snapshot_store, "peek_snapshot",
-                        lambda: _snap(10.0, 11.0, 9.8, 10.0, 11.0))
+                        lambda: _snap(10.0, 12.0, 9.8, 10.0, 11.0))
     trades = asyncio.run(eng.t_tick({"300001": 11.0}))
     assert any(t.reason == "涨停卖半" for t in trades)
     pos = engine_module.db.list_paper_positions()[0]
@@ -158,7 +159,7 @@ def test_crash_guard_pauses(monkeypatch, eng):
     _seed(engine_module.db, 1000)
     from app.data.snapshot_store import snapshot_store
     monkeypatch.setattr(snapshot_store, "peek_snapshot",
-                        lambda: _snap(10.0, 11.0, 9.8, 10.0, 11.0))   # 涨停
+                        lambda: _snap(10.0, 12.0, 9.8, 10.0, 11.0))   # 涨停
     monkeypatch.setattr(snapshot_store, "peek_indices",
                         lambda: pd.DataFrame([{"code": "000001", "pct_change": -5.0}]))
     trades = asyncio.run(eng.t_tick({"300001": 11.0}))
@@ -173,7 +174,7 @@ def test_crash_defers_buyback_until_next_open(monkeypatch, eng):
 
     # ① 非 crash：涨停卖半 → 底仓减半，标记「今日待买回」
     monkeypatch.setattr(snapshot_store, "peek_snapshot",
-                        lambda: _snap(10.0, 11.0, 9.8, 10.0, 11.0))
+                        lambda: _snap(10.0, 12.0, 9.8, 10.0, 11.0))
     asyncio.run(eng.t_tick({"300001": 11.0}))
     pos = db.list_paper_positions()[0]
     assert int(pos["shares"]) == 500
@@ -184,7 +185,7 @@ def test_crash_defers_buyback_until_next_open(monkeypatch, eng):
     monkeypatch.setattr(snapshot_store, "peek_indices",
                         lambda: pd.DataFrame([{"code": "000001", "pct_change": -5.0}]))
     monkeypatch.setattr(snapshot_store, "peek_snapshot",
-                        lambda: _snap(10.0, 11.0, 9.8, 10.0, 10.2))
+                        lambda: _snap(10.0, 12.0, 9.8, 10.0, 10.2))
     trades = asyncio.run(eng.t_tick({"300001": 10.2}))
     assert not any(t.reason == "做T买回" for t in trades)
     pos = db.list_paper_positions()[0]
@@ -215,7 +216,7 @@ def test_no_buyback_when_price_not_pulled_back(monkeypatch, eng):
     _seed(db, 1000)
 
     monkeypatch.setattr(snapshot_store, "peek_snapshot",
-                        lambda: _snap(10.0, 11.0, 9.8, 10.0, 11.0))
+                        lambda: _snap(10.0, 12.0, 9.8, 10.0, 11.0))
     asyncio.run(eng.t_tick({"300001": 11.0}))          # 涨停卖半 500
     trades = asyncio.run(eng.t_tick({"300001": 11.0}))  # 价格未回落
     assert not any(t.reason == "做T买回" for t in trades)

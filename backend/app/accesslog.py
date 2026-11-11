@@ -80,22 +80,11 @@ def parse_device(ua: str) -> dict[str, str]:
 
 
 def is_dev_request(request: Request, ip: str) -> bool:
-    """判定是否为开发者/调试流量。满足任一即标记：
+    """判定是否为开发者/调试流量：本机 localhost、局域网等私有/回环/链路本地地址
 
-    1. 私有/回环/链路本地地址（本机 localhost、局域网）—— 自动排除，无需配置；
-    2. IP 在 `dev_ips` 列表内（开发者自测用的公网 IP）；
-    3. 请求带 `X-Dev-Key` 且与配置 `dev_key` 一致（开发者在浏览器里手动标记会话）。
+    自动标记为调试流量（无需配置）；公网访问一律视为真实访客。
     """
-    if _is_private_ip(ip):
-        return True
-    settings = get_settings()
-    dev_ips = [x.strip() for x in settings.dev_ips if x.strip()]
-    if ip in dev_ips:
-        return True
-    dev_key = (settings.dev_key or "").strip()
-    if dev_key and request.headers.get("x-dev-key", "").strip() == dev_key:
-        return True
-    return False
+    return _is_private_ip(ip)
 
 
 def log_access(*, request: Request, status_code: int, is_api: bool) -> None:

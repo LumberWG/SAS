@@ -408,7 +408,12 @@ def get_backtest_job(job_id: str) -> dict:
     """查询回测任务状态；done 时带上完整结果。"""
     job = _JOBS.get(job_id)
     if job is None:
-        raise HTTPException(status_code=404, detail="回测任务不存在或已过期")
+        # 任务表在内存里：服务重启即清空，正在跑的回测线程也随之终止。
+        # 说清原因，避免前端把 404 当成「参数/接口坏了」或显示成天书。
+        raise HTTPException(
+            status_code=404,
+            detail="回测任务不存在或已过期（服务重启会清空内存任务表，正在运行的回测不会跨重启保留，请重新运行；已完成的回测仍在「历史回测」中）",
+        )
     payload: dict = {
         "job_id": job_id,
         "status": job["status"],
@@ -422,10 +427,23 @@ def get_backtest_job(job_id: str) -> dict:
 
 @router.get("/{run_id}")
 def get_backtest(run_id: int) -> dict:
-    """查询历史回测结果。"""
+    """查询历史回测结果。
+
+    ``cache.get_backtest()`` 对「归因功能上线前」的老记录会把空列解成 ``{}``。
+    空对象在 JS 里是 truthy，前端 ``v-if="result.review"`` 会进入并访问
+    ``review.cost.fee_total.toFixed(0)`` → 渲染抛异常 → 整页白屏（实测 43 条里
+    38 条命中）。这里在 API 边界把空/残缺 review 归一成 ``None``，数据库层
+    （含 ``test_backtest_store`` 对老库 ``review == {}`` 的断言）保持不变。
+    """
     result = db.get_backtest(run_id)
     if result is None:
         raise HTTPException(status_code=404, detail="回测记录不存在")
+    review = result.get("review")
+    if (not isinstance(review, dict) or not review
+            or not isinstance(review.get("cost"), dict)
+            or not isinstance(review.get("reasons"), list)
+            or not isinstance(review.get("hold_buckets"), list)):
+        result["review"] = None
     return with_disclaimer(result)
 
 

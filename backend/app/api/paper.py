@@ -133,6 +133,23 @@ async def paper_tick_now() -> dict:
     return with_disclaimer(await live_trader.tick())
 
 
+@router.post("/liquidate-offboard")
+async def paper_liquidate_offboard() -> dict:
+    """立即清掉所有「非交易板块」持仓（板块不在 twin_t_boards 白名单）。
+
+    受 ``paper_liquidate_offboard`` 开关控制：关闭时不动（返回 cleared=0）。
+    开启开关后，除每日开盘前/收盘自动清外，也可随时调本接口立即清一次。
+    """
+    results = await live_trader.engine.liquidate_offboard_positions()
+    return with_disclaimer({
+        "cleared": len(results),
+        "trades": [
+            {"code": r.code, "name": r.name, "shares": r.shares, "price": r.price}
+            for r in results
+        ],
+    })
+
+
 @router.get("/trades")
 def paper_trades(limit: int = 100, code: str | None = None) -> dict:
     """交易流水（按时间倒序，可按股票过滤）。"""

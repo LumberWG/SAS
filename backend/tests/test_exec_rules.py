@@ -12,7 +12,7 @@ from datetime import datetime, timedelta
 import pytest
 
 from app.config import get_settings
-from app.paper.engine import _is_bj, _name_ok
+from app.paper.engine import _name_ok
 from app.paper.live import LiveTrader
 
 
@@ -44,29 +44,19 @@ def _disable_large_cap(monkeypatch):
     monkeypatch.setattr(paper_engine, "large_cap_rule", lambda: (False, 0.0))
 
 
-# ---------------- 股票池口径：北交所 / 名称可信度 ----------------
-@pytest.mark.parametrize("code", ["920174", "430047", "830799", "871981", "400001"])
-def test_bj_codes_excluded(code):
-    assert _is_bj(code)
-
-
-@pytest.mark.parametrize("code", ["600621", "002945", "301487", "688271", "900901"])
-def test_non_bj_codes_pass(code):
-    assert not _is_bj(code)
-
-
+# ---------------- 股票池口径：名称可信度 ----------------
 def test_name_ok_accepts_normal_name():
-    assert _name_ok("华鑫股份", "600621")
+    assert _name_ok("华鑫股份", "300621")
 
 
-@pytest.mark.parametrize("name", ["", "   ", "600621", "鍗庨懌鑲′唤", "西部超导\ufffd"])
+@pytest.mark.parametrize("name", ["", "   ", "300621", "鍗庨懌鑲′唤", "西部超导\ufffd"])
 def test_name_rejected(name):
     """空名称 / 用代码当名称 / 乱码（含替换字符）一律拒绝下单。
 
     名称取不到往往意味着股票池不完整（例如实盘买到了 Top300 之外的票），
     静默用代码继续买等于绕过池子约束。
     """
-    assert not _name_ok(name, "600621")
+    assert not _name_ok(name, "300621")
 
 
 # ---------------- 时点口径：买单只在开盘窗口成交 ----------------
@@ -109,7 +99,7 @@ def test_stop_distance_never_tighter_than_base(trader, monkeypatch):
     from app.data.cache import kline_cache
 
     monkeypatch.setattr(kline_cache, "get", lambda code: None)
-    assert trader.engine._stop_distance("600621") >= 0.08
+    assert trader.engine._stop_distance("300621") >= 0.08
 
 
 def test_stop_distance_respects_cap(trader, monkeypatch):
@@ -122,15 +112,15 @@ def test_stop_distance_respects_cap(trader, monkeypatch):
         "high": [108.0] * 30, "low": [100.0] * 30, "close": [100.0] * 30,
     })
     monkeypatch.setattr(kline_cache, "get", lambda code: df)
-    dist = trader.engine._stop_distance("600621")
+    dist = trader.engine._stop_distance("300621")
     cap = get_settings().paper_atr_stop_max
     assert 0.08 <= dist <= max(cap, 0.08)
     assert dist == pytest.approx(0.16, abs=0.02)
 
 
 def test_pool_rejects_out_of_top_n(trader, monkeypatch):
-    monkeypatch.setattr(trader.engine, "_top_amount_codes", lambda: {"600621"})
-    ok, why = trader.engine._buy_allowed("600621", "华鑫股份")
+    monkeypatch.setattr(trader.engine, "_top_amount_codes", lambda: {"300621"})
+    ok, why = trader.engine._buy_allowed("300621", "华鑫股份")
     assert ok, why
     ok, why = trader.engine._buy_allowed("301487", "盟固利")
     assert not ok and "成交额" in why
@@ -148,26 +138,26 @@ class TestLargeCapGate:
         from app.paper import engine as paper_engine
 
         monkeypatch.setattr(paper_engine, "large_cap_rule", lambda: (True, 100 * 1e8))
-        monkeypatch.setattr(paper_engine, "_market_cap_map", lambda: {"600621": 120 * 1e8})
-        ok, why = trader.engine._buy_allowed("600621", "华鑫股份")
+        monkeypatch.setattr(paper_engine, "_market_cap_map", lambda: {"300621": 120 * 1e8})
+        ok, why = trader.engine._buy_allowed("300621", "华鑫股份")
         assert not ok and "大盘股" in why
 
     def test_allows_below_threshold(self, trader, monkeypatch):
         from app.paper import engine as paper_engine
 
         monkeypatch.setattr(paper_engine, "large_cap_rule", lambda: (True, 100 * 1e8))
-        monkeypatch.setattr(paper_engine, "_market_cap_map", lambda: {"600621": 80 * 1e8})
+        monkeypatch.setattr(paper_engine, "_market_cap_map", lambda: {"300621": 80 * 1e8})
         monkeypatch.setattr(trader.engine, "_top_amount_codes", lambda: None)
-        ok, why = trader.engine._buy_allowed("600621", "华鑫股份")
+        ok, why = trader.engine._buy_allowed("300621", "华鑫股份")
         assert ok, why
 
     def test_switch_off_allows_large_cap(self, trader, monkeypatch):
         from app.paper import engine as paper_engine
 
         monkeypatch.setattr(paper_engine, "large_cap_rule", lambda: (False, 100 * 1e8))
-        monkeypatch.setattr(paper_engine, "_market_cap_map", lambda: {"600621": 2000 * 1e8})
+        monkeypatch.setattr(paper_engine, "_market_cap_map", lambda: {"300621": 2000 * 1e8})
         monkeypatch.setattr(trader.engine, "_top_amount_codes", lambda: None)
-        ok, why = trader.engine._buy_allowed("600621", "华鑫股份")
+        ok, why = trader.engine._buy_allowed("300621", "华鑫股份")
         assert ok, why
 
     def test_missing_market_cap_does_not_block(self, trader, monkeypatch):
@@ -177,5 +167,5 @@ class TestLargeCapGate:
         monkeypatch.setattr(paper_engine, "large_cap_rule", lambda: (True, 100 * 1e8))
         monkeypatch.setattr(paper_engine, "_market_cap_map", lambda: {})
         monkeypatch.setattr(trader.engine, "_top_amount_codes", lambda: None)
-        ok, why = trader.engine._buy_allowed("600621", "华鑫股份")
+        ok, why = trader.engine._buy_allowed("300621", "华鑫股份")
         assert ok, why

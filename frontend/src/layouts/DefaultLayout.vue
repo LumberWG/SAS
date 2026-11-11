@@ -40,6 +40,24 @@ const route = useRoute()
 const router = useRouter()
 const market = useMarketStore()
 const scopeStats = ref<ScopeStats | null>(null)
+// #181：可交易范围按板块真实拆分展示，不再把「非创业板」笼统叫作主板
+const BOARD_ZH: Record<string, string> = {
+  sh_main: '沪主', sz_main: '深主', cyb: '创业板', star: '科创板', bse: '北交所',
+}
+const scopeBoardText = computed(() => {
+  const s = scopeStats.value
+  if (!s) return ''
+  if (!s.by_board) return `创业板 ${s.cyb}`
+  const parts = Object.entries(s.by_board)
+    .filter(([, n]) => n > 0)
+    .map(([k, n]) => `${BOARD_ZH[k] ?? k} ${n}`)
+  return parts.length ? parts.join(' / ') : `创业板 ${s.cyb}`
+})
+// 选股板块与交易板块不一致时（当前默认就是），顶栏给出可点的提示
+const scopeWarning = computed(() => {
+  const bc = scopeStats.value?.board_consistency
+  return bc && !bc.ok ? bc.message : ''
+})
 // 手机（经 cpolar 公网访问）没有 224px 的横向空间：侧栏默认收起，点汉堡展开
 const sidebarOpen = ref(false)
 // 手机顶栏放不下 4 个状态灯，收进一个可点开的状态面板 —— 信息不能整块藏掉
@@ -396,9 +414,16 @@ const currentGroup = computed(() =>
           <span
             v-if="scopeStats"
             class="chip chip-muted hidden sm:inline-flex"
-            :title="`可交易范围 ${scopeStats.in_scope} 只（主板 ${scopeStats.mainboard} / 创业板 ${scopeStats.cyb}）`"
+            :title="`可交易范围 ${scopeStats.in_scope} 只（${scopeBoardText}）`"
           >
-            范围 {{ scopeStats.in_scope }} · 创业板 {{ scopeStats.cyb }}
+            范围 {{ scopeStats.in_scope }} · {{ scopeBoardText }}
+          </span>
+          <span
+            v-if="scopeWarning"
+            class="chip chip-muted hidden text-warn sm:inline-flex"
+            :title="scopeWarning"
+          >
+            ⚠ 板块不一致
           </span>
           <span
             class="chip hidden sm:inline-flex"
@@ -449,7 +474,8 @@ const currentGroup = computed(() =>
           <div class="flex flex-wrap gap-x-3 gap-y-1 text-content-faint">
             <span class="font-num">{{ now }}</span>
             <span>快照 {{ dataStatus?.snapshot.updated_at ?? '—' }}</span>
-            <span v-if="scopeStats">范围 {{ scopeStats.in_scope }} · 创业板 {{ scopeStats.cyb }}</span>
+            <span v-if="scopeStats">范围 {{ scopeStats.in_scope }} · {{ scopeBoardText }}</span>
+            <span v-if="scopeWarning" class="text-warn">{{ scopeWarning }}</span>
           </div>
           <div class="text-content-faint">{{ mlStatus?.note ?? 'ML 状态不可用' }}</div>
           <button class="btn btn-ghost btn-sm w-full" @click="refreshDataStatus()">

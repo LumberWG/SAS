@@ -257,15 +257,40 @@ class Settings(BaseSettings):
     paper_entry_pullback: float = 0.0
     # 3) 超时：信号超过此分钟数未成交就放弃（0 = 沿用 paper_signal_ttl_minutes）。
     paper_entry_timeout_minutes: int = 0
+    # 4) 涨停禁买（#181）：模拟盘此前会在涨停价虚假成交——实盘封板根本买不到。
+    #    按板块真实涨跌幅判定（app.board_rules，含 0.5pp 容差）：主板±10%、
+    #    创业板/科创板±20%、北交所±30%、ST±5%。昨收取进程内内存快照的
+    #    prev_close（毫秒级、不联网）；取不到昨收时失败开放、不误杀。
+    #    只拦「新开仓/轮动换入」的买入，不拦做 T 买回、卖出、止盈止损。
+    paper_block_limit_up_buy: bool = True
 
     # ---------- 执行口径对齐回测（见 BACKTEST_LOG 记录 #19） ----------
     # 为什么需要：回测用「每日成交额 TopN」池，实盘此前是全市场扫描，
     # 于是回测里选不到的票（尤其北交所小票）被真实买入，回测结论无法解释实盘。
     # 只允许买入当日成交额 TopN 内的股票；0=不限制（回到旧的全市场行为）
     paper_pool_top_n: int = 300
-    # 排除北交所（920/43/83/87/4/8 开头）：日波动 5~10%，固定 8% 止损≈1×ATR，
-    # 会被正常噪声打掉；且 Top300 成交额池里几乎不会出现
-    paper_exclude_bj: bool = True
+    # 交易板块白名单（逗号分隔）：只统计/买入选定板块。默认仅创业板（用户买卖集中于创业板，
+    # 2026-11-10 起改默认）；在「系统设置 → 交易执行 → 股票池过滤」多选。留空=不限制
+    # （退回主板+创业板）。引擎买入池与日更做T信号清单都按此过滤。
+    # #181 起同时接受中文名（主板/创业板/科创板/北交所）与英文键
+    # （sh_main/sz_main/cyb/star/bse），可直接把 bottom_boards 的值粘过来，
+    # 让「选股板块」与「交易板块」用同一套口径；前缀表统一在 app/board_rules.py。
+    # ⚠️ 若 bottom_boards 含本项未勾选的板块，候选会被买入侧拒绝——
+    # /api/scope/stats 的 board_consistency 会给出提示。
+    # 科创板(200股起/1股递增)、北交所(100股起/1股递增)的申报规则与 ±20%/±30% 涨跌停
+    # 已由 board_rules 统一支持。
+    twin_t_boards: str = "创业板"
+    # 板块交易规则回退开关：True=回到旧的全市场 ±9.5% 涨跌停 / 100 股整手口径，
+    # 用于复现 #178 之前的历史回测基线（+8.49% 等）。默认 False = 按各板块真实规则
+    # （主板±10%、创业板/科创板±20%、北交所±30%、ST±5%；科创200股起、北交所1股递增）。
+    # ⚠️ 默认 False 会改变创业板既有回测/模拟盘行为：旧口径把 +9.5%~+20% 的正常上涨
+    # 误判为「涨停买不到」。如需严格对比历史结果，临时置 True。
+    board_rules_legacy_limit: bool = False
+    # 自动清掉"非交易板块"持仓：开启后，引擎在每日开盘前与收盘结算时，把不属于
+    # `twin_t_boards` 白名单板块的持仓全部市价卖出（只清板块不符的，ST/市值等维度不动）。
+    # 用途：切换只做创业板后，把历史遗留的主板/科创板/北交所持仓自动出清。默认关闭——
+    # 开启即开始清仓，请确认后再开。也可调 POST /api/paper/liquidate-offboard 立即清一次。
+    paper_liquidate_offboard: bool = False
     # 大盘股过滤（「③ 三选 · 交易队列」页有开关）：总市值 > paper_large_cap_yi（亿元）
     # 的票默认不进买入队列——银行/石油/白酒这类巨无霸短线弹性差，也吃不动评分仓位的弹性。
     # 页面上的开关与数值写进 app_state 覆盖这里的默认值（不用改 .env，重启后仍保留）。
@@ -305,6 +330,10 @@ class Settings(BaseSettings):
     # 默认拦截可在不改动选股/评分/下单逻辑的前提下直接修复该痛点。可在设置页随时关闭。
     # 诊断依据：4 年回测 41657 次动量信号，上证 >MA20 时 20 日超额 +0.74%、<MA20 时 −1.22%。
     entry_guard_block_declining_market: bool = True
+    # ---- 入场护栏提示阈值（仅「慎开新仓 / 勿追当根尖峰」提示，不拦截下单） ----
+    # 此前硬编码在 app/analysis/entry_guard.py 的 GAP_THRESHOLD / SPIKE_THRESHOLD。
+    entry_guard_gap_threshold: float = 0.03     # 高开阈值：开盘价较昨收涨幅超此值即提示
+    entry_guard_spike_threshold: float = 0.05   # 盘中冲高阈值：最高价较开盘涨幅超此值即提示
     # ---- 动态机制降暴露（机制检测层；默认关闭，零风险） ----
     # 开启后由「波动率/回撤/趋势」把市场分成 calm/weak/shock/crisis 四态，
     # 动态压低总仓位上限（只降不升），替代/增强上面的静态弱市档位。与回测
@@ -314,6 +343,16 @@ class Settings(BaseSettings):
     paper_regime_cap_weak: float = 0.30   # 弱势仓上限
     paper_regime_cap_shock: float = 0.40  # 震荡仓上限
     paper_regime_cap_crisis: float = 0.15  # 危机仓上限（同时触发全暂停买入）
+    # ---- 动态机制检测阈值（与上面的档位配套；此前硬编码在 engine 的 detect_regime 调用处） ----
+    # 这些阈值决定「何时进入 shock / crisis 态」，和「进入后压到哪一档」分开：
+    # 全部改为设置项后，机制灵敏度与档位都能在「系统设置 → 做T 与择时」里调，无需改代码。
+    paper_regime_vol_win: int = 20        # 近期波动率窗口（交易日）
+    paper_regime_vol_base: int = 60       # 基线波动率窗口（交易日）
+    paper_regime_dd_win: int = 120        # 回撤计算窗口（交易日）
+    paper_regime_crisis_vol: float = 2.0  # 波动率比 ≥ 此值 → crisis
+    paper_regime_crisis_dd: float = 0.12  # 最大回撤 ≥ 此值 → crisis
+    paper_regime_shock_vol: float = 1.4   # 波动率比 ≥ 此值 → shock
+    paper_regime_shock_dd: float = 0.06   # 最大回撤 ≥ 此值 → shock
     # ---- 政策托底强度检测（把"看不见的底"变可见；默认关闭，零风险） ----
     # 开启后，在 weak/shock 态叠加托底强度：强度高→升级为"托底型阴跌"（缩仓收割反转），
     # 强度极低且高波动→升级为危机防御（自由落体型）。与动态机制层配合，实现
@@ -378,6 +417,59 @@ class Settings(BaseSettings):
     # 邮件通知开关（预留，后续接 SMTP）
     notify_email: bool = False
 
+    # ---------- 创业板「从底部起来」选股口径（面板 / 策略 / 回测 同口径） ----------
+    # 候选 = 低位启动 + 相对20日高点跌够 + 成交活跃 + 非僵尸 +（可选）创业板上升通道。
+    # 详见 app/screener/bottom_reversal.py 的 compute_all/scan_candidates 与
+    # app/strategies/builtin.py 的 BottomReversal.evaluate（两者逐字同口径）。
+    # 改动：2026-11-11 用户要求收紧——原「近20日涨幅15%~60%」过松会乱选，
+    # 改为「相对20日高点下跌≥15%（低位）+ 换手率≥5% + 20日均成交额≥下限（成交不能太低）」。
+    bottom_start_pos_max: float = 0.40        # 起点位置上限：20天前收盘价在近120日区间的相对位置 <= 此值（低位启动）
+    bottom_dd20_min: float = 0.15             # 相对20日收盘高点最小回撤：>= 此值才算"跌够、处在低位"（如 0.15=跌15%）
+    bottom_turnover_min: float = 5.0          # 当日换手率下限（百分制，与数据源 turnover_rate 同单位，5.0=5%）：成交活跃，过滤冷门僵尸股
+    bottom_min_avg_amount: float = 50_000_000.0  # 20日均成交额下限（>=5000万）：成交量不能太低
+    # 14因子分二次过滤（软闸）：候选需满足 因子分 >= 此值才保留。
+    # 实测：底部反转（均值回归）策略里，因子分与 5 日收益相关性≈0.06（噪声级），
+    # 加此闸反而拖累收益（对照 -25.7% → 加闸 -33.7%），故默认关闭（-100）。
+    # 因子分仍作为面板"质量参考列"展示；如想实验可在设置页开启（建议 ≤ -50 的软闸，勿设正）。
+    bottom_min_factor_score: float = -100.0    # 14因子分软闸下限（100分制；-100=关闭，因子分仅作展示）
+    bottom_trend_filter: bool = True          # 创业板趋势过滤：仅创业板指(见 bottom_trend_index) > 其 MA 的上升通道日才出候选/开仓
+    bottom_trend_ma: int = 60                 # 趋势过滤所用均线周期（日）
+    bottom_trend_index: str = ""              # 趋势过滤所用指数：空串=300/301等权合成指数（回测验证更优，+9.94%）；填 sz399006=官方创业板指（支持盘中实时重算，但回测-28.86%较差）
+    bottom_time_stop_days: int = 0            # 主动离场-时间止损：持仓达此天数仍未启动跟踪止损(即未盈利)则离场(0=关闭；回测显示对均值回归策略有害，默认关)
+    bottom_trailing_pct: float = 0.0          # 主动离场-跟踪止损：涨幅达此比例启动跟踪，自峰值回撤此比例即离场(0=关闭；宽幅如0.15近中性，默认关)
+    # 多板块扫描：候选不仅限于创业板，而是按代码前缀分类到各板块，每只票用「自己板块的指数」
+    # 做趋势过滤（板块感知，不混为一谈）。逗号分隔的板块键白名单，取值见 app/analysis/board_index.BOARD_INDEX。
+    # 默认含 创业板/上证主板/深证主板/科创板；北交所(bse)本地缺指数 parquet，默认不扫。
+    bottom_boards: str = "cyb,sh_main,sz_main,star"
+    # #181 多板块交易策略适配：策略参数（target_pct 止盈幅度）原先按创业板 ±20% 波动标定，
+    # 直接套到主板 ±10%（+25% 止盈几乎打不到）或北交所 ±30%（一个板就穿透）会失真。
+    # 开启后止盈目标按板块涨跌停幅度等比缩放（基准=创业板 20%，主板×0.5、北交所×1.5），
+    # 创业板/科创板保持原值不变。默认关=零行为变更；建议切换到非创业板板块时开启。
+    bottom_scale_exit_by_limit: bool = False
+
+    # ---------- 统一大盘宏观风险层（Layer2：含外围，驱动仓位上限） ----------
+    # 把「国内大盘 + 外围前一/当日」综合成 market risk score → calm/weak/shock/crisis 四档，
+    # 映射到本层专属的 unified_risk_cap_* 仓位上限。与 Layer1 板块感知趋势过滤相互独立：
+    # Layer1 决定「某板块的票能不能选」，Layer2 决定「整体能开多高仓位」。
+    # 注意：这里**刻意不复用** paper_regime_cap_*。后者属于机制层 _dynamic_regime()
+    # （波动率/回撤触发，shock 默认 0.40 是「高波动+政策托底可收割」的历史回测口径），
+    # 语义与本层「多板块趋势 + 外围宏观风险」不同；直接套用会出现「市场更弱、上限反而
+    # 从 30% 放宽到 40%」的反直觉结果。本层四档默认单调递减，且不动既有回测参数。
+    # 详见 app/analysis/market_risk.py。
+    unified_risk_ma: int = 60                 # 国内/美股成分计算弱势度所用的均线周期（日）
+    unified_risk_domestic: list[str] = [      # 国内大盘成分（akshare 代码，需本地有 idx_<code>.parquet）
+        "sh000001", "sz399001", "sz399006", "sh000300",
+    ]
+    unified_risk_include_overseas: bool = True   # 是否纳入外围（美股前一日 / 亚太当日）
+    # score → 档位阈值（弱势度加权平均，0~1 标度；越大越弱）
+    unified_risk_thr_weak: float = 0.02       # < 此值 = calm（不降仓）
+    unified_risk_thr_shock: float = 0.06      # weak 上界
+    unified_risk_thr_crisis: float = 0.12     # shock 上界；> 此值 = crisis（最严上限 + 全暂停买入）
+    # 四档仓位上限（calm 固定 0 = 不降仓，沿用总仓位上限；其余随风险单调递减）
+    unified_risk_cap_weak: float = 0.30       # 弱势：压到 30%（与用户手设的弱市上限一致）
+    unified_risk_cap_shock: float = 0.20      # 震荡：进一步压到 20%（比 weak 更严）
+    unified_risk_cap_crisis: float = 0.10     # 危机：压到 10%，且全暂停新开仓买入
+
     # ---------- 前端 ----------
     # 允许跨域访问的前端源（Vite 开发服务器默认端口）
     cors_origins: list[str] = [
@@ -393,14 +485,6 @@ class Settings(BaseSettings):
     # 该字段在 READONLY_KEYS 里：设置页不展示、不可改，避免令牌本身被接口读走。
     api_token: str = ""
 
-    # ---------- 访客访问记录（区分真实用户 / 开发者调试） ----------
-    # 开发者自测用的公网 IP（逗号分隔）：这些 IP 的访问会被标记为调试流量，
-    # 默认不计入「真实访客」。本机 localhost / 局域网地址无需列出，已自动排除。
-    # 例：DEV_IPS=203.0.113.7,198.51.100.2
-    dev_ips: list[str] = []
-    # 开发者标记密钥：开发者在请求头带 `X-Dev-Key: <密钥>` 即标记为调试流量，
-    # 便于「用同一公网 IP 自测」时也能把那次访问排除。留空 = 不启用（仅靠 IP 区分）。
-    dev_key: str = ""
 
     # ---------- 免责声明 ----------
     # 接口响应中统一注入该字段，前端在页面上显著展示

@@ -13,7 +13,9 @@
      评分高出 paper_rotation_gap，则卖出最弱持仓换入（T+1、每日限次由配置控制）。
      换入票必须**真能买进**：与买入阶段同一套交易池/切入点闸门，且卖出所得够买一手，
      否则不卖（避免「只卖不买」把仓位凭空降下来）；手动建仓与当日买入的持仓不参与选弱。
-  3. 整手交易：买入数量向下取整到 100 股；
+  3. 申报数量按板块规则（app.board_rules）：主板/创业板 100 股整手、科创板
+     200 股起且 1 股递增、北交所 100 股起且 1 股递增；涨跌停判定同样按板块
+     （主板±10%、创业板/科创板±20%、北交所±30%、ST±5%，留 0.5% 容差）；
   4. T+1：当日买入次日才能卖出；
   5. 费用：佣金万2.5（最低5元）+ 卖出印花税千1 + 双边过户费万0.1；
   6. 成交价：执行时刻的最新价（实时快照），快照不可用时
@@ -40,6 +42,10 @@ from app.analysis.regime import detect_regime
 from app.analysis.policy_floor import detect_policy_floor, circuit_breaker_state
 from app.analysis.entry_guard import should_block_buy
 from app.config import get_settings
+from app.board_rules import (
+    legacy_limit_enabled, limit_up_ratio, lot_rule,
+    round_buy_qty, round_sell_qty,
+)
 from app.data.cache import db
 from app.data.service import get_kline_cached
 
@@ -96,17 +102,53 @@ def large_cap_rule() -> tuple[bool, float]:
         logger.debug("读大盘股开关失败，用配置值: %s", exc)
     return enabled, limit_yi * 1e8
 
-# ---- 费用参数（A 股标准费率，个人可调） ----
-FEE_COMMISSION_RATE = 2.5 / 10000   # 佣金万2.5，双向
-FEE_COMMISSION_MIN = 5.0            # 单笔最低佣金 5 元
-FEE_STAMP_RATE = 1 / 1000           # 印花税千1，仅卖出
-FEE_TRANSFER_RATE = 0.1 / 10000     # 过户费万0.1，双向
+# ---- A 股申报数量：主板/创业板 100 股整手；科创板 200 股起、1 股递增；
+# 北交所 100 股起、1 股递增。统一规则在 app.board_rules，勿在下方写死 100。----
+LOT_SIZE = 100  # 兼容常量：仅作「主板默认整手」，实际下单数量一律走板块函数
 
-# ---- 风控参数 ----
-SINGLE_POSITION_MAX_RATIO = 0.20    # 单票市值不超过总资产 20%
-STOP_LOSS_RATIO = 0.08              # 默认止损 -8%
-TAKE_PROFIT_RATIO = 0.20            # 默认止盈 +20%
-LOT_SIZE = 100                      # A股整手
+
+def _min_qty(code: str) -> int:
+    return lot_rule(code)[0]
+
+
+def _up_px(code: str, prev_close: float, name: str = "") -> float:
+    """板块涨停判定价（主板 1.095×前收、创业板/科创板 1.195×、北交所 1.295×）。"""
+    return prev_close * limit_up_ratio(code, name, legacy_limit=legacy_limit_enabled())
+
+
+# ---- 涨停禁买用的昨收表（#181）----
+_PREVCLOSE_CACHE: tuple[float, dict[str, float]] = (0.0, {})
+_PREVCLOSE_TTL = 5.0  # 秒：一轮扫描内复用，避免每票都切一次全市场 DataFrame
+
+
+def _prev_close_map() -> dict[str, float]:
+    """``code → 昨收``，取自进程内内存快照（tick 每 30s 刷新、毫秒级、不联网）。
+
+    快照缺 ``prev_close`` 或整体不可用时返回空表 → 调用方「失败开放」不拦买入，
+    绝不因取不到数据把正常票误判成涨停（0 / 昨收 会算出 -100%，也一并剔除）。
+    """
+    global _PREVCLOSE_CACHE
+    now = time.monotonic()
+    ts, table = _PREVCLOSE_CACHE
+    if table and now - ts < _PREVCLOSE_TTL:
+        return table
+    out: dict[str, float] = {}
+    try:
+        from app.data.snapshot_store import snapshot_store
+        snap = snapshot_store.peek_snapshot()
+        if (snap is not None and not snap.empty
+                and "code" in snap.columns and "prev_close" in snap.columns):
+            for c, v in zip(snap["code"], snap["prev_close"]):
+                try:
+                    fv = float(v)
+                    if fv > 0 and fv == fv:  # 排除 NaN / 0
+                        out[str(c).zfill(6)] = fv
+                except (TypeError, ValueError):
+                    continue
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("昨收快照不可用（涨停禁买本轮放行）: %s", exc)
+    _PREVCLOSE_CACHE = (now, out)
+    return out
 
 
 def _rec_score(rec) -> float:
@@ -124,11 +166,6 @@ def _rec_price(rec) -> float | None:
     except (TypeError, ValueError):
         return None
     return value if value > 0 else None
-
-
-def _is_bj(code: str) -> bool:
-    """北交所代码：920xxx / 43xxxx / 83xxxx / 87xxxx（4、8 开头的旧三类同属北交所）。"""
-    return str(code).startswith(("920", "43", "83", "87", "4", "8"))
 
 
 def _name_ok(name: str, code: str) -> bool:
@@ -291,23 +328,21 @@ class PaperEngine:
         return codes
 
     def _buy_allowed(self, code: str, name: str) -> tuple[bool, str]:
-        """下单前的准入检查：板块范围 / 北交所 / 大市值 / 名称可信度 / 成交额 TopN 池。
+        """下单前的准入检查：板块范围 / 大市值 / 名称可信度 / 成交额 TopN 池。
 
-        板块范围与选股 scanner 统一口径（app.data.scope.is_tradable）：只做
-        沪深主板+创业板，排除科创板(688)/北交所(92,43,83,87,88)/B股/ST。
+        板块范围与选股 scanner 统一口径（app.data.scope.is_tradable），完全由
+        「交易板块」(twin_t_boards) 设置驱动：只买设置里勾选的板块，不勾选即排除
+        （含北交所/科创板/B股/ST），无独立硬编码排除开关。
 
-        大市值两套口径合并到「③ 交易队列」的一个开关上：
-        - 开关**开**（默认）：`is_tradable` 的巨无霸黑名单生效，且 ``总市值 > 阈值``
-          （默认 100 亿）的票一律不进买入队列；
-        - 开关**关**：黑名单与市值阈值同时失效（此时才允许买银行/石油这类票）。
+        大市值由交易队列页的一个开关统一控制（paper_exclude_large_cap +
+        paper_large_cap_yi 市值阈值）：开关开（默认）时 总市值 > 阈值
+        （默认 100 亿）的票一律不进买入队列；开关关时才允许买银行/石油这类大票。
         """
         code = str(code or "").zfill(6)
-        if getattr(self.settings, "paper_exclude_bj", False) and _is_bj(code):
-            return False, "北交所股票已排除（PAPER_EXCLUDE_BJ）"
         from app.data.scope import is_tradable
         large_on, large_limit = large_cap_rule()
-        if not is_tradable(code, name, exclude_giant=large_on)[0]:
-            return False, "不在沪深主板+创业板范围（scope 过滤）"
+        if not is_tradable(code, name)[0]:
+            return False, "不在可交易板块范围（twin_t_boards / scope 过滤）"
         if large_on and large_limit > 0:
             cap = _market_cap_map().get(code)
             if cap is not None and cap > large_limit:
@@ -364,16 +399,30 @@ class PaperEngine:
         self, rec, price: float | None, signal_price: float | None,
         armed: bool | None = None,
     ) -> tuple[bool, str]:
-        """五段式⑤ 切入点判定（取价后）：价格有效 + 不追高 + 回踩要求。
+        """五段式⑤ 切入点判定（取价后）：价格有效 + 涨停禁买 + 不追高 + 回踩要求。
 
+        - 涨停禁买（#181）：现价 ≥ 板块涨停判定价时放弃——实盘封板根本买不到，
+          模拟盘不该虚假成交。按 ``app.board_rules`` 的真实幅度（含 0.5pp 容差），
+          昨收取内存快照 ``prev_close``，取不到则失败开放；
         - 不追高：``price > 信号价 × (1 + paper_entry_max_chase)`` 放弃；
         - 回踩：``paper_entry_pullback > 0`` 时，要求价格**曾**触及 ``信号价×(1-pullback)``
           （``armed=True`` 由 tick 累积最低价置位）。未触及时返回「等待回踩」而不是直接放弃，
           否则价格反弹一次这个机会就永久消失；
         - 信号价缺失（老信号 / 手动信号）时只做价格有效性检查，不做切入点限制。
+
+        本方法只在「新开仓 / 轮动换入」链上调用；做 T 买回、卖出、止盈止损不走这里，
+        因此「卖出与止盈止损照常」不受影响。
         """
         if price is None or price <= 0:
             return False, "取价失败"
+        # 涨停禁买：放在最前面，被拦时给出真实原因而不是「追高」
+        if bool(getattr(self.settings, "paper_block_limit_up_buy", True)):
+            code = str(getattr(rec, "code", "") or "").zfill(6)
+            prev_close = _prev_close_map().get(code)
+            if prev_close and prev_close > 0:
+                limit_px = _up_px(code, prev_close, str(getattr(rec, "name", "") or ""))
+                if price >= limit_px:
+                    return False, f"已触涨停（≥{limit_px:.2f}），放弃买入"
         chase = float(getattr(self.settings, "paper_entry_max_chase", 0.0) or 0.0)
         pullback = float(getattr(self.settings, "paper_entry_pullback", 0.0) or 0.0)
         if armed is None:
@@ -408,12 +457,12 @@ class PaperEngine:
         return self.entry_price_ok(rec, price, signal_price)
 
     def _base_stop_ratio(self) -> float:
-        """固定止损比例：优先用 ``paper_stop_loss``（回测落盘可改），缺省回调常量。"""
-        return float(getattr(self.settings, "paper_stop_loss", STOP_LOSS_RATIO) or STOP_LOSS_RATIO)
+        """固定止损比例：取 ``paper_stop_loss``（回测落盘可改，默认值同配置）。"""
+        return float(self.settings.paper_stop_loss)
 
     def _take_profit_ratio(self) -> float:
-        """固定止盈比例：优先用 ``paper_take_profit``（回测落盘可改），缺省回调常量。"""
-        return float(getattr(self.settings, "paper_take_profit", TAKE_PROFIT_RATIO) or TAKE_PROFIT_RATIO)
+        """固定止盈比例：取 ``paper_take_profit``（回测落盘可改，默认值同配置）。"""
+        return float(self.settings.paper_take_profit)
 
     def _stop_distance(self, code: str) -> float:
         """止损距离：固定止损（``paper_stop_loss``），开启 ATR 止损时取 max(固定, N×ATR%)，上限可配。
@@ -566,8 +615,13 @@ class PaperEngine:
             calm_cap = float(getattr(self.settings, "paper_regime_cap_calm", 0.0) or default_cap)
             cfg = dict(
                 ma_n=int(s),
-                vol_win=20, vol_base=60, dd_win=120,
-                crisis_vol=2.0, crisis_dd=0.12, shock_vol=1.4, shock_dd=0.06,
+                vol_win=int(getattr(self.settings, "paper_regime_vol_win", 20) or 20),
+                vol_base=int(getattr(self.settings, "paper_regime_vol_base", 60) or 60),
+                dd_win=int(getattr(self.settings, "paper_regime_dd_win", 120) or 120),
+                crisis_vol=float(getattr(self.settings, "paper_regime_crisis_vol", 2.0) or 2.0),
+                crisis_dd=float(getattr(self.settings, "paper_regime_crisis_dd", 0.12) or 0.12),
+                shock_vol=float(getattr(self.settings, "paper_regime_shock_vol", 1.4) or 1.4),
+                shock_dd=float(getattr(self.settings, "paper_regime_shock_dd", 0.06) or 0.06),
                 cap_calm=calm_cap,
                 cap_weak=float(getattr(self.settings, "paper_regime_cap_weak", 0.30)),
                 cap_shock=float(getattr(self.settings, "paper_regime_cap_shock", 0.40)),
@@ -809,7 +863,7 @@ class PaperEngine:
             ok, _why = self.entry_price_ok(rec, price, _rec_price(rec))
             if not ok:
                 continue
-            if budget < float(price) * LOT_SIZE:
+            if budget < float(price) * _min_qty(code):
                 continue
             return rec, score, float(price)
         return None
@@ -966,15 +1020,17 @@ class PaperEngine:
         buy_candidates = [r for r in recommendations if r.action == "buy"]
         sell_candidates = [r for r in recommendations if r.action == "sell"]
 
-        # 入场护栏硬屏蔽（#126 续）：下降市且开关打开时，硬拦截新开仓买入，不送进引擎。
-        # 只拦「新开仓」，卖出与做T买回不受影响；开关默认关闭，零行为变更。复用
-        # should_block_buy()（上证 < MA20 才触发），与展示层 /advisory/buy 同一口径。
+        # 入场护栏硬屏蔽（#126 续 / 双层宏观风险改造）：统一大盘宏观风险为 crisis
+        # 档且开关打开时，硬拦截新开仓买入，不送进引擎。weak/shock 只压仓位上限、
+        # 买入照常，符合「卖出与止盈止损照常」。只拦「新开仓」，卖出与做T买回不受
+        # 影响；开关默认关闭，零行为变更。复用 should_block_buy()，与展示层
+        # /advisory/buy 同一口径。
         _guard_blocked, _guard_regime = should_block_buy()
         if _guard_blocked:
             for rec in buy_candidates:
                 results.append(TradeResult(
                     rec.code, getattr(rec, "name", ""), "skip", 0,
-                    0.0, 0.0, 0.0, "下降市硬屏蔽（入场护栏）",
+                    0.0, 0.0, 0.0, "危机档硬屏蔽（入场护栏）",
                 ))
             logger.info(
                 "入场护栏硬屏蔽：下降市（上证 %.2f < MA20 %.2f）拦截 %d 条新开仓买入",
@@ -1044,11 +1100,12 @@ class PaperEngine:
             #: 回测 #59/#60：0.3~0.5 在急跌月小亏、换震荡/反弹时的收益，代价是涨市初期踏空。
             weak_exposure = float(getattr(self.settings, "paper_weak_exposure", 0.0) or 0.0)
             weak_pause_all = market_weak and weak_exposure <= 0
-        # 入场护栏硬屏蔽（#126 续）：下降市且开关打开时，并入既有买入暂停闸门。
-        # 复用 should_block_buy()（上证 < MA20 才触发），与展示层 /advisory/buy 同一口径。
+        # 入场护栏硬屏蔽（#126 续 / 双层宏观风险改造）：仅 crisis 档并入买入暂停闸门；
+        # weak/shock 只压仓位上限，不再全停买入（避免上证单一基准误判导致误停）。
+        # 复用 should_block_buy()，与展示层 /advisory/buy 同一口径。
         _guard_blocked = should_block_buy()[0]
         if _guard_blocked:
-            logger.info("入场护栏硬屏蔽：下降市（上证在 MA20 下方）并入买入暂停闸门，新开仓买入全部拦截")
+            logger.info("入场护栏硬屏蔽：统一大盘宏观风险 crisis 档，并入买入暂停闸门，新开仓买入全部拦截")
     # ---- 硬性回撤熔断：最高优先级，凌驾于机制层与任何买入信号 ----
         # 开启时计算当前组合回撤；一旦触发，强制全暂停买入 + 总仓位压到 target。
         cb_tripped = False
@@ -1180,8 +1237,7 @@ class PaperEngine:
             #: 于是「卖出 3 只、换入同一只」——2026-11-03 日志：三笔轮动的换入全是 301331。
             consumed: set[str] = set()
             single_max = float(
-                getattr(self.settings, "paper_single_position_max", SINGLE_POSITION_MAX_RATIO)
-                or SINGLE_POSITION_MAX_RATIO
+                self.settings.paper_single_position_max
             )
             while used < max_rot:
                 weak_code, weak_pos, weak_score = self._weakest_rotatable(
@@ -1231,7 +1287,8 @@ class PaperEngine:
                 available_after = max(
                     0.0, exposure_cap - max(0.0, total_asset - (cash + proceeds)))
                 deployable = min(proceeds, total_asset * single_max, available_after)
-                if deployable < proceeds or deployable < target_price * LOT_SIZE:
+                if (deployable < proceeds
+                        or deployable < target_price * _min_qty(str(target_rec.code))):
                     # 换入投不回（弱市全暂停 exposure 压到 0 / 降仓档封顶）：弱市全暂停档且有
                     # 更强票排队 → 纯卖清仓腾名额；否则维持原「不卖」语义（卖了也买不回来）。
                     if weak_pause_all and self._pool_has_stronger(rot_pool, weak_score):
@@ -1361,10 +1418,7 @@ class PaperEngine:
 
         weights = {rec.code: weight for _, rec, _, weight in eligible}
         # 单票上限优先用 paper_single_position_max（回测落盘可改），缺省回调常量
-        single_max = float(
-            getattr(self.settings, "paper_single_position_max", SINGLE_POSITION_MAX_RATIO)
-            or SINGLE_POSITION_MAX_RATIO
-        )
+        single_max = float(self.settings.paper_single_position_max)
 
         per_tick = int(getattr(self.settings, "paper_buys_per_tick", 0) or 0)
         buys_this_tick = 0
@@ -1384,10 +1438,11 @@ class PaperEngine:
                     rec.code, getattr(rec, "name", ""), "skip", 0,
                     0.0, 0.0, 0.0, f"持仓已满({max_positions}只)"))
                 continue
-            if available_budget < price * LOT_SIZE:
+            mq, stp = lot_rule(rec.code)
+            if available_budget < price * mq:
                 results.append(TradeResult(
                     rec.code, getattr(rec, "name", ""), "skip", 0, price, 0.0, 0.0,
-                    f"可用资金不足一手({available_budget:.0f}元)"))
+                    f"可用资金不足最小申报量{mq}股({available_budget:.0f}元)"))
                 continue
             # 目标金额 = 本轮可投预算 × 加权占比，再受单票上限与剩余现金约束
             share_of_pool = weight / weight_total if weight_total > 0 else 1.0
@@ -1397,16 +1452,16 @@ class PaperEngine:
                 cash,
                 available_budget,
             )
-            shares = int(budget / price / LOT_SIZE) * LOT_SIZE
-            # 费用可能让「金额+费用」超出可用现金，逐手回退
-            while shares >= LOT_SIZE and price * shares + self.calc_fee(
+            shares = round_buy_qty(rec.code, budget / price)
+            # 费用可能让「金额+费用」超出可用现金，按板块步长回退
+            while shares >= mq and price * shares + self.calc_fee(
                 "buy", price * shares
             ) > cash:
-                shares -= LOT_SIZE
-            if shares < LOT_SIZE:
+                shares = round_buy_qty(rec.code, shares - stp)
+            if shares < mq:
                 results.append(TradeResult(
                     rec.code, getattr(rec, "name", ""), "skip", 0,
-                    price, 0.0, 0.0, "资金不足一手"))
+                    price, 0.0, 0.0, f"资金不足最小申报量{mq}股"))
                 continue
             amount = price * shares
             fee = self.calc_fee("buy", amount)
@@ -1505,9 +1560,11 @@ class PaperEngine:
             if pos is None:
                 return TradeResult(code, name, "skip", 0, price, 0.0, 0.0, "无持仓可卖")
             held = int(pos["shares"])
-            qty = held if (not shares or int(shares) >= held) else int(shares) // LOT_SIZE * LOT_SIZE
+            qty = (held if (not shares or int(shares) >= held)
+                   else round_sell_qty(code, int(shares), held))
             if qty <= 0:
-                return TradeResult(code, pos["name"], "skip", 0, price, 0.0, 0.0, "股数不足一手")
+                return TradeResult(code, pos["name"], "skip", 0, price, 0.0, 0.0,
+                                   f"股数不足最小申报量{_min_qty(code)}股")
             sold = db.reduce_paper_sellable(code, qty, today)
             if sold <= 0:
                 return TradeResult(
@@ -1527,14 +1584,16 @@ class PaperEngine:
         # ---- 买入 ----
         if db.get_paper_position(code) is not None:
             return TradeResult(code, name, "skip", 0, price, 0.0, 0.0, "已持仓，暂不支持加仓")
+        mq = _min_qty(code)
         if amount and amount > 0:
-            qty = int(amount / price / LOT_SIZE) * LOT_SIZE
+            qty = round_buy_qty(code, amount / price)
         elif shares:
-            qty = int(shares) // LOT_SIZE * LOT_SIZE
+            qty = round_buy_qty(code, int(shares))
         else:
             return TradeResult(code, name, "skip", 0, price, 0.0, 0.0, "请指定金额或股数")
-        if qty < LOT_SIZE:
-            return TradeResult(code, name, "skip", 0, price, 0.0, 0.0, "不足一手")
+        if qty < mq:
+            return TradeResult(code, name, "skip", 0, price, 0.0, 0.0,
+                               f"不足最小申报量{mq}股")
         amt = price * qty
         fee = self.calc_fee("buy", amt)
         if amt + fee > cash:
@@ -1629,6 +1688,57 @@ class PaperEngine:
         if results:
             db.update_paper_cash(round(cash, 2))
             logger.info("止盈止损触发 %d 笔", len(results))
+        return results
+
+    async def liquidate_offboard_positions(
+        self, prices: dict[str, float] | None = None
+    ) -> list[TradeResult]:
+        """清掉「非交易板块」持仓：把不属于 ``twin_t_boards`` 白名单板块的持仓市价卖出。
+
+        仅按**板块**判断（主板/科创板/北交所等不在白名单即清），不引入 ST/市值等其他
+        ``is_tradable`` 维度，避免误清板块合规但带 ST 标记的票。
+
+        用途：用户切换「只做创业板」后，把历史遗留的主板/科创板/北交所持仓自动出清。
+        只在 ``paper_liquidate_offboard`` 开关开启时执行；严格 T+1，只卖可卖批次，今仓留次日。
+        """
+        if not getattr(self.settings, "paper_liquidate_offboard", False):
+            return []
+        from app.data.scope import _allowed_board_prefixes
+        prefixes = _allowed_board_prefixes()
+        self.ensure_account()
+        positions = db.list_paper_positions()
+        if not positions:
+            return []
+        today = datetime.now().strftime("%Y-%m-%d")
+        account = db.get_paper_account()
+        cash = float(account["cash"])
+        results: list[TradeResult] = []
+        for pos in positions:
+            code = str(pos.get("code") or "")
+            if code.startswith(prefixes):
+                continue  # 板块在白名单，不动
+            if int(pos.get("sellable_shares") or 0) <= 0:
+                logger.info("清非交易板块跳过（无可卖批次）%s", code)
+                continue
+            price = await self._latest_price(code, prices)
+            if price is None or price <= 0:
+                continue
+            sold = db.reduce_paper_sellable(code, int(pos["shares"]), today)
+            if sold <= 0:
+                continue
+            amount = price * sold
+            fee = self.calc_fee("sell", amount)
+            cash += amount - fee
+            reason = f"清非交易板块持仓（板块不在白名单 {list(prefixes)}）"
+            db.insert_paper_trade(
+                code, pos["name"], "sell", price, sold, amount, fee, reason, today
+            )
+            results.append(TradeResult(
+                code, pos["name"], "sell", sold, price, amount, fee, reason))
+            logger.info("清非交易板块卖出 %s %d 股 @ %.2f", code, sold, price)
+        if results:
+            db.update_paper_cash(round(cash, 2))
+            logger.info("清非交易板块触发 %d 笔", len(results))
         return results
 
     def _idx_open_drop(self) -> float | None:
@@ -1748,10 +1858,7 @@ class PaperEngine:
         # （单票打满、组合超配）。盘中常规上限=100%（80% 是收盘目标，由 eod_trim 压回），
         # 弱市/熔断/动态机制按下限硬压。
         total_asset = await self.total_asset(prices)
-        single_ratio = float(
-            getattr(self.settings, "paper_single_position_max", SINGLE_POSITION_MAX_RATIO)
-            or SINGLE_POSITION_MAX_RATIO
-        )
+        single_ratio = float(self.settings.paper_single_position_max)
         eff_exposure = 1.0
         if bool(getattr(self.settings, "paper_circuit_breaker_enabled", False)):
             cb = await self._circuit_breaker(today, total_asset)
@@ -1799,6 +1906,9 @@ class PaperEngine:
             t_down_armed = int(pos.get("t_down_armed") or 0)
             name = pos.get("name", "")
             size = float(settings.paper_t_size or 0.25)
+            # 板块申报规则：科创板 200 股起/1 股递增、北交所 100 股起/1 股递增，
+            # 不能一律按 100 股整手，否则零股余仓卖不净。
+            mq, stp = lot_rule(code)
 
             # 大盘极速下跌护栏：暂停所有做T动作（仅允许已卖出待买回的平仓）
             crash = (
@@ -1820,8 +1930,8 @@ class PaperEngine:
                     continue
                 buyback_line = max(open_px, prev_close) * (1 + float(settings.paper_t_up_buyback))
                 if stale or price <= buyback_line:
-                    want = (t_t_sold // LOT_SIZE) * LOT_SIZE
-                    if want >= LOT_SIZE:
+                    want = round_buy_qty(code, t_t_sold)
+                    if want >= mq:
                         amount = price * want
                         fee = self.calc_fee("buy", amount)
                         if amount + fee <= cash:
@@ -1846,10 +1956,11 @@ class PaperEngine:
             if crash:
                 continue
 
-            # 2) 涨停卖半（封板弱）：盘中高点触涨停且仍有可卖底仓 → 卖 1/2
-            if settings.paper_t_limit_sell_half and high >= prev_close * 1.095 and sellable >= LOT_SIZE:
-                want = ((sellable // 2) // LOT_SIZE) * LOT_SIZE
-                if want >= LOT_SIZE:
+            # 2) 涨停卖半（封板弱）：盘中高点触该板块涨停价且仍有可卖底仓 → 卖 1/2
+            if (settings.paper_t_limit_sell_half and high >= _up_px(code, prev_close, name)
+                    and sellable >= mq):
+                want = round_sell_qty(code, sellable // 2, sellable)
+                if want >= mq:
                     sold = db.reduce_paper_sellable(code, want, today)
                     if sold > 0:
                         amount = price * sold
@@ -1867,12 +1978,11 @@ class PaperEngine:
                 settings.paper_t_up_sell
                 and open_chg > 0
                 and high >= open_px * (1 + float(settings.paper_t_up_sell))
-                and sellable >= LOT_SIZE
+                and sellable >= mq
             ):
-                want = int(total * size / LOT_SIZE) * LOT_SIZE
-                want = min(want, sellable)
-                want = (want // LOT_SIZE) * LOT_SIZE
-                if want >= LOT_SIZE:
+                want = min(round_sell_qty(code, total * size, int(total)), sellable)
+                want = round_sell_qty(code, want, sellable)
+                if want >= mq:
                     sold = db.reduce_paper_sellable(code, want, today)
                     if sold > 0:
                         amount = price * sold
@@ -1913,15 +2023,15 @@ class PaperEngine:
                         single_room = max(0.0, total_asset * single_ratio - pos_mv)
                         total_room = max(0.0, exposure_cap - (total_asset - cash))
                         budget = min(budget, single_room, total_room)
-                        est = int(budget / price / LOT_SIZE) * LOT_SIZE
-                        if est >= LOT_SIZE:
+                        est = round_buy_qty(code, budget / price)
+                        if est >= mq:
                             amount = price * est
                             fee = self.calc_fee("buy", amount)
-                            while est >= LOT_SIZE and amount + fee > cash:
-                                est -= LOT_SIZE
+                            while est >= mq and amount + fee > cash:
+                                est = round_buy_qty(code, est - stp)
                                 amount = price * est
                                 fee = self.calc_fee("buy", amount)
-                            if est >= LOT_SIZE:
+                            if est >= mq:
                                 cash -= amount + fee
                                 prov = self._build_provenance(
                                     trigger="t_add", reason="做T加仓", score=0.0, detail="",
@@ -2004,8 +2114,9 @@ class PaperEngine:
             if not price or price <= 0:
                 continue
             shares = int(pos["shares"])
-            # 差一点也按一手减：否则「超一点点但一手就超」会永远减不动
-            qty = min(shares, max(LOT_SIZE, int(need / price / LOT_SIZE) * LOT_SIZE))
+            # 差一点也按该板块最小申报量减：否则「超一点点但不够一手」会永远减不动
+            mq = _min_qty(code)
+            qty = min(shares, round_sell_qty(code, max(mq, need / price), shares))
             sold = db.reduce_paper_sellable(code, qty, today)
             if sold <= 0:
                 continue
@@ -2122,6 +2233,9 @@ class PaperEngine:
         各账本的 ``paper_regime_ma`` 可能不同，让它们各自写会把主账本那行覆盖掉。
         """
         await self.check_stop_loss_target()
+        # 自动清非交易板块持仓（仅主账本结算时；并行模拟账本 record_regime=False 跳过）
+        if record_regime and getattr(self.settings, "paper_liquidate_offboard", False):
+            await self.liquidate_offboard_positions()
         detail = await self.account_detail()
         today = datetime.now().strftime("%Y-%m-%d")
         await self.record_equity_snapshot(detail)

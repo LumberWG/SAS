@@ -10,11 +10,14 @@
 
 执行规则与线上 ``app.paper.engine`` 保持一致：
   - 评分分档：≥ full_score 全额、≥ half_score 半额、低于则只记录不下单；
-  - 总仓位 ≤ max_total_exposure，单票 ≤ single_position_ratio，整手（100 股），T+1；
+  - 总仓位 ≤ max_total_exposure，单票 ≤ single_position_ratio，申报数量按板块规则
+    （主板/创业板 100 股整手、科创板 200 股起 1 股递增、北交所 100 股起 1 股递增），T+1；
   - 佣金万2.5（最低 5 元）+ 卖出印花税千1 + 双边过户费万0.1；
   - 止损/止盈 = 持仓成本 −stop_loss / +take_profit（盘中触发，同日双触发止损优先）；
   - 满仓轮动：新票 ≥ rotation_min_score 且比最弱持仓建仓分高 ≥ rotation_gap，每日限次；
-  - 涨停无法买入、跌停无法卖出（按开盘价近似判断）。
+  - 涨停无法买入、跌停无法卖出：按各板块真实幅度（主板±10%、创业板/科创板±20%、
+    北交所±30%、ST±5%，留 0.5% 容差）判定，见 app.board_rules；
+    设置 board_rules_legacy_limit=True 可回到旧的全市场 ±9.5% 口径复现历史基线。
 
 参数覆盖：``PipelineParams`` 里所有风控参数默认 ``None`` = 沿用线上配置，
 只有显式传入时才对**本次回测**生效（线上参数不受影响），用于回归测试与参数实验。
@@ -42,17 +45,33 @@ from app.indicators import add_all_indicators
 from app.screener.scanner import rank_hits
 from app.strategies import builtin  # noqa: F401  - 触发内置策略注册
 from app.strategies import registry
+from app.board_rules import (
+    legacy_limit_enabled, limit_down_ratio, limit_up_ratio,
+    lot_rule, round_buy_qty, round_sell_qty,
+)
 
 logger = logging.getLogger("sas.backtest.pipeline")
 
 KEEP_BARS = 320            # 每只股票保留的K线根数（足够 70 日 min_bars + 指标预热）
-LOT = 100
-COMMISSION_RATE = 0.00025
-COMMISSION_MIN = 5.0
-STAMP_RATE = 0.001
-TRANSFER_RATE = 0.00001
-STOP_LOSS_RATIO = 0.08     # 与线上 engine 一致：成本价 -8% 止损
-TAKE_PROFIT_RATIO = 0.20   # 成本价 +20% 止盈
+# 申报数量不再有全局 LOT 常量：一律走 app.board_rules.lot_rule / round_buy_qty，
+# 避免把科创板(200股起/1股递增)、北交所(100股起/1股递增)错按 100 股整手处理。
+
+
+def _up_px(code: str, pc: float) -> float:
+    """板块涨停判定价。主板 1.095（与旧口径一致）、创业板/科创板 1.195、北交所 1.295。"""
+    return pc * limit_up_ratio(code, legacy_limit=legacy_limit_enabled())
+
+
+def _down_px(code: str, pc: float) -> float:
+    """板块跌停判定价。主板 0.905（与旧口径一致）、创业板/科创板 0.805、北交所 0.705。"""
+    return pc * limit_down_ratio(code, legacy_limit=legacy_limit_enabled())
+
+
+def _min_qty(code: str) -> int:
+    """该板块最小申报股数（主板/创业板 100、科创板 200、北交所 100）。"""
+    return lot_rule(code)[0]
+STOP_LOSS_RATIO = 0.08     # 与线上 engine 一致：成本价 -8% 止损（回测参数缺省回退，实盘以 Settings 为准）
+TAKE_PROFIT_RATIO = 0.20   # 成本价 +20% 止盈（同上）
 
 #: 原始日线列（不含指标）。全时段买入要「截断当日 bar 后重算指标」，
 #: 历史部分必须只取原始列——klines 里预计算的 ma/atr/rsi 等是用整表
@@ -360,7 +379,8 @@ def _open_window_fill(
     线上开盘窗口（``paper_buy_open_window_minutes``）里每 5 秒撮合一次，
     开盘一字涨停也可能在 09:35~09:35+N 之间开板成交；回测原来只取开盘价一个点，
     等于把这种机会全部判死。这里用本地 5 分钟线还原：窗口内出现过
-    ``close < 前收 × 1.095`` 就以该价成交，否则仍算买不到。
+    ``close < 该板块涨停判定价``（主板 1.095×前收、创业板/科创板 1.195×、
+    北交所 1.295×）就以该价成交，否则仍算买不到。
 
     无本地分钟数据时返回 ``None``（宁可保守判定买不到，也不降级成开盘价成交）。
     """
@@ -371,7 +391,7 @@ def _open_window_fill(
     if not closes or prev_close_px <= 0:
         return None
     k = min(len(closes), max(1, math.ceil(max(1, int(minutes)) / 5)))
-    limit = prev_close_px * 1.095
+    limit = _up_px(code, prev_close_px)
     for raw in closes[:k]:
         value = float(raw)
         if value > 0 and value < limit:
@@ -465,6 +485,24 @@ def _load_index(kline_dir: str) -> pd.DataFrame:
     return df.sort_values("date").reset_index(drop=True)
 
 
+def _expand_board_prefixes(values) -> tuple[str, ...]:
+    """把「板块键」展开成完整代码前缀；普通前缀原样保留（向后兼容）。
+
+    #181：回测页原先按单个前缀勾选（如 300），会漏掉 301 / 689 / 920 / 004 等
+    同板块代码。现在前端按板块键（cyb/sh_main/...）勾选，这里统一展开，
+    与 ``app.board_rules.BOARD_PREFIXES`` 保持单一来源。
+    """
+    from app.board_rules import BOARD_PREFIXES
+    out: list[str] = []
+    for v in values or ():
+        v = str(v).strip()
+        if v in BOARD_PREFIXES:
+            out.extend(BOARD_PREFIXES[v])
+        elif v:
+            out.append(v)
+    return tuple(dict.fromkeys(out))
+
+
 def _build_universe_by_date(
     raw: dict[str, pd.DataFrame],
     dates: list[str],
@@ -475,10 +513,11 @@ def _build_universe_by_date(
 
     ``board_prefixes`` 非空时先按代码前缀排除板块，再排名取 TopN
     （先剔除再排名，池子容量不变；先排名再剔除会让池子缩水）。
+    元素既可以是板块键（展开为完整前缀），也可以是单个代码前缀（原样保留）。
     """
     amount_by_date: dict[str, list[tuple[str, float]]] = {d: [] for d in dates}
     wanted = set(dates)
-    prefixes = tuple(board_prefixes) if board_prefixes else None
+    prefixes = _expand_board_prefixes(board_prefixes) if board_prefixes else None
     for code, df in raw.items():
         if prefixes is not None and not code.startswith(prefixes):
             continue
@@ -691,6 +730,7 @@ def _build_signals(prepared: dict, params: PipelineParams) -> dict[str, list[dic
             if idx is None:
                 continue
             slice_df = klines[code].iloc[: idx + 1]
+            slice_df.attrs["code"] = code  # #181：供策略按板块缩放止盈目标
             best = None
             sc: float | None = None   # 分数与策略无关，同一 (code, date) 只算一次
             for strategy in strategies:
@@ -1044,12 +1084,14 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
         })
 
     def sell_part(code: str, date: str, price: float, ratio: float, reason: str) -> None:
-        """部分卖出（分段止盈）：按整手取整，剩余不足一手则整笔清掉。"""
+        """部分卖出（分段止盈）：按板块申报规则取整，剩余不足最小申报量则整笔清掉。"""
         nonlocal cash
         p = positions[code]
-        want = int(p["shares"] * ratio / LOT) * LOT
-        rest = p["shares"] - want
-        if want < LOT or rest < LOT:
+        held = int(p["shares"])
+        mq = _min_qty(code)
+        want = round_sell_qty(code, held * ratio, held)
+        rest = held - want
+        if want < mq or rest < mq:
             sell(code, date, price, reason)
             return
         price = _noisy(price) * (1 - slippage)   # E39：部分卖出同样按不利方向成交
@@ -1073,18 +1115,19 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
     def _t_buy(code, date, price, shares) -> int:
         """做T加仓 / 买回：买指定股数（受现金限制），返回实际买入股数。"""
         nonlocal cash
-        shares = int(shares / LOT) * LOT
-        if shares < LOT or code not in positions:
+        mq, stp = lot_rule(code)
+        shares = round_buy_qty(code, shares)
+        if shares < mq or code not in positions:
             return 0
         p = positions[code]
         px = _noisy(price) * (1 + slippage)
         amount = px * shares
         fee = calc_fee("buy", amount)
-        while shares >= LOT and amount + fee > cash:
-            shares -= LOT
+        while shares >= mq and amount + fee > cash:
+            shares = round_buy_qty(code, shares - stp)
             amount = px * shares
             fee = calc_fee("buy", amount)
-        if shares < LOT:
+        if shares < mq:
             return 0
         cash -= amount + fee
         cost = (amount + fee) / shares
@@ -1102,8 +1145,9 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
         """做T减仓：按当前持仓比例卖出；记录买回股数，次日开盘恢复底仓。"""
         p = positions[code]
         s = p["shares"]
-        want = int(s * ratio / LOT) * LOT
-        if want < LOT or (s - want) < LOT:
+        mq = _min_qty(code)
+        want = round_sell_qty(code, s * ratio, int(s))
+        if want < mq or (s - want) < mq:
             want = s
         sell_part(code, date, price, (want / s) if s else 1.0, reason)
         p = positions.get(code)
@@ -1129,7 +1173,7 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
             ):
                 return
         # 涨停且封板弱 → 卖 1/2（底仓可卖），回调买回（次日开盘）
-        if params.t_limit_sell_half and high is not None and pc and high >= pc * 1.095:
+        if params.t_limit_sell_half and high is not None and pc and high >= _up_px(code, pc):
             _t_sell(code, date, close_px, 0.5, "涨停卖半")
             p = positions.get(code)
             if p is not None:
@@ -1157,15 +1201,15 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
                 thr = float(params.t_down_add)
             budget = min(budget, single_room, total_room)
             if budget > 0:
-                est = int(budget / (open_px * (1 - thr)) / LOT) * LOT
-                if est >= LOT:
+                est = round_buy_qty(code, budget / (open_px * (1 - thr)))
+                if est >= _min_qty(code):
                     _t_buy(code, date, open_px * (1 - thr), est)
             # 反弹减仓：只减「昨日及更早」的加仓批次（今仓 T+1 不可卖）
             sellable_added = max(
                 0, int(p.get("t_added_shares") or 0) - int(p.get("t_today_added") or 0)
             )
             if (
-                params.t_rebound_sell and sellable_added >= LOT
+                params.t_rebound_sell and sellable_added >= _min_qty(code)
                 and close_px is not None and pc
                 and close_px >= pc * (1 - params.t_rebound_sell)
             ):
@@ -1182,11 +1226,12 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
         p = positions[code]
         shares = int(p["shares"])
         base = max(0, shares - int(p.get("t_today_added") or 0))
-        want = min(int(want / LOT) * LOT, (base // LOT) * LOT)
-        if want < LOT:
+        mq = _min_qty(code)
+        want = min(round_sell_qty(code, want, shares), round_sell_qty(code, base, base))
+        if want < mq:
             return 0
-        if shares - want < LOT:
-            want = shares                      # 剩余不足一手 → 整笔清掉
+        if shares - want < mq:
+            want = shares                      # 剩余不足最小申报量 → 整笔清掉
         px = _noisy(price) * (1 - slippage)    # 与 sell/sell_part 同口径：按不利方向成交
         amount = want * px
         fee = calc_fee("sell", amount)
@@ -1194,7 +1239,7 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
         cost = want * p["cost"]
         pnl = amount - fee - cost
         rest = shares - want
-        if rest < LOT:
+        if rest < mq:
             positions.pop(code)
         else:
             p["shares"] = rest
@@ -1255,10 +1300,10 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
                 continue
             if crash:
                 continue
-            # 2) 涨停卖半：盘中触涨停价（+9.5%）且可卖底仓够 → 卖一半，当日只做一次
+            # 2) 涨停卖半：盘中触该板块涨停价且可卖底仓够 → 卖一半，当日只做一次
             base = max(0, int(p["shares"]) - int(p.get("t_today_added") or 0))
             if (params.t_limit_sell_half and p.get("t_half_date") != date
-                    and px >= pc * 1.095 and base >= LOT):
+                    and px >= _up_px(code, pc) and base >= _min_qty(code)):
                 got = _t_sell_shares(code, date, px, base // 2, "涨停卖半")
                 sold_today += got
                 p = positions.get(code)
@@ -1270,7 +1315,7 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
             # 3) 倒T：开盘涨且盘中触 +t_up_sell → 卖 t_size 的可卖底仓
             if (params.t_up_sell and open_chg > 0
                     and px >= day_open * (1 + float(params.t_up_sell))):
-                want = int(int(p["shares"]) * size / LOT) * LOT
+                want = round_sell_qty(code, int(p["shares"]) * size, int(p["shares"]))
                 got = _t_sell_shares(code, date, px, want, "做T卖出")
                 sold_today += got
                 p = positions.get(code)
@@ -1283,7 +1328,7 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
                     sellable_added = max(
                         0, int(p.get("t_added_shares") or 0) - int(p.get("t_today_added") or 0)
                     )
-                    if sellable_added >= LOT:
+                    if sellable_added >= _min_qty(code):
                         got = _t_sell_shares(code, date, px, sellable_added, "反弹减仓")
                         if got:
                             p = positions.get(code)
@@ -1306,8 +1351,8 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
                         budget = cash * float(params.t_down_add)
                     budget = min(budget, single_room, total_room)
                     if budget > 0:
-                        est = int(budget / px / LOT) * LOT
-                        if est >= LOT:
+                        est = round_buy_qty(code, budget / px)
+                        if est >= _min_qty(code):
                             bought = _t_buy(code, date, px, est)
                             if bought:
                                 p = positions.get(code)
@@ -1360,7 +1405,7 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
                 if not (px > 0):
                     continue
                 pc = prev_close(code, date)
-                if pc and px >= pc * 1.095 and not params.disable_limit_mask:
+                if pc and px >= _up_px(code, pc) and not params.disable_limit_mask:
                     continue                      # 涨停买不到（与开盘段同口径）
                 # 截断日线：历史**原始** OHLCV（不含当日）+ 当日截至该时点的聚合 bar。
                 # 必须剔除 klines 里预计算的指标列——它们是用整表（含当日及之后）算的。
@@ -1405,11 +1450,12 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
                 total_asset = cash + mv
                 pool_budget = max(0.0, total_asset * day_exposure - mv)
                 budget = min(pool_budget, total_asset * single_ratio, cash)
-                shares = int(budget / fill_px / LOT) * LOT
-                while (shares >= LOT
+                mq, stp = lot_rule(code)
+                shares = round_buy_qty(code, budget / fill_px)
+                while (shares >= mq
                        and fill_px * shares + calc_fee("buy", fill_px * shares) > cash):
-                    shares -= LOT
-                if shares < LOT:
+                    shares = round_buy_qty(code, shares - stp)
+                if shares < mq:
                     continue
                 amount = fill_px * shares
                 fee = calc_fee("buy", amount)
@@ -1445,7 +1491,7 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
             if px is None or code not in positions:
                 pending_sells.pop(code, None)
                 continue
-            if pc and px <= pc * 0.905 and not params.disable_limit_mask:
+            if pc and px <= _down_px(code, pc) and not params.disable_limit_mask:
                 continue  # 跌停卖不出，顺延
             sell(code, date, px, reason)
             pending_sells.pop(code, None)
@@ -1508,7 +1554,7 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
             if px is None:
                 continue                          # 停牌/当日无数据
             forced_fill: float | None = None       # 开板补单：已有确定成交价，不再套执行价模型
-            if pc and px >= pc * 1.095 and not params.disable_limit_mask:
+            if pc and px >= _up_px(code, pc) and not params.disable_limit_mask:
                 # 涨停或停牌买不到（判定用原始开盘价，滑点不影响能否成交）。
                 # 线上窗口内每 5 秒有一次撮合，「开盘价一次性成交」把窗口压成一个点：
                 # 开盘一字板就当天放弃，忽略了 09:35 之后可能开板的事实。
@@ -1578,10 +1624,11 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
                 pool_budget * weight / weight_total if weight_total else 0,
                 total_asset * single_ratio, cash, pool_budget,
             )
-            shares = int(budget / px / LOT) * LOT
-            while shares >= LOT and px * shares + calc_fee("buy", px * shares) > cash:
-                shares -= LOT
-            if shares < LOT:
+            mq, stp = lot_rule(code)
+            shares = round_buy_qty(code, budget / px)
+            while shares >= mq and px * shares + calc_fee("buy", px * shares) > cash:
+                shares = round_buy_qty(code, shares - stp)
+            if shares < mq:
                 continue
             amount = px * shares
             fee = calc_fee("buy", amount)
@@ -1609,7 +1656,7 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
         # 做T买回：涨停卖半 / 上涨倒T 在「次日开盘」恢复底仓（T+1：当日卖、次日买回）
         for code in list(positions):
             rb = positions[code].get("t_buyback_shares") or 0
-            if rb >= LOT:
+            if rb >= _min_qty(code):
                 px = price_on(code, date, "open")
                 if px is not None:
                     _t_buy(code, date, px, rb)
@@ -1638,7 +1685,7 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
             if open_px is None or low is None or high is None:
                 continue
             pc = prev_close(code, date)
-            if (not params.disable_limit_mask) and pc and open_px <= pc * 0.905:
+            if (not params.disable_limit_mask) and pc and open_px <= _down_px(code, pc):
                 # 跌停：无法卖出（与开盘段 pending_sells 同口径）。盘中止损/止盈/做T 在
                 # 封板日都无法成交，跳过卖出动作、顺延至下一交易日；仅更新 peak 避免未来函数。
                 p["peak"] = max(float(p.get("peak") or 0.0), high or 0.0)

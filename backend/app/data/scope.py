@@ -1,33 +1,51 @@
-"""项目可交易范围：沪深主板 + 创业板，剔除 ST 与巨无霸（银行/石油/保险）。
+"""项目可交易范围：板块白名单 + 剔除 ST。
 
-与 ``app/backtest/pipeline.MAIN_BOARD_PREFIXES`` 同一口径，抽成独立模块供
-数据源、分析脚本、回测统一复用，避免各处硬编码重复。
+#181 起板块口径统一收敛到 ``app.board_rules``：本模块不再自带前缀表，
+避免与「选股板块」(bottom_boards) 出现两套不一致的归类（例如 689 / 004 / 920）。
+``twin_t_boards`` 同时接受中文名与英文键，可与 bottom_boards 填同一套值。
 """
 from __future__ import annotations
 
 import re
 from functools import lru_cache
 
-#: 沪深主板 + 创业板。科创板(688)/北交所(920,43,83,87)/B 股(900,200) 不进池——
-#: 否则结论可能建立在买不到或涨跌幅受限的票上。
+from app.board_rules import (
+    BOARD_PREFIXES,
+    BOARD_ZH,
+    board_key_of,
+    board_scope_consistency,
+    parse_trade_boards,
+    prefixes_for_board_keys,
+)
+
+#: 历史缺省口径（主板+创业板），仅在 twin_t_boards 留空/解析为空时退回，
+#: 保证未配置时行为与旧版一致。科创板/北交所/B 股不在其中。
 MAIN_BOARD_PREFIXES: tuple[str, ...] = (
     "600", "601", "603", "605", "000", "001", "002", "003", "300", "301",
 )
 
-#: 巨无霸黑名单：银行 / 石油 / 保险 / 超大盘权重股。项目不碰（波动小、弹性低，
-#: 且占成交额池会稀释小盘信号）。按需扩充。
-GIANT_CODES: frozenset[str] = frozenset({
-    # 银行
-    "601398", "601939", "601288", "601988", "600036", "600000", "601328",
-    "601166", "600016", "601169", "600928", "601229", "601818", "601658",
-    "600919", "601077", "002142", "600015", "601009",
-    # 石油 / 石化
-    "601857", "600028", "600938", "601808",
-    # 保险 / 券商权重
-    "601318", "601628", "601601", "600030", "600837",
-    # 其他超大盘（白酒 / 光伏 / 水电 / 免税 / 药明等）
-    "600519", "000858", "601012", "600900", "601888", "600276", "000333",
-})
+
+def board_of(code: str) -> str:
+    """按代码前缀判定板块（主板/创业板/科创板/北交所/其他）。"""
+    return BOARD_ZH.get(board_key_of(code), "其他")
+
+
+def _allowed_board_prefixes() -> tuple[str, ...]:
+    """当前「交易板块」白名单对应的代码前缀元组（来自 Settings.twin_t_boards）。
+
+    同时接受中文名（主板/创业板/科创板/北交所）与英文键
+    （sh_main/sz_main/cyb/star/bse），因此可直接填 bottom_boards 的同款值。
+    留空或解析为空时退回历史口径 MAIN_BOARD_PREFIXES，保证旧配置零行为变更。
+    """
+    from app.config import get_settings
+
+    raw = (getattr(get_settings(), "twin_t_boards", "") or "").strip()
+    if not raw:
+        return MAIN_BOARD_PREFIXES
+    keys = parse_trade_boards(raw)
+    if not keys:
+        return MAIN_BOARD_PREFIXES
+    return prefixes_for_board_keys(keys)
 
 _ST_RE = re.compile(r"\*?ST|退", re.IGNORECASE)
 
@@ -56,23 +74,22 @@ def clean_name(code: str, name) -> str:
     return s
 
 
-def is_tradable(code: str, name: str = "", *, exclude_giant: bool = True) -> tuple[bool, str]:
+def is_tradable(code: str, name: str = "") -> tuple[bool, str]:
     """判断是否在项目可交易范围。
 
-    返回 ``(是否可交易, 原因)``，原因用于诊断（board_excluded / giant / st /
-    invalid / ok）。
+    返回 (是否可交易, 原因)，原因用于诊断（board_excluded / st / invalid / ok）。
 
-    ``exclude_giant=False`` 时不再按 :data:`GIANT_CODES` 剔除巨无霸——供
-    「③ 交易队列」页的大盘股开关的「关闭」态使用（关闭 = 允许买大市值票）。
-    默认 ``True``，回测与历史脚本口径不变。
+    板块白名单由设置项 twin_t_boards 驱动（默认主板+创业板，留空退回
+    MAIN_BOARD_PREFIXES）；大市值票（银行/石油等）由独立的 paper_large_cap_yi
+    市值阈值在 scanner / 实盘买入池中剔除，不再有显式巨无霸代码黑名单。
     """
     c = str(code)
     if not (c.isdigit() and len(c) == 6):
         return False, "invalid"
-    if not c.startswith(MAIN_BOARD_PREFIXES):
+    # 板块白名单由设置项 twin_t_boards 驱动（默认主板+创业板，留空退回 MAIN_BOARD_PREFIXES）。
+    # 改这一处即可同时约束扫描器、实盘买入池与统计口径，避免各处分散硬编码。
+    if not c.startswith(_allowed_board_prefixes()):
         return False, "board_excluded"
-    if exclude_giant and c in GIANT_CODES:
-        return False, "giant"
     if _ST_RE.search(str(name or "")):
         return False, "st"
     return True, "ok"
@@ -87,7 +104,7 @@ SCOPE_REFERENCE: dict = {
     "in_scope": 4392,
     "mainboard": 3020,
     "cyb": 1372,
-    "excluded": {"board_excluded": 972, "st": 190, "giant": 34},
+    "excluded": {"board_excluded": 972, "st": 190},
 }
 
 
@@ -103,23 +120,40 @@ def _universe_stats_cached() -> dict:
     codes = [c for c, o in zip(df["code"], ok) if o]
     cyb = sum(1 for c in codes if is_cyb(c))
     reasons = Counter(r[1] for r in res)
+    by_board = Counter(board_key_of(c) for c in codes)
     return {
         "source_total": int(len(df)),
         "in_scope": int(len(codes)),
+        # 兼容旧前端字段：mainboard 仍表示「非创业板」（含科创/北交所），
+        # 真实板块拆分请看新增的 by_board。
         "mainboard": int(len(codes) - cyb),
         "cyb": int(cyb),
+        "by_board": {k: int(by_board.get(k, 0)) for k in BOARD_PREFIXES},
         "excluded": {k: int(reasons.get(k, 0))
-                     for k in ("board_excluded", "st", "giant", "invalid")},
+                     for k in ("board_excluded", "st", "invalid")},
     }
 
 
 def get_universe_stats() -> dict:
-    """当前可交易范围规模（沪深主板+创业板，剔 ST/巨无霸）。
+    """当前可交易范围规模（按板块白名单，剔 ST）。
 
-    返回 source_total / in_scope / mainboard / cyb / excluded 分布。
+    返回 source_total / in_scope / mainboard / cyb / **by_board**（各板块真实拆分）
+    / excluded 分布 / **board_consistency**（选股板块 vs 交易板块一致性提示）。
     计算失败（股票池不可达）时回退到 :data:`SCOPE_REFERENCE` 文档值。
     """
+    from app.config import get_settings
+
     try:
-        return dict(_universe_stats_cached())
+        out = dict(_universe_stats_cached())
     except Exception:  # noqa: BLE001 - 降级为文档参考值，保证 API 不挂
-        return dict(SCOPE_REFERENCE)
+        out = dict(SCOPE_REFERENCE)
+    # 一致性检查依赖当前设置，不能放进 lru_cache 的统计结果里
+    try:
+        s = get_settings()
+        out["board_consistency"] = board_scope_consistency(
+            getattr(s, "twin_t_boards", "") or "",
+            getattr(s, "bottom_boards", "") or "",
+        )
+    except Exception:
+        pass
+    return out

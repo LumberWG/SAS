@@ -16,6 +16,7 @@ import { csvDateTag, downloadCsv } from '../lib/csv'
 import { POLL } from '../lib/polling'
 import { useNotifyStore } from '../stores/notify'
 import {
+  backtestErrorMessage,
   getBacktest,
   getBacktestDefaults,
   getBacktestPersistMap,
@@ -85,7 +86,9 @@ const groups: { name: string; items: ParamDef[] }[] = [
     { key: 'initial_capital', label: '初始资金', type: 'number', step: 10000 },
     { key: 'max_positions', label: '最大持仓数', type: 'number', min: 1, max: 50 },
     { key: 'universe_size', label: '股票池(TopN)', type: 'number', min: 10, max: 6000 },
-    { key: 'board_prefixes', label: '板块', type: 'multiselect', options: [['600', '沪主'], ['000', '深主'], ['300', '创业板'], ['688', '科创板'], ['920', '北交所']] },
+    // #181：按板块键勾选，后端会展开成该板块全部代码前缀（300/301、688/689、43/83/87/88/920…），
+    // 避免旧版只填单个前缀而漏掉同板块的票。
+    { key: 'board_prefixes', label: '板块', type: 'multiselect', options: [['sh_main', '沪市主板'], ['sz_main', '深市主板'], ['cyb', '创业板'], ['star', '科创板'], ['bse', '北交所']] },
     { key: 'watch_cap', label: '自选上限', type: 'number', min: 10, max: 500 },
     { key: 'add_per_day', label: '每日加自选', type: 'number', min: 1, max: 200 },
   ]},
@@ -450,7 +453,9 @@ async function submit() {
     result.value = await runBacktest(buildPayload() as any)
     void loadHistory()  // 新回测已落库，刷新历史列表
   } catch (e: unknown) {
-    error.value = e instanceof Error ? e.message : '回测请求失败'
+    // 网关 502/503/504、服务重启后 job 404 都要给可操作的中文提示，
+    // 而不是 axios 原生的 "Request failed with status code 502"。
+    error.value = backtestErrorMessage(e)
   } finally {
     loading.value = false
     if (elapsedTimer) {
@@ -500,7 +505,7 @@ const presets: { name: string; params: Record<string, unknown> }[] = [
   {
     name: '创业板超卖半仓(心得)',
     params: {
-      board_prefixes: ['300'],
+      board_prefixes: ['cyb'],
       max_positions: 4,
       universe_size: 600,
       rebalance_days: 1,
@@ -524,7 +529,7 @@ const presets: { name: string; params: Record<string, unknown> }[] = [
   {
     name: '创业板超卖·狠版(微调)',
     params: {
-      board_prefixes: ['300'],
+      board_prefixes: ['cyb'],
       max_positions: 4,
       universe_size: 600,
       rebalance_days: 1,
@@ -550,7 +555,7 @@ const presets: { name: string; params: Record<string, unknown> }[] = [
   {
     name: '弱市防守版(收盘确认+做T不加仓)',
     params: {
-      board_prefixes: ['300'],
+      board_prefixes: ['cyb'],
       max_positions: 4,
       universe_size: 600,
       rebalance_days: 1,
@@ -1059,7 +1064,8 @@ function metricTone(v: number): string {
       </div>
 
       <!-- 亏损归因与调参建议 -->
-      <div v-if="result.review" class="glass-card p-5">
+      <!-- 老记录没有归因（review 为 null / {}）：空对象在 JS 是 truthy，只判 review 会渲染并崩，故双保险 -->
+      <div v-if="result.review?.cost && result.review?.reasons" class="glass-card p-5">
         <div class="flex flex-wrap items-baseline justify-between gap-2">
           <h3 class="text-subheading">亏损归因</h3>
           <span class="text-[12.5px] text-content-faint">

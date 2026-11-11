@@ -67,7 +67,7 @@ SKIP_REASONS: dict[str, str] = {
     # ---- 账户级 ----
     "initial_capital": "初始资金只在开户时生效，已有模拟账户不会被重置",
     # ---- 选股侧（回测专属） ----
-    "board_prefixes": "实盘只支持「排除北交所」开关（paper_exclude_bj），不支持任意板块组合",
+    "board_prefixes": "实盘板块范围由「交易板块」(twin_t_boards) 设置统一控制（支持任意板块组合），与回测 board_prefixes 同口径；落盘以实盘设置为准",
     "watch_cap": "实盘自选没有上限/FIFO 淘汰，无对应配置",
     "add_per_day": "实盘自选由「扫描 → 分析」链路写入，没有每日配额",
     "rebalance_days": "实盘按每日调仓，没有调仓周期开关",

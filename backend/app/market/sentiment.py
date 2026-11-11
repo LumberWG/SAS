@@ -59,17 +59,30 @@ def sentiment_from_snapshot(snapshot) -> dict:
     Args:
         snapshot: 含 pct_change 列的股票快照 DataFrame（涨跌幅单位 %）
 
-    涨跌停判定按 ±9.8% 近似（忽略 ST/科创创业/北交所差异）。
+    涨跌停判定按各板块真实幅度（主板 9.8%、创业板/科创板 19.8%、
+    北交所 29.8%、ST 4.8%，留 0.2% 容差），#181 起不再忽略板块差异。
     """
     import pandas as pd
 
-    pct = snapshot["pct_change"].dropna()
-    total = len(pct)
+    from app.board_rules import limit_pct
+
+    pct = pd.to_numeric(snapshot["pct_change"], errors="coerce")
+    total = int(pct.notna().sum())
     if total == 0:
         return classify_sentiment(50.0)
 
     up = int((pct > 0).sum())
-    limit_up = int((pct >= 9.8).sum())
+    if "code" in snapshot.columns:
+        codes = snapshot["code"].astype(str)
+        names = (snapshot["name"].astype(str) if "name" in snapshot.columns
+                 else pd.Series("", index=snapshot.index))
+        lim = pd.Series(
+            [limit_pct(c, n) - 0.2 for c, n in zip(codes, names)],
+            index=snapshot.index,
+        )
+        limit_up = int((pct >= lim).sum())
+    else:  # 无代码列时退回旧的全市场近似
+        limit_up = int((pct >= 9.8).sum())
     up_ratio = up / total
     limit_ratio = min(limit_up / total, 0.05) / 0.05
     temperature = up_ratio * 60 + limit_ratio * 40

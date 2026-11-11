@@ -45,6 +45,7 @@ from app.data.snapshot_store import snapshot_store
 from app.market.clock import is_trading_day, is_trading_hours
 from app.notify import notifier
 from app.screener.scanner import warmup_klines as screener_warmup
+from app.screener import bottom_reversal as br_scan
 
 logger = logging.getLogger("sas.monitor")
 
@@ -144,6 +145,12 @@ class MarketScheduler:
             self.warmup_klines,
             CronTrigger(day_of_week="mon-fri", hour=20, minute=30, timezone=tz),
             id="kline_refill", replace_existing=True,
+        )
+        # 8c) 创业板「从底部起来」候选刷新（交易日 16:30，K线预热回填之后）
+        self.scheduler.add_job(
+            self.refresh_bottom_reversal,
+            CronTrigger(day_of_week="mon-fri", hour=16, minute=30, timezone=tz),
+            id="bottom_reversal_refresh", replace_existing=True,
         )
 
         # 10) 影子账户（交易日 16:45，冻结参数逐日重跑；未配置起点则不注册）
@@ -388,6 +395,14 @@ class MarketScheduler:
 
         logger.info("开盘前分析开始（9:20）")
         try:
+            # 清非交易板块持仓（开关开启时）：开盘前先把历史遗留的非白名单板块票出清。
+            # liquidate_offboard_positions 内部已按 paper_liquidate_offboard 开关 guard。
+            try:
+                cleared = await live_trader.engine.liquidate_offboard_positions()
+                if cleared:
+                    logger.info("开盘前清非交易板块 %d 笔", len(cleared))
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("开盘前清非交易板块失败（不影响开盘分析）: %s", exc)
             # 持仓股先纳入自选，确保卖出建议能覆盖到持仓
             await asyncio.to_thread(self._sync_positions_to_watchlist)
             recommendations = await recommender.analyze_watchlist()
@@ -444,6 +459,18 @@ class MarketScheduler:
             }
         except Exception as exc:  # noqa: BLE001
             logger.exception("模拟盘结算失败")
+            return {"error": str(exc)}
+
+    async def refresh_bottom_reversal(self) -> dict:
+        """每日收盘后刷新创业板「从底部起来」候选缓存（面板/API 读取）。"""
+        if not is_trading_day():
+            return {"skipped": "非交易日"}
+        try:
+            payload = await asyncio.to_thread(br_scan.write_cache)
+            logger.info("创业板底部反转候选刷新完成：%d 只", payload["count"])
+            return payload
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("创业板底部反转候选刷新失败")
             return {"error": str(exc)}
 
     # ------------------------------------------------------------------

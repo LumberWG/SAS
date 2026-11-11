@@ -41,6 +41,7 @@ if str(_BACKEND) not in sys.path:
 
 from app.config import get_settings  # noqa: E402
 from app.data.minute import MINUTE5_DIR  # noqa: E402
+from app.data.scope import board_of  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # 参数
@@ -48,6 +49,16 @@ from app.data.minute import MINUTE5_DIR  # noqa: E402
 DEV_CAP = 0.15          # |dev| > 15% 视为脏 bar（涨跌停/数据异常），置 NaN（与研究一致）
 MIN_BARS = 30           # 当日有效 bar 不足半数则剔除出截面
 BENCHMARKS = ["600519", "000001", "300750", "601318", "600036"]  # 用于探测最新交易日
+
+
+def _parse_boards(raw: str) -> set[str]:
+    """把 '主板,创业板' 这种逗号串解析成板块名集合（去空白、去空）。"""
+    out: set[str] = set()
+    for name in (raw or "").split(","):
+        name = name.strip()
+        if name:
+            out.add(name)
+    return out
 
 
 def _auto_target_date(minute_dir: Path) -> str:
@@ -203,6 +214,9 @@ def main():
     ap.add_argument("--stamp-rate", type=float, default=None, help="印花税（卖出，默认千1）")
     ap.add_argument("--slippage-bps", type=float, default=None, help="单腿滑点（默认5bps=0.05%）")
     ap.add_argument("--topn", type=int, default=20, help="清单最多展示多少只持仓（默认20）")
+    ap.add_argument("--boards", default=None,
+                    help="交易板块白名单覆盖（逗号分隔：主板,创业板,科创板,北交所）；"
+                         "默认取设置项 twin_t_boards，留空/不传=不过滤")
     args = ap.parse_args()
 
     cfg = get_settings()
@@ -235,6 +249,20 @@ def main():
     if not holdings:
         print("[警告] paper_positions 无多头持仓，仅输出观察池统计")
     print(f"[twin_t_daily_signal] 持仓数={len(holdings)}")
+
+    # 2.5) 按「交易板块」白名单过滤持仓（与实盘买入池同一口径，由设置项 twin_t_boards 驱动）。
+    # 设置里勾了哪些板块，做T候选清单就只看哪些板块的持仓；命令行 --boards 可临时覆盖。
+    boards_raw = (args.boards if args.boards else cfg.twin_t_boards) or ""
+    allowed_boards = _parse_boards(boards_raw)
+    if allowed_boards:
+        kept, dropped = [], []
+        for h in holdings:
+            (kept if board_of(h["code"]) in allowed_boards else dropped).append(h)
+        if dropped:
+            print(f"[twin_t_daily_signal] 按「交易板块」({boards_raw}) 过滤掉 {len(dropped)} 只非白名单持仓: "
+                  + ", ".join(f"{h['code']}({board_of(h['code'])})" for h in dropped))
+        holdings = kept
+        print(f"[twin_t_daily_signal] 过滤后持仓数={len(holdings)}（板块：{boards_raw}）")
 
     # 预存每只持仓的 dev（按位置索引对齐）
     for h in holdings:
@@ -321,6 +349,8 @@ def main():
     lines.append(f"- 观察池（全市场截面）：**{N}** 只；交易日有效槽数 M={M}（{slot_times[0]}–{slot_times[-1]}）")
     lines.append(f"- 脏 dev 占比（|dev|>15% 已剔除）：{invalid_frac:.4f}")
     lines.append(f"- 真实持仓：**{len(holdings)}** 只")
+    if allowed_boards:
+        lines.append(f"- 交易板块范围（白名单）：**{boards_raw}**（非白名单持仓已剔除，与实盘买入池同口径）")
     lines.append(f"- 极端阈值：分位 ≤{q*100:.1f}%（正T）/ ≥{(1-q)*100:.1f}%（反T）；做T比例 t_ratio={t_ratio:.2f}")
     lines.append(f"- 候选门槛：全天在极端尾部停留占比 ≥{tail*100:.0f}%（过滤一瞬噪声，保留持续极端）")
     lines.append(f"- 费率：佣金万{commission_rate*1e4:.1f}（最低{min_commission:.0f}元）+ 印花税千{stamp_rate*1e3:.1f} + 单腿滑点{slippage_bps*1e4:.1f}bps\n")

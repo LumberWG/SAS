@@ -17,7 +17,7 @@ from fastapi.staticfiles import StaticFiles
 from app.accesslog import log_access
 from app.api import (
     access_log, advisory, analysis, backtest, market, monitor, ops, paper, scope,
-    screening, settings as settings_api, strategies, watchlist,
+    screening, settings as settings_api, strategies, watchlist, bottom_reversal,
 )
 from app.config import BASE_DIR, get_settings
 
@@ -226,6 +226,8 @@ def create_app() -> FastAPI:
     app.include_router(settings_api.router, prefix="/api")
     app.include_router(access_log.router, prefix="/api")
     app.include_router(ops.router, prefix="/api")
+    app.include_router(bottom_reversal.router)                        # 面板页 /screen/bottom-reversal
+    app.include_router(bottom_reversal.api_router, prefix="/api")     # 数据 /api/screen/bottom-reversal/data
 
     @app.get("/api/health")
     def health() -> dict:

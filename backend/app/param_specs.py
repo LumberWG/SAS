@@ -36,6 +36,10 @@ RUNTIME_KEYS: frozenset[str] = frozenset({
     "paper_regime_weak_pause",
     # 入场护栏硬屏蔽：盘中想立刻开/关「下降市拦截买入」，改 .env 重启代价太高
     "entry_guard_block_declining_market",
+    # 清非交易板块持仓：盘中开启即开始清仓（开盘前/收盘结算都会触发），无需重启
+    "paper_liquidate_offboard",
+    # 涨停禁买：盘中想立刻开/关「封板不买」以排查成交异常，无需重启
+    "paper_block_limit_up_buy",
     # 弱市保留仓位：属于风险偏好档位，盘中想从「全暂停」切到「留三成」要能立刻生效
     "paper_weak_exposure",
     # 动态机制降暴露：风险偏好档位，盘中切换要立刻生效（同弱市保留仓位）
@@ -56,6 +60,32 @@ RUNTIME_KEYS: frozenset[str] = frozenset({
     "paper_circuit_breaker_target",
     # 开盘冷静期：无条件禁止开盘后N分钟买入，风险偏好类，盘中切换要立刻生效
     "paper_open_cooldown_minutes",
+    # 创业板底部反转选股：阈值/趋势开关盘中切要即时生效（改 .env 重启代价高）
+    "bottom_start_pos_max",
+    "bottom_dd20_min",
+    "bottom_turnover_min",
+    "bottom_min_avg_amount",
+    "bottom_min_factor_score",
+    "bottom_trend_filter",
+    "bottom_trend_ma",
+    "bottom_trend_index",
+    "bottom_time_stop_days",
+    "bottom_trailing_pct",
+    # 多板块扫描白名单：决定扫描哪些板块、每只票用各自板块指数做趋势过滤
+    "bottom_boards",
+    # 统一大盘宏观风险层（含外围）阈值：驱动总仓位上限
+    "unified_risk_ma",
+    "unified_risk_include_overseas",
+    "unified_risk_thr_weak",
+    "unified_risk_thr_shock",
+    "unified_risk_thr_crisis",
+    # 四档仓位上限（Layer2 专属，与机制层 paper_regime_cap_* 解耦，默认单调递减）
+    "unified_risk_cap_weak",
+    "unified_risk_cap_shock",
+    "unified_risk_cap_crisis",
+    # #181 板块交易规则：涨跌停/申报数量按板块区分的回退开关 + 止盈按板块缩放
+    "board_rules_legacy_limit",
+    "bottom_scale_exit_by_limit",
     # 开盘成交窗口：0=全时段可成交（仅受冷静期约束）；>0=只限开盘后N分钟。配合冷静期用。
     "paper_buy_open_window_minutes",
     # P2 盘内错峰：每 tick 最多成交几只买入，积压信号错峰（0=不限制，回到旧行为）
@@ -63,7 +93,25 @@ RUNTIME_KEYS: frozenset[str] = frozenset({
     # 机制层止损收紧：shock/crisis 态新建仓收紧止损距离（仅新建仓），风险偏好类，盘中切换即时生效
     "paper_regime_stop_tighten",
     "paper_regime_stop_min",
+    # 入场护栏提示阈值：高开/盘中冲高提示的灵敏度，提示类，盘中切即时生效
+    "entry_guard_gap_threshold",
+    "entry_guard_spike_threshold",
+    # 动态机制检测阈值：决定何时进入 shock/crisis 态，风控灵敏度，盘中切即时生效
+    "paper_regime_vol_win",
+    "paper_regime_vol_base",
+    "paper_regime_dd_win",
+    "paper_regime_crisis_vol",
+    "paper_regime_crisis_dd",
+    "paper_regime_shock_vol",
+    "paper_regime_shock_dd",
 })
+
+#: 多选控件（checkbox 组）参数：键 → 可选项列表（顺序即展示顺序与规范化顺序）。
+#: 值存为逗号分隔字符串（与 config.py 字段类型 ``str`` 一致），提交时按此列表规范化、
+#: 丢弃未知项、按声明顺序重排；前端据此渲染成一组可勾选的板块芯片。
+MULTISELECT_KEYS: dict[str, tuple[str, ...]] = {
+    "twin_t_boards": ("主板", "创业板", "科创板", "北交所"),
+}
 
 #: 设置页布局：**分组（左侧导航）→ 子分组（组内小节）→ 参数键**。
 #:
@@ -78,7 +126,7 @@ _LAYOUT: tuple[tuple[str, str, tuple[tuple[str, str, tuple[str, ...]], ...]], ..
         "连接与扫描",
         "行情抓取、并发与缓存；改完下一轮扫描即生效",
         (
-            ("请求与直连", "网络层开关与单次请求超时", ("data_direct_only", "request_timeout")),
+            ("请求与直连", "网络层开关与单次请求超时", ("data_direct_only",)),
             (
                 "扫描并发",
                 "全市场扫描的并发度与等待上限",
@@ -102,58 +150,13 @@ _LAYOUT: tuple[tuple[str, str, tuple[tuple[str, str, tuple[str, ...]], ...]], ..
                 ("auto_watch_enabled", "auto_watch_top_n", "focus_top_n"),
             ),
             ("盘后选股", "收盘扫描的股票池范围", ("auto_scan_scope",)),
-            (
-                "影子策略",
-                "只记录不交易的对照实验",
-                ("shadow_start", "shadow_tag", "shadow_universe", "shadow_profiles"),
-            ),
-            (
-                "摆动尺度",
-                "相对强弱极值：幅度门槛、ATR 自适应、右侧确认与最小间隔",
-                (
-                    "swing_threshold_pct", "swing_atr_mult",
-                    "swing_confirm_bars", "swing_min_gap",
-                ),
-            ),
-            (
-                "共振与偏离",
-                "基准锚窗、跟随带、极端背离剔除与扫描覆盖（只观测，不参与下单）",
-                (
-                    "swing_anchor_bars", "swing_z_window", "swing_band",
-                    "swing_extreme_z", "swing_min_corr", "swing_max_symbols",
-                ),
-            ),
-            (
-                "事前预估",
-                "转折概率与条件分布，标签窗口走完才入库，个股只做有限收缩",
-                (
-                    "swing_est_horizon", "swing_est_prior_strength",
-                    "swing_est_symbol_cap", "swing_est_entry_lift",
-                    "swing_est_cost_pct", "swing_est_min_exp_net",
-                    "swing_est_features",
-                ),
-            ),
-            (
-                "概率校准",
-                "把分箱概率在线重标定到真实频率；只改水平不改排序，样本不足自动退化为不校准",
-                (
-                    "swing_est_calibration", "swing_est_calib_min_samples",
-                    "swing_est_calib_refit_every", "swing_est_calib_l2",
-                ),
-            ),
-            (
-                "出场规则",
-                "确认后固定持有 vs ATR 跟踪止盈 vs 前高移动止盈（只研究，不接交易）",
-                (
-                    "swing_exit_mode", "swing_exit_hold_bars", "swing_exit_atr_k",
-                    "swing_exit_floor_pct", "swing_exit_take_profit_pct",
-                ),
-            ),
-            (
-                "并行账本",
-                "同一信号多种参数同时跑，实时对比净值",
-                ("paper_sim_enabled", "paper_sim_profiles", "paper_sim_capital"),
-            ),
+
+
+
+
+
+
+
             ("盘中分析", "盘中分析的触发间隔", ("intraday_analysis_interval",)),
         ),
     ),
@@ -206,8 +209,9 @@ _LAYOUT: tuple[tuple[str, str, tuple[tuple[str, str, tuple[str, ...]], ...]], ..
             ),
             (
                 "股票池过滤",
-                "先剔掉不该买的票，再看信号",
-                ("paper_exclude_bj", "paper_exclude_large_cap", "paper_large_cap_yi"),
+                "先剔掉不该买的票，再看信号；交易板块可与选股板块填同一套值",
+                ("paper_exclude_large_cap", "paper_large_cap_yi", "twin_t_boards",
+                 "paper_liquidate_offboard", "board_rules_legacy_limit"),
             ),
         ),
     ),
@@ -245,8 +249,9 @@ _LAYOUT: tuple[tuple[str, str, tuple[tuple[str, str, tuple[str, ...]], ...]], ..
         (
             (
                 "买点切入",
-                "不追高、等回踩、超时放弃",
-                ("paper_entry_max_chase", "paper_entry_pullback", "paper_entry_timeout_minutes"),
+                "不追高、等回踩、超时放弃、涨停禁买（按板块幅度）",
+                ("paper_entry_max_chase", "paper_entry_pullback", "paper_entry_timeout_minutes",
+                 "paper_block_limit_up_buy"),
             ),
             (
                 "固定止损止盈",
@@ -264,11 +269,7 @@ _LAYOUT: tuple[tuple[str, str, tuple[tuple[str, str, tuple[str, ...]], ...]], ..
                     "paper_trail_arm",
                 ),
             ),
-            (
-                "机制层止损收紧",
-                "shock/crisis 态新建仓自动收紧止损距离",
-                ("paper_regime_stop_tighten", "paper_regime_stop_min"),
-            ),
+
         ),
     ),
     (
@@ -290,11 +291,12 @@ _LAYOUT: tuple[tuple[str, str, tuple[tuple[str, str, tuple[str, ...]], ...]], ..
             ("做T 保护", "涨停卖半与做T 熔断", ("paper_t_limit_sell_half", "paper_t_crash_guard")),
             (
                 "大盘择时",
-                "指数在均线下方时收缩买入",
+                "指数在均线下方时收缩买入；机制检测灵敏度也可调",
                 ("paper_regime_ma", "paper_regime_weak_pause", "paper_weak_exposure",
-                 "paper_dynamic_exposure", "paper_regime_cap_calm", "paper_regime_cap_weak",
-                 "paper_regime_cap_shock", "paper_regime_cap_crisis",
-                 "entry_guard_block_declining_market"),
+                 "entry_guard_block_declining_market", "entry_guard_gap_threshold",
+                 "entry_guard_spike_threshold", "paper_regime_vol_win", "paper_regime_vol_base",
+                 "paper_regime_dd_win", "paper_regime_crisis_vol", "paper_regime_crisis_dd",
+                 "paper_regime_shock_vol", "paper_regime_shock_dd"),
             ),
         ),
     ),
@@ -311,11 +313,93 @@ _LAYOUT: tuple[tuple[str, str, tuple[tuple[str, str, tuple[str, ...]], ...]], ..
             ),
         ),
     ),
+    (
+        "创业板底部反转",
+        "实盘选股面板与回测同口径：低位 + 回撤 + 活跃成交 + 趋势过滤",
+        (
+            (
+                "选股口径",
+                "低位启动、相对20日高点跌够、成交活跃、成交不能太低",
+                ("bottom_start_pos_max", "bottom_dd20_min", "bottom_turnover_min",
+                 "bottom_min_avg_amount", "bottom_min_factor_score"),
+            ),
+            (
+                "趋势过滤",
+                "板块感知：每只票用「自己板块的指数」判上升通道（创业板票看创业板指、上证票看上证指数，不混为一谈）；盘中按实时指数动态重算",
+                ("bottom_trend_filter", "bottom_trend_ma", "bottom_trend_index"),
+            ),
+            (
+                "多板块扫描",
+                "候选不再限于创业板：按代码前缀分到各板块（创业板/上证主板/深证主板/科创板），每个板块用各自指数做趋势过滤；切换板块后请同步「交易执行 → 股票池过滤」的交易板块",
+                ("bottom_boards", "bottom_scale_exit_by_limit"),
+            ),
+            (
+                "统一大盘宏观风险（含外围）",
+                "把国内大盘 + 外围（美股前一日 / 亚太当日）综合成风险分，映射到 calm/weak/shock/crisis 四档，驱动总仓位上限",
+                ("unified_risk_ma", "unified_risk_include_overseas",
+                 "unified_risk_thr_weak", "unified_risk_thr_shock", "unified_risk_thr_crisis"),
+            ),
+            (
+                "四档仓位上限",
+                "本层专属上限，随风险单调递减（默认 30%/20%/10%），与机制层 paper_regime_cap_* 相互独立；仅危机档全暂停新开仓，卖出与止盈止损照常",
+                ("unified_risk_cap_weak", "unified_risk_cap_shock", "unified_risk_cap_crisis"),
+            ),
+            (
+                "主动离场",
+                "时间止损+跟踪止损：震荡不死扛、盈利锁利润（短线必备）",
+                ("bottom_time_stop_days", "bottom_trailing_pct"),
+            ),
+        ),
+    ),
+    (
+        "高级 / 研究参数",
+        "研究观测、影子策略与默认关闭的高级风控；日常交易一般不用改",
+        (
+            (
+                "研究观测（摆动影子）",
+                "相对强弱极值共振，只观测不交易，不参与下单",
+                ("swing_threshold_pct", "swing_atr_mult", "swing_confirm_bars", "swing_min_gap",
+                 "swing_anchor_bars", "swing_z_window", "swing_band", "swing_extreme_z",
+                 "swing_min_corr", "swing_max_symbols", "swing_est_horizon", "swing_est_prior_strength",
+                 "swing_est_symbol_cap", "swing_est_entry_lift", "swing_est_cost_pct",
+                 "swing_est_min_exp_net", "swing_est_features", "swing_est_calibration",
+                 "swing_est_calib_min_samples", "swing_est_calib_refit_every", "swing_est_calib_l2",
+                 "swing_exit_mode", "swing_exit_hold_bars", "swing_exit_atr_k",
+                 "swing_exit_floor_pct", "swing_exit_take_profit_pct"),
+            ),
+            (
+                "影子策略",
+                "冻结参数前向验证，只记录不交易（起点写入即冻结）",
+                ("shadow_start", "shadow_tag", "shadow_universe", "shadow_profiles"),
+            ),
+            (
+                "高级风控（默认关闭）",
+                "动态降暴露 / 托底 / 熔断 / 并行账本 / 机制层止损收紧；默认全关",
+                ("paper_dynamic_exposure", "paper_regime_cap_calm", "paper_regime_cap_weak",
+                 "paper_regime_cap_shock", "paper_regime_cap_crisis", "paper_policy_floor_enabled",
+                 "paper_policy_floor_min_score", "paper_policy_floor_low_escalate",
+                 "paper_policy_floor_harvest_cap", "paper_circuit_breaker_enabled",
+                 "paper_circuit_breaker_dd", "paper_circuit_breaker_release", "paper_circuit_breaker_target",
+                 "paper_sim_enabled", "paper_sim_profiles", "paper_sim_capital",
+                 "paper_regime_stop_tighten", "paper_regime_stop_min"),
+            ),
+            (
+                "网络",
+                "请求超时（当前未被任何代码读取，仅保留以防后续启用）",
+                ("request_timeout",),
+            ),
+        ),
+    ),
 )
 
 #: 分组展示顺序（只列**可编辑**的组；只读的部署项与硬编码常量单独返回，
 #: 不混进参数列表——页面上能改的才叫"系统设置"，改不了的塞进去只会误导）
 GROUP_ORDER: tuple[str, ...] = tuple(g[0] for g in _LAYOUT)
+
+#: 页面隐藏分组：这些分组里的参数**仍保留在 `Settings` 字段与业务代码读取中**
+#: （回测 / 影子策略 / 引擎风控仍在用），只是不在设置页展示——避免把基本不需要
+#: 调整的内部参数摊给用户。需要恢复展示时，从本集合删掉对应分组名即可（无副作用）。
+_HIDDEN_GROUPS: frozenset[str] = frozenset({"高级 / 研究参数"})
 
 #: 分组一句话说明（左栏导航与右栏标题下都用它）
 GROUP_DESCS: dict[str, str] = {g[0]: g[1] for g in _LAYOUT}
@@ -372,6 +456,8 @@ READONLY_KEYS: frozenset[str] = frozenset({
     # 访问令牌：只从 .env 读，绝不能出现在 GET /api/settings 的返回里
     # （否则等于把钥匙挂在门上）
     "api_token",
+    # 国内大盘成分（列表字段，UI 不可编辑，改 .env 后重启）
+    "unified_risk_domestic",
 })
 
 #: 需要脱敏回显的项：接口只返回掩码（`sk-****abcd`），前端原样回传视为「未修改」。
@@ -458,6 +544,16 @@ _MIN_EXCLUSIVE: dict[str, float] = {
     # 出场规则：持有上限 0 根没有意义（等于入场即卖），ATR 倍数 0 会让跟踪退化成死止损
     "swing_exit_hold_bars": 0.0,
     "swing_exit_atr_k": 0.0,
+    # 机制检测窗口：0 个交易日没有意义（取不到足够的波动率/回撤样本）
+    "paper_regime_vol_win": 0.0,
+    "paper_regime_vol_base": 0.0,
+    "paper_regime_dd_win": 0.0,
+    # 创业板底部反转选股阈值：必须为正的合理性下限
+    "bottom_trend_ma": 0.0,
+    "bottom_min_avg_amount": 0.0,
+    "bottom_dd20_min": 0.0,
+    "bottom_turnover_min": 0.0,
+    "bottom_start_pos_max": 0.0,
 }
 
 #: 不允许为负的数值项（费率类：负费率会让回测/实盘 PnL 凭空变好）
@@ -479,6 +575,14 @@ _NON_NEGATIVE: frozenset[str] = frozenset({
     "paper_circuit_breaker_dd",
     "paper_circuit_breaker_release",
     "paper_circuit_breaker_target",
+    # 入场护栏提示阈值：比例项，负阈值会让「下跌也提示追高」，无意义
+    "entry_guard_gap_threshold",
+    "entry_guard_spike_threshold",
+    # 机制检测阈值：波动率比/回撤比例项，负值无意义
+    "paper_regime_crisis_vol",
+    "paper_regime_crisis_dd",
+    "paper_regime_shock_vol",
+    "paper_regime_shock_dd",
 })
 
 #: 必须 ≤1 的比例项（>1 等于加杠杆，属于误操作）
@@ -494,6 +598,7 @@ _MAX_ONE: frozenset[str] = frozenset({
     "paper_circuit_breaker_dd",
     "paper_circuit_breaker_release",
     "paper_circuit_breaker_target",
+    "bottom_start_pos_max",
 })
 
 #: 跨字段约束：单键下限表达不了「A 必须大于 B」，同批提交时合并校验
@@ -531,6 +636,7 @@ _SHORT_LABELS: dict[str, str] = {
     "scan_wait_timeout": "扫描等待上限",
     "scan_auto_watch_limit": "扫描入池上限",
     "watch_auto_max": "程序自选容量上限",
+    "paper_liquidate_offboard": "清非交易板块持仓",
     # ---- 选股与自选 ----
     "factor_buy_threshold": "买入阈值",
     "factor_sell_threshold": "卖出阈值",
@@ -581,11 +687,14 @@ _SHORT_LABELS: dict[str, str] = {
     "paper_entry_max_chase": "不追高幅度",
     "paper_entry_pullback": "回踩幅度",
     "paper_entry_timeout_minutes": "切入超时",
+    "paper_block_limit_up_buy": "涨停禁买",
     # ---- 股票池过滤 ----
     "paper_pool_top_n": "成交额池 TopN",
-    "paper_exclude_bj": "排除北交所",
     "paper_exclude_large_cap": "大盘股过滤",
     "paper_large_cap_yi": "大盘股阈值",
+    "twin_t_boards": "交易板块",
+    "board_rules_legacy_limit": "板块规则回退",
+    "bottom_scale_exit_by_limit": "止盈按板块缩放",
     # ---- 止损 / 止盈 ----
     "paper_stop_loss": "固定止损",
     "paper_take_profit": "固定止盈",
@@ -664,6 +773,30 @@ _SHORT_LABELS: dict[str, str] = {
     "paper_sim_capital": "账本本金",
     "intraday_analysis_interval": "盘中分析间隔",
     "live_ml_scoring": "线上ML打分",
+    # ---- 入场护栏提示阈值 ----
+    "entry_guard_gap_threshold": "高开提示阈值",
+    "entry_guard_spike_threshold": "冲高提示阈值",
+    # ---- 动态机制检测阈值 ----
+    "paper_regime_vol_win": "波动窗口",
+    "paper_regime_vol_base": "波动基线窗",
+    "paper_regime_dd_win": "回撤窗口",
+    "paper_regime_crisis_vol": "危机波动比",
+    "paper_regime_crisis_dd": "危机回撤",
+    "paper_regime_shock_vol": "震荡波动比",
+    "paper_regime_shock_dd": "震荡回撤",
+    # ---- 底部反转选股口径（config 首句注释过长，卡片里会截断）----
+    "bottom_dd20_min": "20日回撤下限",
+    # ---- 多板块扫描 / 统一宏观风险 ----
+    "bottom_boards": "多板块白名单",
+    "unified_risk_ma": "宏观均线周期",
+    "unified_risk_include_overseas": "纳入外围指数",
+    "unified_risk_thr_weak": "风险弱档阈值",
+    "unified_risk_thr_shock": "风险震荡档阈值",
+    "unified_risk_thr_crisis": "风险危机档阈值",
+    "unified_risk_cap_weak": "弱势档仓位上限",
+    "unified_risk_cap_shock": "震荡档仓位上限",
+    "unified_risk_cap_crisis": "危机档仓位上限",
+    "unified_risk_domestic": "国内大盘成分",
 }
 
 #: 「首句截断」用的分隔符（没进 `_SHORT_LABELS` 的键走这条路）
@@ -672,6 +805,11 @@ _SHORT_CUT = "：:，,。；;（(【[/、 "
 #: 少数字段在 config.py 里没有注释（或只有标签），补一句说明给 tooltip 用
 _DESC_OVERRIDES: dict[str, str] = {
     "auto_watch_top_n": "收盘选股后按评分取前 N 只自动加入自选",
+    "paper_liquidate_offboard": (
+        "开启后，引擎在每日开盘前与收盘结算时，把不属于'交易板块'白名单的持仓全部市价卖出"
+        "（只清板块不符的，ST/市值维度不动）。用于切换只做创业板后清掉历史遗留的主板票。"
+        "默认关闭——开启即开始清仓，请确认后再开；也可调 POST /api/paper/liquidate-offboard 立即清一次"
+    ),
     "paper_half_score": "评分介于半额线与全额线之间时，仓位权重打 5 折",
     "paper_scan_autotrade_top_n": "扫描命中后最多自动送多少只进交易队列",
     "paper_rotation_enabled": (
@@ -689,6 +827,24 @@ _DESC_OVERRIDES: dict[str, str] = {
     "paper_eod_trim_minutes": "收盘减仓窗口：收盘前多少分钟内执行（默认 10，即 14:50 起）",
     "paper_backlog_max": "候补队列最多存多少只高分票（有名额时按评分优先买入）",
     "paper_large_cap_yi": "总市值超过该值（亿元）视为大盘股，默认不进买入队列",
+    "twin_t_boards": (
+        "勾选允许买入/统计的板块。可填中文名（主板/创业板/科创板/北交所）或与 bottom_boards 同款的"
+        "英文键（sh_main/sz_main/cyb/star/bse），两套可填同一串值；留空=退回主板+创业板。"
+        "引擎买入池、日更做T清单、非板块持仓清仓都按此过滤。⚠️ 若比「多板块扫描」bottom_boards "
+        "少勾了板块，那些板块的候选会被买入侧拒绝——面板会显示一致性警告"
+    ),
+    "board_rules_legacy_limit": (
+        "板块交易规则回退开关：默认关=按各板块真实规则（主板±10%、创业板/科创板±20%、"
+        "北交所±30%、ST±5% 涨跌停；主板/创业板 100 股整手、科创板 200 股起 1 股递增、"
+        "北交所 100 股起 1 股递增）。置 True 回到旧的全市场 ±9.5% / 100 股整手口径，"
+        "仅用于复现 #178 之前的历史回测基线（+8.49% 等）；改后需重启服务生效"
+    ),
+    "bottom_scale_exit_by_limit": (
+        "多板块交易策略适配：底反策略的止盈幅度原先按创业板 ±20% 波动标定（+25%），"
+        "直接套到主板 ±10% 几乎打不到、北交所 ±30% 一个板就穿透。开启后按板块涨跌停等比缩放"
+        "（基准创业板 20%：主板×0.5→+12.5%、创业板/科创板×1.0 不变、北交所×1.5→+37.5%）。"
+        "默认关=零行为变更；切换到非创业板板块时建议开启，并重新回测验证"
+    ),
     "paper_atr_stop_max": "ATR 止损放宽的上限（0.20 = 最多放宽到 20%）",
     "paper_t_active": "做T引擎总开关（默认开启）；关闭后下面各项做T参数不生效",
     "llm_base_url": "OpenAI 兼容接口地址（如 https://api.openai.com/v1）",
@@ -701,6 +857,86 @@ _DESC_OVERRIDES: dict[str, str] = {
     "paper_sim_profiles": "逗号分隔的方案名，取自回测方案库，只支持止损/仓位/择时这类处置参数",
     "paper_sim_capital": "每个并行账本的初始资金；0 = 跟随模拟盘本金",
     "paper_open_cooldown_minutes": "开盘冷静期(分钟)：开盘后N分钟内禁止自动买入(含轮动/做T买回)，仅拦买入不拦卖出；0=不限制",
+    "bottom_start_pos_max": (
+        "近20天前收盘价在近120日价格区间的相对位置上限（0=区间最低、1=最高）；"
+        "越小越说明从底部启动。默认0.40：起点落在下半区才入选"
+    ),
+    "bottom_dd20_min": (
+        "相对近20日收盘高点的回撤下限（比值）。默认0.15=较20日高点已跌≥15%，"
+        "代表处在低位、已从近期高位回落够深"
+    ),
+    "bottom_turnover_min": (
+        "当日换手率下限（百分制，与数据源 turnover_rate 同单位）。默认5.0=换手率≥5%："
+        "成交活跃，过滤冷门僵尸股"
+    ),
+    "bottom_min_avg_amount": (
+        "近20日平均成交额下限（元）。默认5000万：成交量不能太低，过滤流动性差的票"
+    ),
+    "bottom_min_factor_score": (
+        "14因子分二次过滤（软闸）：候选需满足 因子分 ≥ 此值才保留（100分制）。"
+        "底反票因子分天然偏低（实测均值≈-30），此为「剔除仍在深度恶化的票」的软闸，而非「要求因子转多」；"
+        "切勿设为正值（如15），否则候选几乎清空。设为 -100 表示关闭该过滤"
+    ),
+    "bottom_trend_filter": (
+        "创业板趋势过滤：仅当创业板指（默认399006）站在其 MA 之上的上升通道日，才给出底部反转候选/开仓；"
+        "下降通道日不出候选（避免下跌市接飞刀）。关闭则无论涨跌都出候选"
+    ),
+    "bottom_trend_ma": "趋势过滤所用均线周期（交易日）；默认60日",
+    "bottom_trend_index": (
+        "趋势过滤所用的指数代码（新浪/东财格式，如 sz399006=官方创业板指）；"
+        "留空=退回「300/301 等权合成指数」口径（回测验证更优：+9.94% vs 399006 的 -28.86%）。"
+        "填 sz399006 才支持盘中按实时指数动态重算（翻多即解锁候选），但回测表现较差，谨慎开启"
+    ),
+    "bottom_time_stop_days": (
+        "主动离场-时间止损：持仓达到该天数（自然日）仍未启动跟踪止损（即从未盈利到 +trailing_pct），"
+        "则主动平仓，避免震荡死钱长期占用资金。0=关闭（仅靠硬持有上限与止损/止盈离场）"
+    ),
+    "bottom_trailing_pct": (
+        "主动离场-跟踪止损：买入后涨幅达到该比例即启动跟踪止损，此后止损线上移至「峰值×(1−该比例)」，"
+        "价格自峰值回撤该比例即离场，用来锁定利润、不让盈利变亏损。0=关闭"
+    ),
+    # ---- 创业板底部反转选股口径 ----
+    "bottom_start_pos_max": "起点位置上限",
+    "bottom_dd20_min": "20日高点回撤下限",
+    "bottom_turnover_min": "换手率下限(%)",
+    "bottom_min_avg_amount": "20日均额下限",
+    "bottom_min_factor_score": "14因子分软闸",
+    "bottom_trend_filter": "趋势过滤开关",
+    "bottom_trend_ma": "趋势均线周期",
+    "bottom_trend_index": "趋势指数代码",
+    "bottom_time_stop_days": "时间止损天数",
+    "bottom_trailing_pct": "跟踪止损比例",
+    # ---- 多板块扫描 / 统一宏观风险 ----
+    "bottom_boards": (
+        "多板块扫描白名单（逗号分隔的板块键）：cyb=创业板、sh_main=上证主板、sz_main=深证主板、"
+        "star=科创板、bse=北交所。每只票按所属板块的指数做趋势过滤，不混为一谈。"
+        "默认 cyb,sh_main,sz_main,star；北交所(bse)本地缺指数 parquet，默认不扫"
+    ),
+    "unified_risk_ma": (
+        "统一宏观风险层计算「指数相对 MA 的下方偏离度」所用的均线周期（交易日）；默认60"
+    ),
+    "unified_risk_include_overseas": (
+        "是否在统一宏观风险中纳入外围指数：美股标普500/纳指/道琼斯取前一日收盘；"
+        "日经225/恒生/韩国KOSPI取当日盘中（因它们比 A 股早开盘）。关闭则只看国内大盘"
+    ),
+    "unified_risk_thr_weak": (
+        "综合风险分 ≥ 此值进入 weak（弱势）档，仓位上限取 unified_risk_cap_weak（默认0.30）；低于此值为 calm 不降仓"
+    ),
+    "unified_risk_thr_shock": (
+        "综合风险分 ≥ 此值进入 shock（震荡）档，仓位上限取 unified_risk_cap_shock（默认0.20）；只压仓位、买入照常，另给「慎开新仓」软提示"
+    ),
+    "unified_risk_thr_crisis": (
+        "综合风险分 ≥ 此值进入 crisis（危机）档，仓位上限取 unified_risk_cap_crisis（默认0.10），且全暂停新开仓买入；卖出与做T买回不受影响"
+    ),
+    "unified_risk_cap_weak": (
+        "weak 弱势档总仓位上限（0~1）；默认0.30。系统强制 weak≥shock≥crisis 单调，误设成反向会被自动收敛"
+    ),
+    "unified_risk_cap_shock": (
+        "shock 震荡档总仓位上限（0~1）；默认0.20，必须不高于 weak 档。此档只压仓位、不全停买入"
+    ),
+    "unified_risk_cap_crisis": (
+        "crisis 危机档总仓位上限（0~1）；默认0.10，为最严档。此档同时触发全暂停新开仓买入"
+    ),
 }
 
 
@@ -783,9 +1019,11 @@ def _jsonable(value: Any) -> Any:
 
 
 def kind_of(key: str, default: Any) -> str:
-    """页面渲染用的控件类型：``bool`` 开关 / ``number`` 数字框 / ``text`` 文本框 / ``readonly`` 只读。"""
+    """页面渲染用的控件类型：``bool`` 开关 / ``number`` 数字框 / ``text`` 文本框 / ``multiselect`` 多选 / ``readonly`` 只读。"""
     if key in READONLY_KEYS:
         return "readonly"
+    if key in MULTISELECT_KEYS:
+        return "multiselect"
     if isinstance(default, bool):
         return "bool"
     if isinstance(default, (int, float)):
@@ -795,6 +1033,11 @@ def kind_of(key: str, default: Any) -> str:
 
 def _coerce_value(key: str, raw: Any, default: Any) -> Any:
     """把前端/字符串输入转成字段该有的类型（类型不合法直接抛 ValueError）。"""
+    if key in MULTISELECT_KEYS:
+        # 多选值存为逗号分隔字符串；按声明顺序规范化、丢弃未知项（避免脏值污染白名单）
+        raw_str = "" if raw is None else str(raw)
+        parts = {p.strip() for p in raw_str.split(",")}
+        return ",".join(p for p in MULTISELECT_KEYS[key] if p in parts)
     if isinstance(default, bool):
         if isinstance(raw, bool):
             return raw
@@ -995,6 +1238,9 @@ def settings_overview() -> dict:
         if key in _DEPENDS_ON:
             # 条件可见：父开关（或空的文本父项）不满足时，前端把这一行藏起来
             item["depends_on"] = _DEPENDS_ON[key]
+        if key in MULTISELECT_KEYS:
+            # 多选控件的可选项列表（前端据此渲染 chip），顺序同 MULTISELECT_KEYS 声明
+            item["options"] = list(MULTISELECT_KEYS[key])
         # 只读项（路径/列表类）与硬编码常量直接不进清单：它们改不了
         # （前者要改 .env 重启，后者要改代码），展示了也没用，只会让人以为能调。
         if kind != "readonly":
@@ -1011,6 +1257,9 @@ def settings_overview() -> dict:
 
     ordered = []
     for name in group_order:
+        if name in _HIDDEN_GROUPS:
+            # 整组不在设置页渲染（字段本身保留，业务逻辑照常读取）
+            continue
         subs = buckets[name]
         sub_order = [sub for sub in layout_subs.get(name, []) if sub in subs]
         sub_order += [sub for sub in subs if sub not in sub_order]

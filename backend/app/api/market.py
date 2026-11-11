@@ -11,6 +11,7 @@ import pandas as pd
 from fastapi import APIRouter, HTTPException, Query
 
 from app.config import get_settings
+from app.board_rules import limit_pct as board_limit_pct
 from app.data.akshare_source import get_data_source
 from app.data.snapshot_store import snapshot_store
 from app.market.sentiment import classify_sentiment
@@ -25,18 +26,11 @@ router = APIRouter(prefix="/market", tags=["行情"])
 def _limit_pct(code: str, name: str = "") -> float:
     """返回该股票的涨跌停幅度（%）。
 
-    A股各板块涨跌幅限制不同：
-    - 沪深主板   : ±10%（ST 股为 ±5%，此处按名称含 ST 判断）
-    - 创业板(30x)/ 科创板(68x) : ±20%
-    - 北交所(43/83/87/88/92x)  : ±30%
+    #181 起统一代理到 ``app.board_rules.limit_pct``，与撮合/回测共用同一套口径，
+    避免行情统计与交易引擎对同一只票给出不同的涨跌停判定。
+    - 沪深主板 ±10%、创业板/科创板 ±20%、北交所 ±30%、ST ±5%。
     """
-    if "ST" in name.upper():
-        return 5.0
-    if code.startswith(("30", "68")):
-        return 20.0
-    if code.startswith(("43", "83", "87", "88", "92")):
-        return 30.0
-    return 10.0
+    return board_limit_pct(code, name)
 
 
 def _is_trading_time(now: datetime | None = None) -> bool:

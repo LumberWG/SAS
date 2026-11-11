@@ -258,6 +258,11 @@ async def test_sim_ledger_uses_its_own_position_limit(db, monkeypatch):
     monkeypatch.setattr(settings, "paper_regime_weak_pause", False, raising=False)
     monkeypatch.setattr(settings, "paper_max_positions", 10, raising=False)
     monkeypatch.setattr(settings, "paper_initial_capital", 100000.0, raising=False)
+    # 线上默认 twin_t_boards 自 2026-11-10 起是「创业板」，而本用例用 600004/600005
+    # 主板代码；显式放宽到主板+创业板，否则建仓会被 board_excluded 全部拒绝。
+    monkeypatch.setattr(settings, "twin_t_boards", "主板,创业板", raising=False)
+    # #182 涨停禁买读真实快照昨收，10 元假价格会被偶发判成触板，这里关闭。
+    monkeypatch.setattr(settings, "paper_block_limit_up_buy", False, raising=False)
     monkeypatch.setattr(engine_module, "large_cap_rule", lambda: (False, 0.0))
 
     async def fake_price(code, quotes=None):

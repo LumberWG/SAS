@@ -16,6 +16,11 @@ import pandas as pd
 
 from app.strategies.base import ParamSpec, Signal, Strategy
 from app.strategies.registry import registry
+from app.indicators.technical import add_all_indicators
+from app.analysis.factors import compute_factors
+from app.board_rules import (
+    BOARD_ZH, board_key_of, exit_scale_factor, exit_scaling_enabled,
+)
 
 
 @registry.register
@@ -370,3 +375,139 @@ def _safe(value, default=None):
     if value is None or (isinstance(value, float) and pd.isna(value)):
         return default
     return value
+
+
+@registry.register
+class BottomReversal(Strategy):
+    """创业板底部反转（收紧口径）：与 ``app/screener/bottom_reversal.py`` 完全同口径。
+
+    逐日判断「低位 + 已从高位回落 + 成交活跃」：
+      1) start_pos   = 20 天前收盘价落在近 120 日区间的相对位置 <= start_pos_max
+                        （低位启动，0=区间最低、1=最高）；
+      2) dd20        = 1 - 收盘价 / 近 20 日收盘高点 >= dd20_min
+                        （已从 20 日高点回落够深、处在低位，如 0.15=跌 15% 以上）；
+      3) turnover    = 当日换手率 >= turnover_min（成交活跃，过滤僵尸股，如 5%）；
+      4) avg_amount20 = 近 20 日均成交额 >= min_avg_amount（成交量不能太低）。
+    退出：止损 = 近 stop_lookback 日最低价；止盈 = 信号价 × (1 + target_pct)。
+    说明：原「近 20 日涨幅 15%~60%」已被上面的回撤/活跃度条件取代——用户要求
+    「底部选股不能乱选」，改为更明确的低位+回落+放量组合。
+    """
+
+    name = "创业板底部反转"
+    description = "低位启动+较20日高点跌够+换手活跃+成交不低，捕捉创业板底部反转"
+    category = "反转"
+    min_bars = 130
+
+    parameters = {
+        "start_pos_max": ParamSpec(
+            type="float", default=0.40, label="起点位置上限",
+            min=0.0, max=1.0, step=0.05, unit="(0=最低,1=最高)",
+        ),
+        "dd20_min": ParamSpec(
+            type="float", default=0.15, label="20日高点回撤下限",
+            min=0.0, max=0.8, step=0.01, unit="(≥此值才算跌够)",
+        ),
+        "turnover_min": ParamSpec(
+            type="float", default=5.0, label="换手率下限",
+            min=0.0, max=30.0, step=0.5, unit="(百分制, 5.0=5%，与数据源 turnover_rate 同单位)",
+        ),
+        "min_avg_amount": ParamSpec(
+            type="float", default=50_000_000.0, label="20日均成交额下限",
+            min=0.0, max=2_000_000_000.0, step=10_000_000.0, unit="元(默认5000万)",
+        ),
+        "min_factor_score": ParamSpec(
+            type="float", default=-50.0, label="14因子分软闸",
+            min=-100.0, max=50.0, step=5.0,
+            unit="(100分制, -50=软闸剔除深度恶化票; -100=关闭; 底反票因子分天然偏低勿设正)",
+        ),
+        "target_pct": ParamSpec(
+            type="float", default=0.25, label="止盈目标",
+            min=0.05, max=2.0, step=0.05, unit="(比值)",
+        ),
+        "stop_lookback": ParamSpec(
+            type="int", default=12, label="止损回看天数",
+            min=3, max=60, step=1, unit="日",
+        ),
+    }
+
+    def evaluate(self, df: pd.DataFrame) -> Signal | None:
+        if len(df) < self.min_bars:
+            return None
+        close = df["close"].astype(float).to_numpy()
+        if len(close) < 121:
+            return None
+        last = float(close[-1])
+        base20 = float(close[-21])
+        if base20 <= 0:
+            return None
+
+        win = close[-120:]
+        lmin = float(win.min())
+        hmax = float(win.max())
+        if hmax == lmin:
+            start_pos = 0.5
+        else:
+            start_pos = (base20 - lmin) / (hmax - lmin)
+        # 相对 20 日收盘高点的回撤
+        roll_max20 = float(win[-20:].max()) if len(win) >= 20 else float(hmax)
+        if roll_max20 <= 0:
+            return None
+        dd20 = 1.0 - last / roll_max20
+
+        # 当日换手率 / 20 日均成交额
+        try:
+            turnover = float(df["turnover_rate"].to_numpy()[-1])
+        except Exception:
+            turnover = 0.0
+        try:
+            amt = df["amount"].astype(float).to_numpy()[-20:]
+            avg_amount20 = float(amt.mean()) if len(amt) else 0.0
+        except Exception:
+            avg_amount20 = 0.0
+
+        # 与 screener 同口径筛选（低位 + 回撤够 + 换手活跃 + 成交不低）
+        if start_pos > float(self.param("start_pos_max")):
+            return None
+        if dd20 < float(self.param("dd20_min")):
+            return None
+        if turnover < float(self.param("turnover_min")):
+            return None
+        if avg_amount20 < float(self.param("min_avg_amount")):
+            return None
+
+        # 14 因子分二次过滤（软闸，与 screener 同口径）：仅剔除深度恶化票
+        min_fs = float(self.param("min_factor_score"))
+        factor_score = None
+        if min_fs > -100:
+            try:
+                d2 = add_all_indicators(df)
+                factor_score = round(float(compute_factors(d2).total), 2)
+                if factor_score < min_fs:
+                    return None
+            except Exception:
+                factor_score = None
+
+        lb = int(self.param("stop_lookback"))
+        low_win = df["low"].astype(float).to_numpy()[-lb:]
+        stop = float(low_win.min())
+        # #181：止盈幅度按板块涨跌停等比缩放（开关默认关 → 与旧版逐字一致）。
+        # code 由调用方写入 df.attrs，未注入时 code="" → 不缩放、文案沿用旧值。
+        code = str(df.attrs.get("code", "") or "")
+        target_pct = float(self.param("target_pct"))
+        if code and exit_scaling_enabled():
+            target_pct *= exit_scale_factor(code)
+        target = round(last * (1.0 + target_pct), 2)
+        bname = BOARD_ZH.get(board_key_of(code), "创业板") if code else "创业板"
+
+        return Signal(
+            code="", name="", strategy=self.name, price=last,
+            reason=f"{bname}底部反转：起点{start_pos:.2f}、20日高点回撤{dd20*100:.1f}%、"
+                   f"换手{turnover:.1f}%、20日均额{avg_amount20/1e4:.0f}万、"
+                   f"因子分{factor_score if factor_score is not None else 'NA'}，"
+                   f"止损{stop:.2f}/目标{target:.2f}",
+            stop_loss=stop, target_price=target,
+            date=str(df["date"].iloc[-1]),
+            extra={"start_pos": round(start_pos, 3), "dd20": round(dd20, 4),
+                   "turnover": round(turnover, 4), "avg_amount20": round(avg_amount20, 2),
+                   "factor_score": factor_score},
+        )
