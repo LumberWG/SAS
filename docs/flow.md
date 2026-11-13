@@ -8,7 +8,8 @@
 > **「一次买卖从哪来、经过哪些判定、被哪些参数挡住」**。参数默认值以 `config.py` 为准，本文件只做索引；
 > 两者不一致时以代码为准，并请顺手修这里。
 
-**目录**：[一、端到端](#一端到端主流程) · [二、买入判定](#二单笔买入判定五段式--分档--预算) ·
+**目录**：[零、六阶段生命周期](#零六阶段生命周期唯一口径) · [一、端到端](#一端到端主流程) ·
+[二、买入判定](#二单笔买入判定五段式--分档--预算) ·
 [三、卖出与风控](#三持仓与卖出风控) · [四、参数总表](#四全参数总表按阶段) ·
 [五、为什么没成交](#五为什么没买没卖skip-原因速查) · [六、三个排序](#六三个排序对照) ·
 [七、举例](#七一次完整旅程举例) · [八、维护约定](#八维护约定)
@@ -23,6 +24,95 @@
 > **上限就是可卖股数，不会减成负数**；
 > ③ 回测同口径（无空头持仓、无融券成本、无做空收益），所以「空仓」只可能是现金等待，
 > 不是反向持仓——下跌市里 0 仓位本身就是最优解（`BACKTEST_LOG` 关于「不做空 + 最高 80% 仓位」的归因）。
+
+---
+
+## 零、六阶段生命周期（唯一口径）
+
+> 用户口径（2026-11-11）：「系统明确要有 **初选 → 入自选股 → 进交易队列 → 入场 → 持有 → 离场** 一整套策略」。
+> 本节是这六个阶段的**唯一定义**：准入、准出、核心规则、数据落点、负责模块、当前实现状态。
+> 下文一~八节是这六阶段的展开（第 9~14 步即「进交易队列 → 入场」）。口径不一致时以本节为准，并顺手修下文。
+> **#190 只做口径明确化**（`app/`、设置项、`app_state`、`.env`、表结构零改动）。随后 **#191 按本节 0.5 清单补齐 P0/P1/P2 全部缺口**：默认零风险、不改既有交易行为（新开关默认关、新参数默认 0、底反默认不送队列），并新增只读的「生命周期」页把六阶段可视化（详见 `WORKLOG.md` #191）。
+
+### 0.1 六阶段定义
+
+| # | 阶段 | 定义 | 准入 | 准出（进入下一阶段的硬条件） | 核心规则 / 参数 | 数据落点 | 负责模块 |
+|---|---|---|---|---|---|---|---|
+| 1 | **初选** `SCREEN` | 全市场 → 候选集合 | 交易日；范围过滤（板块 / `top_amount:N` / 指定代码）；`is_tradable` 剔 ST、非白名单 | 命中策略 `Signal` 并完成第 1 次排序 | `scan_concurrency=20`、`min_bars=60`、`bottom_start_pos_max / dd20_min / turnover_min / min_avg_amount / min_factor_score`、`bottom_trend_filter` | `signals` 表、`data/last_scan.json`、`data/bottom_reversal_cache.json` | `screener/scanner.py`（主链路）、`screener/bottom_reversal.py`（底反面板） |
+| 2 | **入自选股** `WATCH` | 候选 → 关注池 | 初选 TopN，或手动加入 / 持仓同步加入 | 出现在 `watchlist` 且通过范围过滤，可被 `analyze_watchlist()` 读到 | `scan_auto_watch_limit=10`、`watch_auto_max=30`、`auto_watch_enabled / auto_watch_top_n=10`、`prune_watch_auto` | `watchlist` 表（`code/name/note/source/score/created_at`） | `scanner._auto_watch_hits()`、`scheduler.auto_watch_top_hits()`、`api/watchlist.py` |
+| 3 | **进交易队列** `QUEUE` | 关注 → **带时限的待执行指令** | `recommender` 产出 `action=buy/sell`（`hold` 撤旧信号、`focus` 不入队） | `submit()` 写入 `_pending`（满额转 `_backlog`），带 `expire_at / score / scan` | `paper_trade_queue_top_m=5`（卖单不受限）、`paper_signal_ttl_minutes=30`、`paper_backlog_max=30`、`paper_scan_autotrade_top_n=10` | 内存 `_pending/_backlog` + 镜像表 `paper_pending`（`kind=pending/backlog`） | `paper/live.py::submit()`、`analysis/recommender.py`、`api/advisory.py`（只读） |
+| 4 | **入场** `ENTRY` | 指令 → 成交建仓 | 交易时段、队列未过期、`entry_gate()` + `entry_price_ok()` 全过 | 成交写批次 / 流水 / 持仓 / 现金 | 板块白名单 `twin_t_boards=创业板`、大盘四档（仅 `crisis` 硬拦）、涨停禁买、开盘冷却 5min、`paper_max_positions=10`、`paper_single_position_max=0.20`、`paper_full/half_score=40/25`、`paper_buys_per_tick=2`、`round_buy_qty()` | `paper_position_lots`（含 `provenance`）、`paper_trades`、`paper_positions`、`paper_pending` 出队 | `paper/live.py::tick()`、`paper/engine.py::execute_recommendations()` / `place_order()` |
+| 5 | **持有** `HOLD` | 持仓期管理 | 有未平仓 lot | 触发任一离场条件 | 止损 `paper_stop_loss=0.08`（ATR 放宽）、止盈 `0.20`、保本 `0.10`、移动止损 `0.10`、做T `paper_t_active`、轮动、收盘减仓至 `paper_max_total_exposure=0.80`、T+1 `sellable_shares` | `paper_positions`（`stop_price/peak_price/t_t_sold/t_down_armed/...`）、`paper_equity`、`app_state` 择时快照 | `engine.check_stop_loss_target()` / `t_tick()` / `eod_trim()` / `settle()` |
+| 6 | **离场** `EXIT` | 平掉多头批次并回写状态 | 止损 / 止盈 / 移动止损 / 保本 / 信号卖出（`factor_sell_threshold=-15`）/ 轮动换出 / 收盘减仓 / 清非交易板块 / 手动卖出 | lot 按 FIFO 扣减至 0，汇总行删除，现金与净值更新 | 卖出优先于买入（第 3 次排序）、`reduce_paper_sellable()` 只扣 `buy_date < today` 的批次、轮动买回评分门槛 | `paper_trades.reason`（自由文本）、`paper_position_lots`、`paper_positions`、`paper_equity` | `engine.check_stop_loss_target()` / `execute_recommendations()` / `t_tick()` / `eod_trim()` / `place_order()` |
+
+> 执行顺序（每 5s tick）：`check_stop_loss_target` → `t_tick` → `execute_recommendations`（卖单优先）→ `eod_trim`；
+> 15:40 `settle()` 再兜底一次止损止盈 + 净值定稿。**卖出永远排在买入前面**，且只能平多、不做空（见前文「前提」）。
+
+### 0.2 状态机与当前存在的越级旁路
+
+**唯一正常链路**：`SCREEN → WATCH → QUEUE → ENTRY → HOLD → EXIT →（可选）回 WATCH 观察`
+
+允许的回路：`QUEUE` 过期 / 被拒 → 出队丢弃或转 `backlog`；`HOLD` 内做T、加仓只新增 lot，不新开阶段；
+`EXIT` 后要重新入场必须重新走 `QUEUE`，且当日被轮动卖出的票受「买回所需最低评分」门槛约束。
+
+**四条越级旁路**（#190 登记；#191 已修两条，另两条保留）：
+
+| 旁路 | 路径 | 位置 | 影响 / 现状 |
+|---|---|---|---|
+| 扫描命中直连队列 | `SCREEN → QUEUE`，跳过 `WATCH` | `scanner.py::_trade_top_hits()`（开关 `paper_scan_autotrade`） | 队列里有不在自选股里的票；两套入队口径（保留，属有意的速通路径） |
+| 底部反转面板孤立 | `SCREEN` 候选只写 JSON 缓存，**不进** `signals` / `watchlist` / `queue` | `screener/bottom_reversal.py::write_cache()`、`api/bottom_reversal.py` | **#191 已打通**：新增 `bridge_to_trade()` + 开关 `bottom_reversal_autobridge`（默认关），开启后候选写入 `signals` + `watchlist`（并可送队列），与 scanner 命中同一条下游；默认仍只是观察面板，不主动交易 |
+| 手动下单越权 | 直接 `ENTRY`，跳过 `QUEUE` 与全部自动护栏 | `engine.py::place_order()` | **#191 已收窄**：手动买入现在仍跳过 `QUEUE`（属预期的人工越权路径），但会经统一宏观风险 `crisis` 硬拦 → `_buy_allowed`（板块范围 / 大市值 / 名称 / 成交额池 / 板块趋势闸门）→ 持仓名额 → `entry_price_ok` 四道护栏，不再直落库越权；手动单仓位上限同样纳入 Layer2 四档 cap |
+| 明日关注不入队 | `focus` 只落 `recommendations` | `scheduler.py::post_market()` | 「明日关注」不会自动变成待执行指令（保留） |
+
+### 0.3 与短线（≤5 日）口径的冲突 —— 最大缺口
+
+- 回测侧有 `max_hold_days` / `time_stop_days` / `partial_tp_at` / `stop_confirm_close` / `trail_pct`；**线上 `PaperEngine` 一条都没有**。
+  事实依据：`paper/ledger.py::UNSUPPORTED_REASONS` 逐项列明「时间止损需逐日盯持仓天数，引擎未实现」「分批止盈 / 收盘确认止损未实现」，`backtest/apply.py` 明确「实盘没有时间止损」。
+- 即 `HOLD` 阶段目前是**无限期**：只有价格触发（止损 / 止盈 / 移动止损 / 做T）或收盘减仓才卖，没有「持有满 N 日强制离场」。
+  且 `paper_positions.buy_date` 是 lots 的 `MAX(buy_date)`（最近一次买入，非首次建仓），做T后会后移，不能直接当持有天数用。
+- 按 ≤5 日短线解读，六阶段中 **`HOLD → EXIT` 缺一条时间轴出口**；这是定义与实现之间最实质的差距。
+
+- **#191 已补上时间轴出口**：新增设置 `paper_max_hold_days`（默认 **0** = 保持原「无限期」、不改现有交易行为），>0 时持仓满 N 个自然日即触发「时间止损」离场。`check_stop_loss_target()` 在止损 / 止盈之后新增该分支；计时从首个建仓批次 `lots.MIN(buy_date)` 起算（非 `paper_positions.buy_date` 的 `MAX`，避免加仓 / 做T 把计时后移重置），由既有的 T+1 闸门保证今仓次日才真正可卖。
+
+### 0.4 其余已确认断裂（按影响排序）
+
+1. **Layer2 统一风险四档 cap 未接入交易**：`unified_risk_cap_weak/shock/crisis = 0.30/0.20/0.10` 只出现在 `market_risk.py` 返回值、设置页与底反面板；`engine.py::effective_exposure` 不读它，实际只有 `crisis` 二值硬拦新开仓。 → **#191 已接入（P1-1）**：`engine.execute_recommendations` 与 `place_order` 在 `weak/shock/crisis` 档把 `effective_exposure` / `manual_exposure` 压到对应 cap（只降不升，零新增风险）；`crisis` 仍由 `should_block_buy` 全停新开仓。
+2. **板块趋势过滤与入场闸门脱节**：`board_regime_for_code()` 全项目无调用点；`bottom_trend_filter` 只用于底反选股，`_buy_allowed()` 不查板块趋势。 → **#191 已接入（P0-3）**：新增开关 `paper_board_trend_gate`（默认关 = 零风险），开启后 `_buy_allowed()` 在候选所属板块指数处于 `downtrend` 时拒绝买入。
+3. **两套自动加自选口径并存**：`scanner._auto_watch_hits`（`scan_auto_watch_limit` + `watch_auto_max` + `prune_watch_auto` 淘汰）与 `scheduler.auto_watch_top_hits`（`auto_watch_enabled` + `auto_watch_top_n`、无淘汰）写同一张表但互不知晓。 → **#191 已合并（P0 统一口径）**：`scheduler.auto_watch_top_hits` 现委托 `scanner._auto_watch_hits` 执行，15:30 `auto_scan` 与盘中扫描命中共用同一套「容量 + 淘汰」口径，消除「双容量 / 不淘汰」冲突。
+4. **无统一生命周期主键**：`signals → recommendations → paper_pending → paper_trades → lots` 只靠 `code` + 日期关联；无 `signal_id` / `order_id` / `lot_id`，无法由 SQL 直接复盘「哪个信号导致哪笔成交」。 → **#191 部分缓解（P2-1）**：新增贯穿六阶段的 `lifecycle_events` 全局事件表 + `paper_trades.exit_reason` 结构化编码，可按 `code` 串起「初选→入自选→进队列→入场→离场」旅程；但 `signal_id/lot_id/order_id` 全链路主键仍未建，SQL 仍主要靠 `code` 关联。
+5. **`watchlist` 无状态列**（只有 `source/note/created_at/score`）、无 TTL，`score` 只写不读；「是否已入队 / 已持仓」靠运行时现查。（#191：保留未改）
+6. **`paper_pending` 是覆盖式内存镜像**（每次 `submit` 全表 DELETE 再 INSERT），无 `status` 列、无逐条状态机、无历史。（#191：保留未改）
+7. **卖出侧无结构化溯源**：买入有 `provenance` JSON，卖出只有 `paper_trades.reason` 文本（轮动买回门槛靠正则反解析），无 `exit_reason_code`。 → **#191 已补（P1-3）**：`paper_trades` 新增 `exit_reason` 列（`TIME_STOP` / `STOP_LOSS` / `TAKE_PROFIT` / `ROTATION` / `OFFBOARD` / `EOD_TRIM` / `T_SELL` / `MANUAL` / `SIGNAL` / `OTHER`），由卖出写入点统一从 `reason` 兜底推断，覆盖所有卖出路径（买入侧保持 NULL）。
+8. **展示层口径残留**：前端 `router.meta.stage` 只有 1~4 且未消费；`param_specs.py` 仍留「③ 三选 · 交易队列」旧文案；`README` / `flow.md` 二节仍称「五段式」。 → **#191 部分缓解（P2-2）**：新增「生命周期」页（`/lifecycle`，消费六阶段）把整条链路可视化，六阶段卡 + 时间线 + 代码/阶段筛选；但 `router.meta.stage` 仍为 1~4（入场页=4，未扩到 6），旧「三选 / 五段式」文案与 `README` 尚未清理（遗留）。
+
+> **回测↔实盘一致性（#191 续，2026-11-12）**：上文 #1/#2/#7 的入场护栏（统一四档 cap、板块趋势闸门、危机硬拦）最初只落在 `paper/engine.py`，回测 `backtest/pipeline.py` 是另一套执行引擎、不会自动继承，导致「开启开关后回测≠实盘」。
+> 本轮已把这三条规则**镜像进回测**，同样保持**默认关 / 默认 0、不改既有回测行为**：
+> - 板块趋势闸门：`PipelineParams.board_trend_gate`（默认 None=沿用 `settings.paper_board_trend_gate`），新开仓前 `board_regime_for_code(code)` 为 `downtrend` 则拒买（主再平衡 + 日内买入两处）。
+> - 危机硬拦：复刻 `should_block_buy()`（内部跟随 `entry_guard_block_declining_market`，关则零行为变更），仅拦新开仓。
+> - 统一四档 cap：开关 `unified_risk_cap_enabled`（默认 None=沿用 `settings.paper_unified_risk_cap_enabled`），开启时把 `day_exposure` 与 `get_unified_market_risk()` 的 cap 取 min（只降不升），自动覆盖所有买入预算与做T加仓空间。
+> 抽离模块级 `_buy_blocked(code, board_trend_gate)` 供单测；`should_block_buy`/`board_regime_for_code`/`get_unified_market_risk` 接入回测命名空间；结果 `params` 回显两开关实际取值（详见 `WORKLOG.md` #191）。**仍分叉项**：时间止损回测有独立 `max_hold_days`（与实盘 `_time_stop_hit` 概念一致、代码两份）；做T买回/网格加仓不拦（与实盘「只拦新开仓、做T买回不受影响」同口径）。完整回测对齐需在正常环境用真实行情数据复核。
+
+### 0.5 落地清单（#191 已全部补齐，默认零风险）
+
+> 用户 2026-11-11 确认「要，同时把缺口补上」后，**#191** 按下列清单落地。所有新增能力默认关闭 / 默认 0，**不改既有交易行为**：新开关默认关、新参数默认 0、底反默认不送队列。
+
+- **P0 · 改变交易行为（已落地）**
+  - 底反接交易链：`bottom_reversal.bridge_to_trade()` + 开关 `bottom_reversal_autobridge`（默认关），开启后候选写入 `signals` + `watchlist`（并可送队列），与 scanner 命中同下游；
+  - 短线时间止损：新增 `paper_max_hold_days`（默认 0），>0 时按首个建仓批次天数触发「时间止损」离场；
+  - 统一入自选口径：`scheduler.auto_watch_top_hits` 委托 `scanner._auto_watch_hits`，消除双容量 / 不淘汰冲突；
+  - 手动买入护栏：`place_order` 经 `crisis` 硬拦 → `_buy_allowed` → 持仓名额 → `entry_price_ok` 四道护栏（仍需跳过 `QUEUE`，属预期人工越权）。
+- **P1 · 口径统一（已落地）**
+  - Layer2 四档 cap 进 `effective_exposure` / `manual_exposure`（只降不升）；
+  - 板块趋势进 `_buy_allowed()` 闸门（开关 `paper_board_trend_gate`，默认关）；
+  - 退出 `exit_reason` 结构化编码进 `paper_trades`（低侵入，从 `reason` 兜底推断；`signal_id/lot_id` 全链路串联**未做**，遗留）。
+- **P2 · 可观测（已落地，部分）**
+  - 生命周期事件表 `lifecycle_events` + 只读 API `/api/lifecycle/*` + 前端「生命周期」页（六阶段卡 + 时间线 + 筛选）；
+  - 「清理五段式 / 三选旧文案」**未做**（遗留，见 0.4 #8）。
+
+### 0.6 维护约定
+
+新增或改动任一阶段，必须同步本节 + 一~四节 + `WORKLOG.md`；参数默认值以 `config.py` 为准（`.env` / `app_state` 覆盖层另计）。
+改动交易规则时按 `AGENTS.md` 第 3 节同步 `README.md`、`docs/sas_formulas.md`、`WORKLOG.md`，并跑全量 `pytest`。
 
 ---
 

@@ -1,0 +1,365 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>SAS 前向验证 · 七代基线对比看板</title>
+<style>
+  :root{
+    --bg:#f5f7fa; --card:#ffffff; --ink:#1f2933; --muted:#6b7785;
+    --line:#e3e8ef; --pos:#d7263d; --neg:#0a9d54; --zero:#9aa5b1;
+    --b1:#5B8FF9; --b2:#F6BD16; --b3:#5AD8A6; --b4:#FF9845; --b5:#9D6CFF; --b6:#E8684A; --b7:#2BA8C4;
+    --shadow:0 1px 3px rgba(16,24,40,.08),0 1px 2px rgba(16,24,40,.06);
+  }
+  @media (prefers-color-scheme: dark){
+    :root{
+      --bg:#0f1620; --card:#18222f; --ink:#e6edf3; --muted:#8b98a5;
+      --line:#263241; --pos:#ff5b6e; --neg:#34d399; --zero:#475569;
+      --b1:#6aa0ff; --b2:#f7c948; --b3:#5ee0b0; --b4:#ffa566; --b5:#b794ff; --b6:#ef7a5a; --b7:#4fd0e0;
+      --shadow:0 1px 3px rgba(0,0,0,.4);
+    }
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;
+    -webkit-font-smoothing:antialiased;line-height:1.5}
+  .wrap{max-width:1080px;margin:0 auto;padding:28px 20px 60px}
+  h1{font-size:22px;margin:0 0 4px}
+  .sub{color:var(--muted);font-size:13px;margin-bottom:18px}
+  .legend{display:flex;gap:18px;flex-wrap:wrap;margin:10px 0 4px}
+  .lg{display:flex;align-items:center;gap:6px;font-size:13px}
+  .sw{width:13px;height:13px;border-radius:3px;display:inline-block}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;
+    padding:16px 18px;box-shadow:var(--shadow);margin-bottom:18px}
+  .cards{display:grid;grid-template-columns:repeat(3,1fr);gap:14px}
+  .cards .card{margin-bottom:0}
+  .bl-name{font-size:13px;font-weight:600;margin-bottom:10px;display:flex;align-items:center;gap:7px}
+  .kpi{display:flex;justify-content:space-between;font-size:12.5px;padding:5px 0;border-bottom:1px dashed var(--line)}
+  .kpi:last-child{border-bottom:none}
+  .kpi .v{font-variant-numeric:tabular-nums;font-weight:600}
+  .controls{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-bottom:8px}
+  .seg-btns{display:flex;gap:6px;flex-wrap:wrap}
+  .btn{border:1px solid var(--line);background:var(--bg);color:var(--ink);
+    padding:6px 12px;border-radius:8px;font-size:12.5px;cursor:pointer;transition:.15s}
+  .btn:hover{border-color:var(--b1)}
+  .btn.active{background:var(--b1);border-color:var(--b1);color:#fff}
+  .toggles{display:flex;gap:14px;flex-wrap:wrap;font-size:13px;margin-left:auto}
+  .toggles label{display:flex;align-items:center;gap:6px;cursor:pointer;user-select:none}
+  .chart-wrap{position:relative;width:100%}
+  svg{width:100%;height:auto;display:block}
+  .tip{position:absolute;pointer-events:none;background:var(--ink);color:var(--bg);
+    padding:6px 9px;border-radius:6px;font-size:12px;opacity:0;transition:opacity .1s;white-space:nowrap;z-index:5}
+  table{width:100%;border-collapse:collapse;font-size:12.5px;font-variant-numeric:tabular-nums}
+  th,td{padding:7px 8px;text-align:right;border-bottom:1px solid var(--line)}
+  th{color:var(--muted);font-weight:600;position:sticky;top:0;background:var(--card)}
+  td.seg,th.seg{text-align:left}
+  .pos{color:var(--pos);font-weight:600}
+  .neg{color:var(--neg);font-weight:600}
+  .note{color:var(--muted);font-size:11.5px;margin-top:10px}
+  .callout{border-left:4px solid var(--b3);background:linear-gradient(90deg,rgba(90,216,166,.10),transparent);
+    padding:12px 16px;border-radius:0 10px 10px 0;font-size:13px}
+  .callout b{color:var(--ink)}
+  .regime{font-size:11px;color:var(--muted)}
+  h2{font-size:15px;margin:24px 0 10px}
+  .tag{display:inline-block;padding:1px 7px;border-radius:6px;font-size:11px;font-weight:600}
+  .t-up{background:rgba(215,38,61,.15);color:var(--pos)}
+  .t-dn{background:rgba(10,157,84,.15);color:var(--neg)}
+  .t-flat{background:rgba(154,165,177,.18);color:var(--muted)}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>SAS 前向验证 · 七代基线对比看板</h1>
+  <div class="sub">策略：量价共振2560（A-Only）· 六段样本外/样本内对照 · 截至 2026-11-13 · 12-01 复盘用</div>
+
+  <div class="legend">
+    <div class="lg"><span class="sw" style="background:var(--b1)"></span>P1 之前 &nbsp;<span class="regime">#48~#53</span></div>
+    <div class="lg"><span class="sw" style="background:var(--b2)"></span>P1·上证 MA60 &nbsp;<span class="regime">#54~#59</span></div>
+    <div class="lg"><span class="sw" style="background:var(--b3)"></span>P1·中证全指 MA60（当前）&nbsp;<span class="regime">#60~#65</span></div>
+    <div class="lg"><span class="sw" style="background:var(--b7)"></span>关闸·压仓·regime-aware&nbsp;<span class="regime">研究·验证完</span></div>
+  </div>
+
+  <!-- 汇总卡片 -->
+  <div class="cards" id="cards"></div>
+
+  <!-- 图表 -->
+  <div class="card" style="margin-top:18px">
+    <div class="controls">
+      <div class="seg-btns" id="metricBtns"></div>
+      <div class="toggles" id="toggles"></div>
+    </div>
+    <div class="chart-wrap">
+      <div class="tip" id="tip"></div>
+      <svg id="chart" viewBox="0 0 920 440" preserveAspectRatio="xMidYMid meet"></svg>
+    </div>
+    <div class="note" id="chartNote"></div>
+  </div>
+
+  <!-- 关键洞察 -->
+  <h2>关键洞察</h2>
+  <div class="card callout" id="insight"></div>
+
+  <!-- 明细表 -->
+  <h2>分段明细（收益 / 基准 / 超额 / 回撤 / 夏普 / 笔数 / 胜率）</h2>
+  <div class="card" style="overflow-x:auto">
+    <table id="tbl"></table>
+    <div class="note">超额 = 策略收益 − 基准。颜色：<span class="pos">红=跑赢基准(正超额)</span> / <span class="neg">绿=跑输基准(负超额)</span>（A股惯例：涨红跌绿）。基准三段完全一致，可放心做超额对照。</div>
+  </div>
+
+  <div class="note">
+    红线提醒：#47 全年 +13.28% vs 基准 −6.47% = +19.75pp 是 P1 之前口径的历史参考，含「跌市抗跌」被下跌年放大的成分，<b>不可外推为收益预期</b>。
+    七代基线（nak 裸引擎 / pre_p1 / p1_sh000001 / p1_sh000985 / ctx_off 关闸·压仓·ML / ctx_factors 关闸·压仓·纯因子 / ctx_ra 关闸·压仓·regime-aware）口径不同：裸引擎与关闸·压仓为研究反向对照，实盘现行为 ctx_factors（关闸·压仓·纯因子，2026-11-13 已应用，关 ML + 关四项闸）。ctx_factors 与 ctx_off 为同窗口 A/B（仅差打分引擎），可直接相减得 ML 净贡献；ctx_ra 为 regime-aware 路由实验，实测未优于纯因子、不进实盘。对照其余代际务必注明代际。
+  </div>
+</div>
+
+<script>
+const BENCH = {S1:6.89,S2:25.18,S3:1.63,S4:7.79,S5:-11.52,S6:-10.24};
+const SEG = [
+  {tag:'S1',win:'2025-01-02 ~ 2025-04-30',note:'#47 之前 · 样本外',mkt:'flat'},
+  {tag:'S2',win:'2025-05-06 ~ 2025-08-29',note:'#47 之前 · 样本外',mkt:'up'},
+  {tag:'S3',win:'2025-09-01 ~ 2025-12-31',note:'与 #47 起点重叠',mkt:'flat'},
+  {tag:'S4',win:'2026-01-05 ~ 2026-04-30',note:'#47 区间中段',mkt:'flat'},
+  {tag:'S5',win:'2026-05-06 ~ 2026-08-31',note:'#47 区间后段',mkt:'down'},
+  {tag:'S6',win:'2026-09-01 ~ 2026-11-12',note:'#47 终点之后 · 样本外',mkt:'down'},
+];
+const BASE = [
+  {id:'pre_p1',  label:'P1 之前',        color:'var(--b1)',run:'#48~#53',
+    m:{S1:{ret:-8.19,dd:-14.77,sh:-1.41,tr:51,wn:51.0},
+       S2:{ret:30.58,dd:-4.59,sh:4.06,tr:54,wn:77.8},
+       S3:{ret:4.24,dd:-15.29,sh:0.64,tr:51,wn:54.9},
+       S4:{ret:4.61,dd:-14.73,sh:0.90,tr:49,wn:65.3},
+       S5:{ret:4.72,dd:-5.79,sh:1.01,tr:48,wn:60.4},
+       S6:{ret:-6.56,dd:-7.51,sh:-3.54,tr:14,wn:28.6}}},
+  {id:'p1_sh000001', label:'P1·上证 MA60', color:'var(--b2)',run:'#54~#59',
+    m:{S1:{ret:-11.47,dd:-12.47,sh:-3.19,tr:25,wn:36.0},
+       S2:{ret:12.80,dd:-6.76,sh:2.15,tr:39,wn:74.4},
+       S3:{ret:-1.98,dd:-12.67,sh:-0.30,tr:36,wn:44.4},
+       S4:{ret:-6.04,dd:-11.03,sh:-1.47,tr:20,wn:40.0},
+       S5:{ret:0.22,dd:-4.08,sh:0.12,tr:25,wn:64.0},
+       S6:{ret:-2.65,dd:-3.80,sh:-1.82,tr:7,wn:42.9}}},
+  {id:'p1_sh000985', label:'P1·中证全指 MA60', color:'var(--b3)',run:'#60~#65',
+    m:{S1:{ret:-11.16,dd:-12.37,sh:-2.92,tr:26,wn:42.3},
+       S2:{ret:10.79,dd:-4.99,sh:2.02,tr:42,wn:69.0},
+       S3:{ret:-4.03,dd:-12.67,sh:-0.69,tr:36,wn:44.4},
+       S4:{ret:-6.04,dd:-11.03,sh:-1.47,tr:20,wn:40.0},
+       S5:{ret:0.22,dd:-4.08,sh:0.12,tr:25,wn:64.0},
+       S6:{ret:-2.65,dd:-3.80,sh:-1.82,tr:7,wn:42.9}}},
+  {id:'nak', label:'裸引擎 (无压仓/无闸)', color:'var(--b4)',run:'研究·反向',
+    m:{S1:{ret:2.07,dd:-17.86,sh:0.38,tr:57,wn:54.4},
+       S2:{ret:19.64,dd:-5.17,sh:2.61,tr:47,wn:74.5},
+       S3:{ret:-10.74,dd:-19.29,sh:-1.23,tr:59,wn:47.5},
+       S4:{ret:-12.15,dd:-21.83,sh:-2.03,tr:54,wn:51.9},
+       S5:{ret:-17.60,dd:-23.03,sh:-2.87,tr:65,wn:52.3},
+       S6:{ret:-12.89,dd:-15.31,sh:-4.65,tr:19,wn:26.3}}},
+  {id:'ctx_off', label:'关闸·压仓·ML打分 (A/B参照)', color:'var(--b5)',run:'研究·A/B',
+    m:{S1:{ret:0.37,dd:-17.03,sh:0.17,tr:52,wn:50.0},
+       S2:{ret:22.06,dd:-5.32,sh:2.91,tr:56,wn:76.8},
+       S3:{ret:-6.22,dd:-19.15,sh:-0.65,tr:56,wn:51.8},
+       S4:{ret:-4.77,dd:-17.67,sh:-0.74,tr:55,wn:54.5},
+       S5:{ret:-6.35,dd:-14.58,sh:-1.18,tr:57,wn:59.6},
+       S6:{ret:-3.76,dd:-5.95,sh:-2.16,tr:10,wn:30.0}}},
+  {id:'ctx_factors', label:'关闸·压仓·纯因子 (当前实盘)', color:'var(--b6)',run:'研究·已应用',
+    m:{S1:{ret:0.37,dd:-17.03,sh:0.17,tr:52,wn:50.0},
+       S2:{ret:1.29,dd:-7.36,sh:0.30,tr:40,wn:55.0},
+       S3:{ret:-6.67,dd:-14.19,sh:-0.98,tr:60,wn:55.0},
+       S4:{ret:28.37,dd:-5.06,sh:4.27,tr:75,wn:74.7},
+       S5:{ret:-7.69,dd:-11.95,sh:-1.50,tr:50,wn:36.0},
+       S6:{ret:-4.32,dd:-5.03,sh:-2.36,tr:25,wn:36.0}}},
+  {id:'ctx_ra', label:'关闸·压仓·regime-aware', color:'var(--b7)',run:'研究·验证完',
+    m:{S1:{ret:1.49,dd:-14.55,sh:0.33,tr:55,wn:58.2},
+       S2:{ret:9.88,dd:-7.30,sh:1.53,tr:40,wn:67.5},
+       S3:{ret:-6.53,dd:-15.29,sh:-0.75,tr:50,wn:48.0},
+       S4:{ret:10.60,dd:-11.48,sh:1.91,tr:55,wn:72.7},
+       S5:{ret:-2.30,dd:-5.48,sh:-0.43,tr:42,wn:40.5},
+       S6:{ret:-4.32,dd:-5.03,sh:-2.36,tr:25,wn:36.0}}},
+];
+const METRICS = {
+  excess:{name:'超额收益 pp',fmt:v=>(v>=0?'+':'')+v.toFixed(2),axis:v=>(v>0?'+':'')+v.toFixed(0)},
+  ret:{name:'策略收益 %',fmt:v=>(v>=0?'+':'')+v.toFixed(2),axis:v=>(v>0?'+':'')+v.toFixed(0)},
+  bench:{name:'基准 %',fmt:v=>(v>=0?'+':'')+v.toFixed(2),axis:v=>(v>0?'+':'')+v.toFixed(0)},
+  dd:{name:'最大回撤 %',fmt:v=>v.toFixed(2),axis:v=>v.toFixed(0)},
+  sharpe:{name:'夏普',fmt:v=>v.toFixed(2),axis:v=>v.toFixed(1)},
+};
+const MKT_TAG={up:['t-up','上涨市'],down:['t-dn','下跌市'],flat:['t-flat','震荡市']};
+
+function excess(b,seg){return +(BASE.find(x=>x.id===b).m[seg].ret - BENCH[seg]).toFixed(2);}
+function resolve(b,seg,metric){
+  if(metric==='bench')return BENCH[seg];
+  if(metric==='excess')return excess(b,seg);
+  const o=BASE.find(x=>x.id===b).m[seg];
+  return metric==='dd'?o.dd:metric==='sharpe'?o.sh:o.ret;
+}
+
+let curMetric='excess';
+let visible={nak:true,pre_p1:true,p1_sh000001:true,p1_sh000985:true,ctx_off:true,ctx_factors:true,ctx_ra:true};
+
+// ---- 汇总卡片 ----
+function median(a){const s=[...a].sort((x,y)=>x-y);const n=s.length;return n%2?s[(n-1)/2]:(s[n/2-1]+s[n/2])/2;}
+function buildCards(){
+  const host=document.getElementById('cards');host.innerHTML='';
+  BASE.forEach(b=>{
+    const ex=SEG.map(s=>excess(b.id,s.tag));
+    const sh=SEG.map(s=>b.m[s.tag].sh);
+    const dd=SEG.map(s=>b.m[s.tag].dd);
+    const beat=ex.filter(v=>v>0).length;
+    const avg=ex.reduce((a,c)=>a+c,0)/ex.length;
+    const med=median(ex);
+    const avgSh=sh.reduce((a,c)=>a+c,0)/sh.length;
+    const avgDd=dd.reduce((a,c)=>a+c,0)/dd.length;
+    const card=document.createElement('div');card.className='card';
+    card.innerHTML=`<div class="bl-name"><span class="sw" style="background:${b.color}"></span>${b.label} <span class="regime">${b.run}</span></div>
+      <div class="kpi"><span>平均超额</span><span class="v ${avg>=0?'pos':'neg'}">${(avg>=0?'+':'')+avg.toFixed(2)}pp</span></div>
+      <div class="kpi"><span>中位超额</span><span class="v ${med>=0?'pos':'neg'}">${(med>=0?'+':'')+med.toFixed(2)}pp</span></div>
+      <div class="kpi"><span>跑赢基准</span><span class="v">${beat}/6 段</span></div>
+      <div class="kpi"><span>平均夏普</span><span class="v">${avgSh.toFixed(2)}</span></div>
+      <div class="kpi"><span>平均回撤</span><span class="v neg">${avgDd.toFixed(2)}%</span></div>`;
+    host.appendChild(card);
+  });
+}
+
+// ---- 指标按钮 + 开关 ----
+function buildControls(){
+  const mb=document.getElementById('metricBtns');
+  Object.entries(METRICS).forEach(([k,v])=>{
+    const b=document.createElement('button');b.className='btn'+(k===curMetric?' active':'');
+    b.textContent=v.name;b.onclick=()=>{curMetric=k;document.querySelectorAll('#metricBtns .btn').forEach(x=>x.classList.remove('active'));b.classList.add('active');render();};
+    mb.appendChild(b);
+  });
+  const tg=document.getElementById('toggles');
+  BASE.forEach(b=>{
+    const l=document.createElement('label');
+    l.innerHTML=`<input type="checkbox" ${visible[b.id]?'checked':''}/> <span class="sw" style="background:${b.color}"></span>${b.label}`;
+    l.querySelector('input').onchange=e=>{visible[b.id]=e.target.checked;render();};
+    tg.appendChild(l);
+  });
+}
+
+// ---- SVG 柱状图 ----
+function render(){
+  const svg=document.getElementById('chart');
+  const W=920,H=440,PL=52,PR=16,PT=24,PB=70;
+  const plotW=W-PL-PR, plotH=H-PT-PB;
+  const vis=BASE.filter(b=>visible[b.id]);
+  const M=METRICS[curMetric];
+  let all=[];
+  SEG.forEach(s=>vis.forEach(b=>all.push(resolve(b.id,s.tag,curMetric))));
+  if(all.length===0){svg.innerHTML='';return;}
+  let lo=Math.min(0,...all), hi=Math.max(0,...all);
+  const pad=(hi-lo)*0.12||1; lo-=pad; hi+=pad;
+  const x0=PL, y0=PT, x1=W-PR, y1=PT+plotH;
+  const Y=v=>y1-(v-lo)/(hi-lo)*plotH;
+  let s='';
+  // 网格 + y 轴
+  const ticks=5;
+  for(let i=0;i<=ticks;i++){
+    const v=lo+(hi-lo)*i/ticks; const y=Y(v);
+    s+=`<line x1="${x0}" y1="${y}" x2="${x1}" y2="${y}" stroke="var(--line)" stroke-width="1"/>`;
+    s+=`<text x="${x0-8}" y="${y+4}" text-anchor="end" font-size="11" fill="var(--muted)">${M.axis(v)}</text>`;
+  }
+  // 零轴
+  if(lo<0&&hi>0){const yz=Y(0);s+=`<line x1="${x0}" y1="${yz}" x2="${x1}" y2="${yz}" stroke="var(--zero)" stroke-width="1.5"/>`;}
+  // 分组
+  const gw=plotW/SEG.length;
+  SEG.forEach((seg,i)=>{
+    const gx=x0+gw*i;
+    const n=vis.length;
+    const bw=Math.min(46,(gw*0.78)/n);
+    const gInner=gw*0.78;
+    const startX=gx+(gw-gInner)/2;
+    vis.forEach((b,j)=>{
+      const v=resolve(b.id,seg.tag,curMetric);
+      const bx=startX+j*bw;
+      const yv=Y(v); const yTop=Math.min(yv,Y(0)); const bh=Math.abs(yv-Y(0));
+      const col=getColor(b.color);
+      s+=`<rect class="bar" x="${bx+1}" y="${yTop}" width="${bw-2}" height="${Math.max(bh,0.5)}" rx="2" fill="${col}" opacity="0.92"
+           data-b="${b.label}" data-s="${seg.tag}" data-v="${M.fmt(v)}" data-n="${seg.win}"/>`;
+      if(bh>14){s+=`<text x="${bx+bw/2}" y="${yTop+(v>=0?12:-4)}" text-anchor="middle" font-size="9.5" fill="var(--bg)" font-weight="600">${M.fmt(v)}</text>`;}
+    });
+    // x 标签
+    const [tc,tl]=MKT_TAG[seg.mkt];
+    s+=`<text x="${gx+gw/2}" y="${y1+18}" text-anchor="middle" font-size="12.5" fill="var(--ink)" font-weight="600">${seg.tag}</text>`;
+    s+=`<text x="${gx+gw/2}" y="${y1+34}" text-anchor="middle" font-size="10" fill="var(--muted)">${seg.win}</text>`;
+    s+=`<text x="${gx+gw/2}" y="${y1+50}" text-anchor="middle" font-size="10"><tspan class="tag ${tc}">${tl}</tspan></text>`;
+  });
+  svg.innerHTML=s;
+  // tooltip
+  const tip=document.getElementById('tip');
+  svg.querySelectorAll('.bar').forEach(r=>{
+    r.addEventListener('mousemove',e=>{
+      const rect=svg.getBoundingClientRect();
+      tip.style.opacity=1;
+      tip.style.left=(e.clientX-rect.left+12)+'px';
+      tip.style.top=(e.clientY-rect.top-10)+'px';
+      tip.innerHTML=`<b>${r.dataset.b}</b> · ${r.dataset.s}<br>${r.dataset.n}<br>${M.name}: ${r.dataset.v}`;
+    });
+    r.addEventListener('mouseleave',()=>tip.style.opacity=0);
+  });
+  document.getElementById('chartNote').textContent=
+    `当前指标：${M.name}。负值在零轴下方。可点上方按钮切换指标、勾选右侧开关增减基线。`;
+}
+function getColor(v){return getComputedStyle(document.documentElement).getPropertyValue(v.replace('var(','').replace(')','')).trim();}
+
+// ---- 关键洞察 ----
+function buildInsight(){
+  const avg=a=>a.reduce((x,c)=>x+c,0)/a.length;
+  const ex=id=>SEG.map(s=>excess(id,s.tag));
+  const eNak=avg(ex('nak')), e985=avg(ex('p1_sh000985')), eCtx=avg(ex('ctx_off')), eFac=avg(ex('ctx_factors')), eRA=avg(ex('ctx_ra'));
+  const cap=(eCtx-eNak).toFixed(2);          // 压仓贡献（裸→关闸压仓）
+  const gate=(e985-eCtx).toFixed(2);         // 四项闸贡献（关闸压仓→P1）
+  const mlNet=(eCtx-eFac).toFixed(2);        // ML净贡献（开ML-关ML），应为负
+  const s2ml=(excess('ctx_off','S2')-excess('ctx_factors','S2')).toFixed(2);
+  const s4ml=(excess('ctx_off','S4')-excess('ctx_factors','S4')).toFixed(2);
+  const s4f=BASE.find(x=>x.id==='ctx_factors').m.S4;
+  document.getElementById('insight').innerHTML=`
+    <b>① 压仓是精华、四项闸是拖累：</b>裸引擎 <span class="neg">${eNak.toFixed(2)}pp</span> → 加压仓（关闸·压仓）<span class="${eCtx>=0?'pos':'neg'}">${eCtx.toFixed(2)}pp</span>（压仓贡献 <span class="pos">+${cap}pp</span>）→ 加四项闸（P1·中证）<span class="neg">${e985.toFixed(2)}pp</span>（四项闸拖累 <span class="neg">${gate}pp</span>）。<br>
+    <b>② 已执行关闸 + 关ML（2026-11-13）：</b>当前实盘 = 关闸·压仓·纯因子（ctx_factors, <span class="${eFac>=0?'pos':'neg'}">${eFac.toFixed(2)}pp</span>），是已知最优；比 P1·中证（${e985.toFixed(2)}pp）改善 <span class="pos">+${(eFac-e985).toFixed(2)}pp</span>，比只关闸未关ML（ctx_off, ${eCtx.toFixed(2)}pp）再改善 <span class="pos">+${(eFac-eCtx).toFixed(2)}pp</span>。<br>
+    <b>③ ML 打分离线又拖累：</b>同窗口 A/B（关闸·压仓，仅差打分引擎）开 ML=<span class="neg">${eCtx.toFixed(2)}pp</span> vs 关 ML 纯因子=<span class="${eFac>=0?'pos':'neg'}">${eFac.toFixed(2)}pp</span>，ML 净贡献 <span class="neg">${mlNet}pp</span>。ML 在趋势市 S2 帮 <span class="pos">+${s2ml}pp</span>，却在震荡市 S4 砸 <span class="neg">${s4ml}pp</span>（纯因子 S4 大赚 +${s4f.ret.toFixed(2)}%/夏普 ${s4f.sh.toFixed(2)}——ML 在非趋势市过拟合噪声。<br>
+    <b>④ regime-aware 验证翻车（不进实盘）：</b>关闸·压仓·regime-aware 实测 <span class="neg">${eRA.toFixed(2)}pp</span>，比纯因子 <span class="${eFac>=0?'pos':'neg'}">${eFac.toFixed(2)}pp</span> 还差 <span class="neg">${(eRA-eFac).toFixed(2)}pp</span>，<b>未实现「趋势市吃 ML + 震荡市吃因子」的兼得</b>。根因：路由按「价格趋势(MA20/MA60 + 低波动)」切 ML/因子，而 ML 真正有效的开关是「ML-IC(模型置信度)」——二者不相关甚至负相关。复盘：S2(ML-IC=0.351,ML 大胜)被误判非趋势→用因子丢了收益；S4(ML-IC=0.060,ML 大败)被误判趋势→用 ML 把纯因子 +${s4f.ret.toFixed(2)}% 拖到 +2.81%。<b>当前最优仍是关闸·压仓·纯因子(${eFac.toFixed(2)}pp) = 实盘现配置。</b>真方向 = IC 门控 ML 叠加（因子为底、仅当滚动 ML-IC 高时切 ML，事后 oracle≈+2.0pp），这才是值得做的第三条路 v2。#47 的 +19.75pp 仍属不可外推的历史参考。`;
+}
+
+// ---- 明细表 ----
+function buildTable(){
+  const t=document.getElementById('tbl');
+  let head='<thead><tr><th class="seg" rowspan="2">指标 ＼ 段</th>';
+  BASE.forEach(b=>{head+=`<th colspan="6" style="color:${getColor(b.color)};text-align:center">${b.label} <span class="regime">${b.run}</span></th>`;});
+  head+='</tr><tr>';
+  BASE.forEach(b=>{SEG.forEach(seg=>{const[tc,tl]=MKT_TAG[seg.mkt];head+=`<td class="seg" style="text-align:center"><span class="tag ${tc}">${seg.tag}·${tl}</span></td>`;});});
+  head+='</tr></thead><tbody>';
+  const rows=[
+    {key:'ret',name:'策略收益 %'},
+    {key:'bench',name:'基准 %'},
+    {key:'excess',name:'超额 pp'},
+    {key:'dd',name:'最大回撤 %'},
+    {key:'sharpe',name:'夏普'},
+    {key:'tr',name:'笔数'},
+    {key:'wn',name:'胜率 %'},
+  ];
+  let body='';
+  rows.forEach(r=>{
+    body+=`<tr><td class="seg" style="text-align:left;color:var(--muted)">${r.name}</td>`;
+    BASE.forEach(b=>{
+      SEG.forEach(seg=>{
+        let v;
+        if(r.key==='bench')v=BENCH[seg.tag];
+        else if(r.key==='excess')v=excess(b.id,seg.tag);
+        else v=b.m[seg.tag][r.key];
+        let cls='';
+        if(r.key==='excess'||r.key==='ret')cls=v>=0?'pos':'neg';
+        else if(r.key==='dd')cls='neg';
+        let txt;
+        if(r.key==='excess'||r.key==='ret'||r.key==='bench')txt=(v>=0?'+':'')+v.toFixed(2);
+        else if(r.key==='sharpe')txt=v.toFixed(2);
+        else if(r.key==='wn')txt=v.toFixed(1);
+        else txt=v;
+        body+=`<td class="${cls}">${txt}</td>`;
+      });
+    });
+    body+='</tr>';
+  });
+  t.innerHTML=head+body+'</tbody>';
+}
+
+buildCards();buildControls();buildInsight();buildTable();render();
+</script>
+</body>
+</html>

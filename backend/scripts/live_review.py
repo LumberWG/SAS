@@ -195,9 +195,18 @@ def reconcile(
         return {"error": "区间内净值快照不足 2 天（结算任务未跑或账户刚重置）",
                 "snap_days": snap_days}
 
+    # 基准池也要按实盘 scope.is_st_name 剔 ST/退市：回测流水线已统一口径，
+    # 复盘脚本若继续用「不过滤」的池子，基准收益就会和回测/实盘不可比。
+    try:
+        from app.data.service import get_stock_pool  # 延迟导入，脚本可独立运行
+        _snapshot = get_stock_pool()
+        names = dict(zip(_snapshot["code"], _snapshot["name"]))
+    except Exception:  # noqa: BLE001 - 名称快照不可用时退化为原始池，但不改变其他逻辑
+        names = None
+
     per_pool: dict[int, dict] = {}
     for pool in pools:
-        universe = _build_universe_by_date(raw, dates, pool, None)
+        universe = _build_universe_by_date(raw, dates, pool, None, names=names)
         daily = bench_daily_returns(dates, universe, close_index)
         rows: list[dict] = []
         missing_total = 0

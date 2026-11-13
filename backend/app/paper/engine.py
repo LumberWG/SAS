@@ -33,6 +33,7 @@ import asyncio
 import json
 import logging
 import time
+import types
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
@@ -40,7 +41,8 @@ import pandas as pd
 
 from app.analysis.regime import detect_regime
 from app.analysis.policy_floor import detect_policy_floor, circuit_breaker_state
-from app.analysis.entry_guard import should_block_buy
+from app.analysis.entry_guard import should_block_buy, board_regime_for_code
+from app.analysis.market_risk import get_unified_market_risk
 from app.config import get_settings
 from app.board_rules import (
     legacy_limit_enabled, limit_up_ratio, lot_rule,
@@ -48,6 +50,11 @@ from app.board_rules import (
 )
 from app.data.cache import db
 from app.data.service import get_kline_cached
+from app.risk.stops import resolve_stop_price  # 止损口径与回测共用，禁止再加大盘门控
+from app.risk.context_gates import (  # P1 四项风险闸：与回测物理共用同一份决策函数
+    ContextGateConfig, REASON_LABELS, audit_buy_candidates,
+)
+from app.risk.context_store import get_context_store
 
 logger = logging.getLogger("sas.paper")
 
@@ -222,6 +229,8 @@ class PaperEngine:
         self._weak_cache: tuple[str, bool] = ("", False)
         #: (日期, 动态机制层结果)：与 _weak_cache 同口径，按自然日缓存，避免重复读 parquet。
         self._regime_dyn_cache: tuple[str, dict] = ("", {})
+        #: (日期, 统一宏观风险结果)：按自然日缓存，避免每个 tick 重算（含外围取数）。
+        self._unified_risk_cache: tuple[str, dict] = ("", {})
         #: 硬性回撤熔断状态：峰值净值与是否触发，跨 tick 保留；落库后也跨重启保留。
         self._cb_peak: float | None = None
         self._cb_tripped: bool = False
@@ -238,6 +247,18 @@ class PaperEngine:
         if account is None:
             account = db.init_paper_account(self.settings.paper_initial_capital)
             logger.info("模拟账户初始化：%.0f 元", self.settings.paper_initial_capital)
+        # 生命周期内只做一次的现金对账：账户现金若被误写成初始资金，择时 /
+        # 熔断 / 下单额度都会跟着错（不只是页面显示）。放在启动首查而非每次
+        # tick，避开撮合过程中「已记成交、尚未写回现金」的中间态。
+        if not getattr(self, "_cash_audited", False):
+            self._cash_audited = True
+            audit = db.audit_paper_cash(repair=True)
+            if audit.get("repaired"):
+                logger.warning(
+                    "启动时账户现金与成交台账不一致，已自动修正 %.2f → %.2f（%d 笔成交）",
+                    audit["stored"], audit["replayed"], audit["trades"],
+                )
+                account = db.get_paper_account() or account
         # 批次模型兼容：把尚无批次的现有持仓补建为一个批次（幂等）
         db.ensure_lots_migrated(datetime.now().strftime("%Y-%m-%d"))
         return account
@@ -327,6 +348,48 @@ class PaperEngine:
         _pool_cache = (today, top_n, codes)
         return codes
 
+    # ------------------------------------------------------------------
+    # 短线时间止损 / 板块趋势 / 统一宏观风险 辅助
+    # ------------------------------------------------------------------
+    def _first_buy_date(self, code: str) -> str | None:
+        """首个建仓批次的 buy_date（MIN(lots.buy_date)），用于短线时间止损计时。
+
+        不用 ``paper_positions.buy_date``（它是 MAX，做T加仓后会后移导致计时重置）。
+        无批次时返回 ``None``。
+        """
+        try:
+            lots = db.list_paper_lots(code)
+        except Exception:  # noqa: BLE001
+            return None
+        if not lots:
+            return None
+        dates = [str(l["buy_date"]) for l in lots if l.get("buy_date")]
+        return min(dates) if dates else None
+
+    @staticmethod
+    def _held_days(first_buy_date: str, today: str) -> int:
+        """自首个建仓日起算的持有天数（含当日）。"""
+        try:
+            d0 = datetime.strptime(first_buy_date, "%Y-%m-%d")
+            d1 = datetime.strptime(today, "%Y-%m-%d")
+            return (d1 - d0).days + 1
+        except (ValueError, TypeError):
+            return 0
+
+    def _unified_risk(self) -> dict:
+        """统一宏观风险（Layer2）按自然日缓存，避免每个 tick 重算（含外围 akshare 取数）。"""
+        today = datetime.now().strftime("%Y-%m-%d")
+        cached_day, cached_val = self._unified_risk_cache
+        if cached_day == today and cached_val:
+            return cached_val
+        try:
+            val = get_unified_market_risk()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("统一宏观风险计算失败（本轮不压仓）: %s", exc)
+            val = {"tier": "calm", "cap": 0.0}
+        self._unified_risk_cache = (today, val)
+        return val
+
     def _buy_allowed(self, code: str, name: str) -> tuple[bool, str]:
         """下单前的准入检查：板块范围 / 大市值 / 名称可信度 / 成交额 TopN 池。
 
@@ -356,6 +419,14 @@ class PaperEngine:
         if pool is not None and code not in pool:
             top_n = int(getattr(self.settings, "paper_pool_top_n", 0) or 0)
             return False, f"不在当日成交额Top{top_n}池（与回测口径对齐）"
+        # 板块趋势闸门（#191，默认关闭=零风险）：候选所属板块指数处于下降通道时拒绝买入。
+        if bool(getattr(self.settings, "paper_board_trend_gate", False)):
+            try:
+                br = board_regime_for_code(code)
+                if br.get("available") and br.get("state") == "downtrend":
+                    return False, "板块处于下降通道（板块趋势闸门）"
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("板块趋势判断失败（放行）: %s", exc)
         return True, ""
 
     def entry_gate(
@@ -728,6 +799,7 @@ class PaperEngine:
         """
         today = datetime.now().strftime("%Y-%m-%d")
         n = int(getattr(self.settings, "paper_regime_ma", 0) or 0)
+        from app.analysis.entry_guard import _regime_index_name
         cached = self._weak_cache[0] == today
         dyn_on = bool(getattr(self.settings, "paper_dynamic_exposure", False))
         return {
@@ -741,6 +813,8 @@ class PaperEngine:
             # 弱市保留仓位比例：0=全暂停买入；>0=只压总仓位上限（页面按此分流文案）
             "weak_exposure": float(getattr(self.settings, "paper_weak_exposure", 0.0) or 0.0),
             "day": today,
+            # 弱市判定所用宽基指数名（paper_regime_index 指定；前端展示用，避免写死「上证」）
+            "index_name": _regime_index_name(),
             # 动态机制层（paper_dynamic_exposure）：暴露当日状态/上限/指标，便于前端展示
             "dynamic": bool(getattr(self.settings, "paper_dynamic_exposure", False)),
             "regime_state": (self._regime_dyn_cache[1].get("state")
@@ -1206,6 +1280,13 @@ class PaperEngine:
         elif market_weak and weak_exposure > 0:
             # 弱市降仓：总仓位上限压到 paper_weak_exposure，与回测 day_exposure 同口径
             effective_exposure = min(effective_exposure, weak_exposure)
+        # Layer2 统一宏观风险四档 cap（#191 / 原 #191）：weak/shock 真正压仓，crisis 已被
+        # should_block_buy 全停；此前 unified_risk_cap_* 只在展示层算、从未进下单路径。
+        # 受开关 paper_unified_risk_cap_enabled 控制（默认关 = 零风险，保持既有行为）。
+        if bool(getattr(self.settings, "paper_unified_risk_cap_enabled", False)):
+            _ur = self._unified_risk()
+            if _ur["tier"] in ("weak", "shock", "crisis") and float(_ur.get("cap") or 0) > 0:
+                effective_exposure = min(effective_exposure, float(_ur["cap"]))
         exposure_cap = total_asset * effective_exposure
 
         # ---- 轮动替换：不用满仓，有更明显的强票就换；一次可换多只 ----
@@ -1399,6 +1480,28 @@ class PaperEngine:
 
         candidates.sort(key=lambda c: c[0], reverse=True)
 
+        # P1 四项上下文风险闸：与回测 _simulate 调用同一份
+        # app.risk.context_gates.audit_buy_candidates。位置与回测一致：
+        # 队列 topM / 逐票准入之后、评分分档与名额截断之前；只传代码 + as_of + 持仓代码。
+        # 数据来自按 as-of 截断的本地快照，不调实时接口（否则回测没历史数据会漂移）。
+        _ctx_cfg = ContextGateConfig.from_settings(self.settings)
+        if _ctx_cfg.enabled and candidates:
+            _ctx_rejected = audit_buy_candidates(
+                [rec.code for _, rec, _ in candidates],
+                as_of=today,
+                held_codes=list(positions.keys()),
+                cfg=_ctx_cfg,
+                store=get_context_store(),
+            )
+            if _ctx_rejected:
+                for _score, _rec, _price in candidates:
+                    _why = _ctx_rejected.get(_rec.code)
+                    if _why:
+                        results.append(TradeResult(
+                            _rec.code, getattr(_rec, "name", ""), "skip", 0,
+                            _price, 0.0, 0.0, REASON_LABELS.get(_why, _why)))
+                candidates = [c for c in candidates if c[1].code not in _ctx_rejected]
+
         # 评分分档：低于半额分只记录；其余按「评分 × 档位系数」加权
         eligible: list[tuple[float, object, float, float]] = []
         for score, rec, price in candidates:
@@ -1505,6 +1608,11 @@ class PaperEngine:
                 rec.code, name, "buy", price, shares, amount, fee,
                 getattr(rec, "reason", "买入信号"), today,
             )
+            # 六阶段生命周期：入场成交（#191）
+            db.insert_lifecycle_event(
+                rec.code, name, 4, "入场",
+                "filled", detail=getattr(rec, "reason", "买入信号"),
+            )
             positions[rec.code] = {"code": rec.code, "name": name}
             buys_this_tick += 1
             results.append(TradeResult(
@@ -1546,10 +1654,24 @@ class PaperEngine:
                 (w["name"] for w in db.list_watchlist() if w["code"] == code), code
             )
 
+        # 无行情兜底出口（仅卖出）：停牌 / 退市 / 数据源失效时，``_latest_price`` 返回
+        # None，所有自动卖出路径都会静默 ``continue``，连人工清仓也做不了就会形成
+        # 「永远卖不掉」的僵尸仓。按成本价成交——``total_asset`` 取价失败时本来就按
+        # 成本价计市值，两者同一口径，不会凭空放大净值；流水 reason 明确标注兜底。
+        # 买入不兜底：没有真实价格绝不允许凭空建仓。
+        fallback_price = False
         if price is None or price <= 0:
             price = await self._latest_price(code)
+        if (price is None or price <= 0) and side == "sell":
+            no_quote_pos = db.get_paper_position(code)
+            if no_quote_pos is not None:
+                last_known = float(no_quote_pos.get("cost_price") or 0.0)
+                price = last_known if last_known > 0 else None
+                fallback_price = bool(price and price > 0)
         if price is None or price <= 0:
             return TradeResult(code, name, "skip", 0, 0.0, 0.0, 0.0, "取价失败")
+        if fallback_price:
+            reason = f"{reason}（无行情，按成本价 {price:.2f} 兜底清仓）"
 
         account = db.get_paper_account()
         cash = float(account["cash"])
@@ -1584,6 +1706,37 @@ class PaperEngine:
         # ---- 买入 ----
         if db.get_paper_position(code) is not None:
             return TradeResult(code, name, "skip", 0, price, 0.0, 0.0, "已持仓，暂不支持加仓")
+        # 手动单护栏（#126）：与自动撮合统一，经 crisis 硬拦 / 准入 / 涨停禁买 / 名额，
+        # 不再绕过全部护栏直接落库（此前 place_order 直调 add_paper_lot 属明确越权）。
+        blocked, _guard = should_block_buy()
+        if blocked:
+            return TradeResult(code, name, "skip", 0, price, 0.0, 0.0,
+                               "入场护栏：统一宏观风险 crisis 档，暂停新开仓")
+        allowed, why = self._buy_allowed(code, name)
+        if not allowed:
+            return TradeResult(code, name, "skip", 0, price, 0.0, 0.0, why)
+        max_positions = int(getattr(self.settings, "paper_max_positions", 10) or 10)
+        if len(db.list_paper_positions()) >= max_positions:
+            return TradeResult(code, name, "skip", 0, price, 0.0, 0.0,
+                               f"持仓已满({max_positions}只)")
+        ok, why2 = self.entry_price_ok(
+            types.SimpleNamespace(code=code, name=name, entry_armed=False), price, None)
+        if not ok:
+            return TradeResult(code, name, "skip", 0, price, 0.0, 0.0, why2)
+        # P1：手动买入也必须过同一份上下文风险闸，不能绕开自动链路的护栏（#126 的教训）。
+        _ctx_cfg = ContextGateConfig.from_settings(self.settings)
+        if _ctx_cfg.enabled:
+            _ctx_rejected = audit_buy_candidates(
+                [code],
+                as_of=today,
+                held_codes=[p["code"] for p in db.list_paper_positions()],
+                cfg=_ctx_cfg,
+                store=get_context_store(),
+            )
+            _why = _ctx_rejected.get(code)
+            if _why:
+                return TradeResult(code, name, "skip", 0, price, 0.0, 0.0,
+                                   REASON_LABELS.get(_why, _why))
         mq = _min_qty(code)
         if amount and amount > 0:
             qty = round_buy_qty(code, amount / price)
@@ -1604,16 +1757,25 @@ class PaperEngine:
         stop_distance = self._stop_distance_for_buy(code, regime_state)
         stop_price = round(cost_price * (1 - stop_distance), 3)
         total_asset = await self.total_asset()
+        # 手动单仓位上限同样纳入统一宏观风险四档 cap（#191 / 原 #191），与自动撮合一致；
+        # 受开关 paper_unified_risk_cap_enabled 控制（默认关 = 零风险，保持既有行为）。
+        manual_exposure = float(getattr(self.settings, "paper_max_total_exposure", 0.8))
+        if bool(getattr(self.settings, "paper_unified_risk_cap_enabled", False)):
+            _ur = self._unified_risk()
+            if _ur["tier"] in ("weak", "shock", "crisis") and float(_ur.get("cap") or 0) > 0:
+                manual_exposure = min(manual_exposure, float(_ur["cap"]))
         prov = self._build_provenance(
             trigger="manual", reason=reason, score=0.0, detail="",
             stop_distance=stop_distance, stop_price=stop_price,
             regime_state=regime_state,
-            effective_exposure=float(getattr(self.settings, "paper_max_total_exposure", 0.8)),
-            exposure_cap=float(getattr(self.settings, "paper_max_total_exposure", 0.8)) * float(total_asset),
+            effective_exposure=manual_exposure,
+            exposure_cap=manual_exposure * float(total_asset),
             today=today,
         )
         db.add_paper_lot(code, name, qty, cost_price, today, reason, today=today, provenance=prov)
         db.insert_paper_trade(code, name, "buy", price, qty, amt, fee, reason, today)
+        # 六阶段生命周期：入场成交（#191，手动）
+        db.insert_lifecycle_event(code, name, 4, "入场", "filled", detail=reason)
         db.update_paper_cash(round(cash, 2))
         # 持仓纳入自选：保证后续卖出建议能覆盖到这只股票
         db.add_watch(code, name, note="持仓自动加入", source="auto")
@@ -1624,6 +1786,51 @@ class PaperEngine:
     # ------------------------------------------------------------------
     # 止盈止损检查（每日收盘）
     # ------------------------------------------------------------------
+    async def audit_exit_paths(
+        self, prices: dict[str, float] | None = None
+    ) -> dict:
+        """只读自检：逐只持仓列出所有卖出出口，找出「永远卖不掉」的僵尸仓。
+
+        与 ``scripts/check_exit_paths.py`` 共用 ``app.paper.exit_audit.audit_positions``，
+        保证接口与离线巡检同一口径。不触发任何成交、不改策略参数。
+        """
+        from app.data.scope import _allowed_board_prefixes
+        from app.paper.exit_audit import audit_positions
+
+        self.ensure_account()  # 幂等：按当日重算 T+1 可卖批次
+        positions = db.list_paper_positions()
+        today = datetime.now().strftime("%Y-%m-%d")
+        px: dict[str, float | None] = {}
+        for p in positions:
+            code = str(p["code"])
+            px[code.zfill(6)] = await self._latest_price(code, prices)
+        lots_by_code: dict[str, list[dict]] = {}
+        for lot in db.list_paper_lots():
+            lots_by_code.setdefault(str(lot["code"]).zfill(6), []).append(lot)
+        watch_codes = {str(w["code"]).zfill(6) for w in db.list_watchlist()}
+        mode = db.get_state("paper_trade_mode")
+        auto_trade = (
+            bool(self.settings.paper_auto_trade) if mode is None else mode == "auto"
+        )
+        cfg = {
+            "auto_trade": auto_trade,
+            "eod_trim": bool(getattr(self.settings, "paper_eod_trim_enabled", False)),
+            "rotation": bool(getattr(self.settings, "paper_rotation_enabled", False)),
+            "liquidate_offboard": bool(getattr(self.settings, "paper_liquidate_offboard", False)),
+            "max_hold_days": int(getattr(self.settings, "paper_max_hold_days", 0) or 0),
+            "stop_loss": float(getattr(self.settings, "paper_stop_loss", 0) or 0),
+            "take_profit": float(getattr(self.settings, "paper_take_profit", 0) or 0),
+        }
+        return audit_positions(
+            positions=positions,
+            lots_by_code=lots_by_code,
+            watch_codes=watch_codes,
+            prices=px,
+            today=today,
+            board_prefixes=_allowed_board_prefixes(),
+            cfg=cfg,
+        )
+
     async def check_stop_loss_target(
         self, prices: dict[str, float] | None = None
     ) -> list[TradeResult]:
@@ -1653,13 +1860,16 @@ class PaperEngine:
             if price > peak:
                 peak = price
                 db.update_paper_peak(pos["code"], peak)
-            # 建仓时定死的止损线（含 ATR 放宽）；老持仓没有该字段时按当前固定止损现算
-            stop_price = float(pos.get("stop_price") or 0) or cost * (1 - self._base_stop_ratio())
-            # 盈利保护：浮盈达 breakeven 上移止损到成本；达 trail_arm 后跟踪高点回撤
-            if self.settings.paper_breakeven_pct > 0 and peak >= cost * (1 + self.settings.paper_breakeven_pct):
-                stop_price = max(stop_price, cost)
-            if self.settings.paper_trail_pct > 0 and peak >= cost * (1 + self.settings.paper_trail_arm):
-                stop_price = max(stop_price, peak * (1 - self.settings.paper_trail_pct))
+            # 建仓时定死的止损线（含 ATR 放宽 / 机制层收紧）；老持仓按固定止损现算。
+            # 与回测共用 app.risk.stops.resolve_stop_price：两侧同一套「固定 → 保本 →
+            # 移动」取紧逻辑，**不接任何大盘强弱门控**（回测曾因门控漏掉 134 天止损）。
+            base_stop = float(pos.get("stop_price") or 0) or cost * (1 - self._base_stop_ratio())
+            stop_price, _ = resolve_stop_price(
+                cost, base_stop, peak,
+                breakeven_pct=float(self.settings.paper_breakeven_pct or 0.0),
+                trail_pct=float(self.settings.paper_trail_pct or 0.0),
+                trail_arm=float(self.settings.paper_trail_arm or 0.0),
+            )
             reason = None
             if price <= stop_price:
                 reason = (
@@ -1668,6 +1878,8 @@ class PaperEngine:
                 )
             elif change >= self._take_profit_ratio():
                 reason = f"止盈触发（成本{cost:.2f}，现价{price:.2f}，{change:+.1%}）"
+            elif (ts_reason := self._time_stop_hit(pos, today)) is not None:
+                reason = ts_reason
             if reason is None:
                 continue
             # 严格 T+1：只卖可卖批次，今仓留到次日（由批次模型保证）
@@ -1689,6 +1901,24 @@ class PaperEngine:
             db.update_paper_cash(round(cash, 2))
             logger.info("止盈止损触发 %d 笔", len(results))
         return results
+
+    def _time_stop_hit(self, pos: dict, today: str) -> str | None:
+        """短线时间止损（#191）：持仓满 ``paper_max_hold_days`` 个自然日仍未离场则离场。
+
+        返回原因字符串（触发）或 ``None``（未触发/未开启）。计时从首个建仓批次
+        `buy_date` 起算（非 ``paper_positions.buy_date`` 的 MAX，避免加仓重置），
+        由调用方已有的 T+1 闸门保证今仓次日才真正可卖。
+        """
+        max_hold = int(getattr(self.settings, "paper_max_hold_days", 0) or 0)
+        if max_hold <= 0:
+            return None
+        first_bd = self._first_buy_date(str(pos["code"]))
+        if not first_bd:
+            return None
+        held = self._held_days(first_bd, today)
+        if held >= max_hold:
+            return f"时间止损(持有{held}日，上限{max_hold}日)"
+        return None
 
     async def liquidate_offboard_positions(
         self, prices: dict[str, float] | None = None

@@ -18,6 +18,9 @@
  10. shadow_eval       每交易日 16:45 影子账户：冻结参数重跑「起点 ~ 今天」，
                        只记录快照（data/logs/shadow_<tag>.json），不交易；
                        需配置 shadow_start 才启用
+ 11. market_env_refresh 每交易日 05:30 采集隔夜美股收盘 + 盘后政策快讯，
+                       生成 market_env 日频快照（影子研究：**只写库、不进决策**；
+                       接入决策前必须回测↔实盘 1:1 同步并重建前向验证基线）
 
 模拟交易联动（全链条）: 选股命中/开盘分析/盘中分析产生的买卖建议都进入
 实时队列（LiveTrader），由 paper_tick 在 ≤5 秒内按实时价成交；
@@ -153,6 +156,16 @@ class MarketScheduler:
             id="bottom_reversal_refresh", replace_existing=True,
         )
 
+        # 9) 凌晨隔夜市场环境快照（交易日 05:30，影子研究专用，只写库不进决策）
+        #    美股 D 日收盘在北京时间 D+1 凌晨 04:00~05:00，国内盘后政策也落在夜间，
+        #    这是 09:30 开盘前唯一能同时拿到两类隔夜信息的时点。
+        self.scheduler.add_job(
+            self.market_env_refresh,
+            CronTrigger(day_of_week="mon-fri", hour=5, minute=30, timezone=tz),
+            id="market_env_refresh", replace_existing=True,
+            max_instances=1, coalesce=True,
+        )
+
         # 10) 影子账户（交易日 16:45，冻结参数逐日重跑；未配置起点则不注册）
         if self.settings.shadow_start:
             self.scheduler.add_job(
@@ -166,7 +179,7 @@ class MarketScheduler:
         # 开机后台预热K线（低并发，不阻塞服务就绪；只补落后的，不整市场重跑）
         asyncio.create_task(self.warmup_klines(boot=True))
         logger.info(
-            "调度器已启动（快照60s / 异动5min / 开盘9:20 / 盘中%dm / "
+            "调度器已启动（凌晨环境05:30 / 快照60s / 异动5min / 开盘9:20 / 盘中%dm / "
             "实时撮合%ds / 收盘选股15:30 / 盘后15:35 / 结算15:40 / K线预热16:00%s）",
             self.settings.intraday_analysis_interval,
             self.settings.paper_tick_interval,
@@ -182,6 +195,24 @@ class MarketScheduler:
     # ------------------------------------------------------------------
     # 任务实现
     # ------------------------------------------------------------------
+    async def market_env_refresh(self) -> dict:
+        """05:30 生成隔夜市场环境快照（影子研究：只写 market_env，不进任何决策）。
+
+        这里刻意不读快照、不下结论给交易链路用：一旦实盘消费了凌晨判断而回测
+        没有对应历史，就违反「回测 ↔ 实盘严格 1:1」红线。当前只做采集与留档，
+        价值评估走 scripts/eval_market_env.py 离线跑。采集失败只记日志。
+        """
+        from app.market.env_snapshot import build_daily
+        try:
+            rec = await asyncio.wait_for(asyncio.to_thread(build_daily), timeout=90)
+            logger.info("凌晨环境快照（05:30）：%s %s 分=%s 政策条=%d",
+                        rec["trade_date"], rec["env_label"],
+                        rec["env_score"], rec["policy_count"])
+            return rec
+        except Exception as exc:  # noqa: BLE001 - 采集失败绝不影响交易
+            logger.warning("凌晨环境快照采集失败（不影响交易）: %s", exc)
+            return {"error": str(exc)}
+
     async def refresh_snapshot(self) -> None:
         """盘中刷新实时快照（非交易时段跳过）。"""
         if not is_trading_hours():
@@ -349,39 +380,20 @@ class MarketScheduler:
     # 自动加自选（收盘自动选股后：评分 Top N 加入自选股）
     # ------------------------------------------------------------------
     async def auto_watch_top_hits(self, hits: list[dict]) -> dict:
-        """将评分 Top N 的扫描命中自动加入自选股（跳过已在自选的）。"""
+        """收盘自动选股后自动加自选：统一委托 scanner 的 canonical 逻辑（评分排序 + 容量上限
+        + 淘汰），与盘中扫描命中加自选共用一套口径（#191），消除「双容量 / 不淘汰」冲突。
+
+        总开关由 ``auto_watch_enabled`` 控制；具体保留数量与淘汰由 ``scan_auto_watch_limit``
+        / ``watch_auto_max`` 决定（不再使用独立的 ``auto_watch_top_n``）。
+        """
         if not self.settings.auto_watch_enabled or not hits:
             return {"added": 0}
-        top_n = self.settings.auto_watch_top_n
-        scored = [
-            (h.get("extra", {}).get("score", 0), h) for h in hits
-        ]
-        scored.sort(key=lambda x: x[0], reverse=True)
-
-        from app.data.scope import is_tradable
-
-        existing = {item["code"] for item in db.list_watchlist()}
-        added = []
-        for _score, hit in scored[:top_n]:
-            code = hit["code"]
-            name = hit.get("name", "")
-            if code in existing:
-                continue
-            # 与选股中心同一范围口径：科创板/北交所/ST/巨无霸不进自选
-            # （写进去的票买不了，只会在建议与交易池面板里长期占位）
-            if not is_tradable(code, name)[0]:
-                continue
-            db.add_watch(code, name, note="自动加入(收盘选股)", source="auto")
-            existing.add(code)
-            added.append(f"{code} {hit.get('name', '')}")
-
+        from app.screener.scanner import scanner
+        added = scanner._auto_watch_hits(hits)
         if added:
-            logger.info("自动加自选 %d 只: %s", len(added), ", ".join(added))
-            await notifier.notify(
-                f"自动加入自选 {len(added)} 只",
-                "\n".join(added),
-            )
-        return {"added": len(added)}
+            logger.info("自动加自选（统一口径）%d 只", added)
+            await notifier.notify(f"自动加入自选 {added} 只", "收盘选股自动加入（统一口径）")
+        return {"added": added}
 
     # ------------------------------------------------------------------
     # 开盘前分析（9:20）：自选股建议 + 读取昨日关注
@@ -468,6 +480,14 @@ class MarketScheduler:
         try:
             payload = await asyncio.to_thread(br_scan.write_cache)
             logger.info("创业板底部反转候选刷新完成：%d 只", payload["count"])
+            # 自动接入交易链（#191）：默认关闭；开启后把候选写入 signals + 自选股，
+            # 但不自动送队列（不主动买卖）。
+            if bool(get_settings().bottom_reversal_autobridge):
+                try:
+                    res = br_scan.bridge_to_trade(top_n=10, watch=True, queue=False)
+                    logger.info("底部反转候选自动入链：%s", res)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("底部反转候选自动入链失败：%s", exc)
             return payload
         except Exception as exc:  # noqa: BLE001
             logger.exception("创业板底部反转候选刷新失败")
@@ -488,6 +508,11 @@ class MarketScheduler:
         )
         if added:
             logger.info("持仓自动加入自选 %d 只", added)
+            for p in positions:
+                db.insert_lifecycle_event(
+                    p["code"], p.get("name") or p["code"], 2, "入自选",
+                    "watch_in", detail="持仓自动加入",
+                )
         return added
 
     @staticmethod

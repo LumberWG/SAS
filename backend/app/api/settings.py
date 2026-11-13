@@ -24,6 +24,7 @@ from app.param_specs import (
     SECRET_KEYS,
     mask_secret,
     reset_settings,
+    selection_settings_overview,
     settings_overview,
     update_settings,
 )
@@ -65,6 +66,16 @@ def _audit_values(values: dict[str, Any]) -> dict[str, Any]:
 def get_settings_overview() -> dict:
     """参数总览：Settings 全部字段 + 硬编码常量，按分组返回。"""
     return with_disclaimer(settings_overview())
+
+
+@router.get("/selection")
+def get_selection_settings() -> dict:
+    """选股策略页专用：仅返回选股相关参数（选股板块 / 选股与自选 / 底部反转选股）。
+
+    这些参数已从系统设置页隐藏（见 `param_specs.SETTINGS_SYSTEM_HIDDEN`），改回仍走
+    `POST /api/settings`（`update_settings`）。结构同 `settings_overview`，前端复用渲染。
+    """
+    return with_disclaimer(selection_settings_overview())
 
 
 @router.post("")

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime
 from dataclasses import asdict
 from typing import Literal
 
@@ -36,6 +37,8 @@ class OrderBody(BaseModel):
     shares: int | None = None      # 买入/卖出股数（卖出留空=全部）
     amount: float | None = None    # 买入金额（元），优先于 shares
     name: str = ""
+    #: 仅卖出有效：停牌/退市取不到行情时人工指定成交价；留空则由引擎按成本价兜底。
+    price: float | None = None
 
 
 class QueueFilterBody(BaseModel):
@@ -95,9 +98,36 @@ def set_queue_filter(body: QueueFilterBody) -> dict:
 
 @router.get("/account")
 async def paper_account() -> dict:
-    """账户详情：现金/市值/总资产/收益率/持仓浮盈。"""
+    """账户详情：现金/市值/总资产/收益率/持仓浮盈。
+
+    读之前先以成交台账核对现金：2026-11-12 两次出现 ``paper_account.cash``
+    被写成初始资金 10 万、持仓市值被当成白赚、页面显示 +37.67% 假收益的事故。
+    改成「查询即自愈」——任何一次误写都在下一次刷新时被台账重放值纠正，
+    不再依赖人工发现并点修复；修正信息随响应返回，便于事后追查。
+    """
+    audit = db.audit_paper_cash(repair=True)
     detail = await engine.account_detail()
+    if audit.get("repaired"):
+        logger.warning(
+            "账户现金与成交台账不一致，已自动修正 %.2f → %.2f（%d 笔成交）",
+            audit["stored"], audit["replayed"], audit["trades"],
+        )
+        detail["cash_repaired"] = {
+            "stored": audit["stored"],
+            "replayed": audit["replayed"],
+            "trades": audit["trades"],
+        }
     return with_disclaimer(detail)
+
+
+@router.get("/exit-audit")
+async def paper_exit_audit() -> dict:
+    """只读自检：逐只持仓的卖出出口清单。
+
+    ``ok=False`` / ``blocked`` 非空 = 存在「可卖批次已到期却没有任何卖出途径」的
+    僵尸仓；``no_quote`` 列出取不到行情价的票（自动路径失效，但仍可人工按成本价清仓）。
+    """
+    return with_disclaimer(await engine.audit_exit_paths())
 
 
 @router.get("/live")
@@ -120,8 +150,13 @@ def paper_mode(body: ModeBody) -> dict:
 async def paper_order(body: OrderBody) -> dict:
     """手动下单：按实时价立即成交（不受自动/手动开关影响）。"""
     code = body.code.strip().zfill(6)
+    # 人工指定成交价只对卖出开放（用于无行情清仓），买入一律走真实行情价。
+    manual_price = (
+        body.price if body.side == "sell" and body.price and body.price > 0 else None
+    )
     result = await engine.place_order(
         code, body.side, shares=body.shares, amount=body.amount, name=body.name,
+        price=manual_price,
     )
     detail = await engine.account_detail()
     return with_disclaimer({"result": asdict(result), "account": detail})
@@ -194,6 +229,44 @@ async def paper_reset() -> dict:
     live_trader.clear()
     detail = await engine.account_detail()
     return with_disclaimer({"reset": True, "account": detail})
+
+
+@router.post("/reconcile")
+async def paper_reconcile() -> dict:
+    """以成交台账为唯一真相源，重算并修正账户现金（修复总资产虚增/虚减）。
+
+    仅重写 ``paper_account.cash`` 与今日净值快照，不触碰任何持仓/成交记录。
+    用于修复「开盘瞬间账户被误当新账户重初始化 → 现金被重置成初始资金、丢失历史成交
+    现金效应」这类边界故障导致的账户金额异常。幂等、可重复运行。
+    """
+    # 重放逻辑统一走 db.audit_paper_cash()：原子、台账为空时不写初始资金，
+    # 避免这里和 scripts/fix_paper_cash.py 各抄一份而产生口径漂移。
+    audit = db.audit_paper_cash(repair=True)
+    if not audit.get("ok"):
+        return with_disclaimer({"ok": False, "reason": "账户不存在"})
+    if audit.get("note") == "no_trades_skip":
+        return with_disclaimer({
+            "ok": True, "changed": False, "cash": audit["cash"],
+            "message": "成交台账为空，拒绝把现金重放成初始资金（避免制造污染）",
+        })
+    stored, correct = audit["stored"], audit["replayed"]
+    if not audit["repaired"]:
+        return with_disclaimer({
+            "ok": True, "changed": False, "cash": correct,
+            "message": "现金已正确，无需修正",
+        })
+    # 修正今日净值快照（market_value 由引擎按最新价核算，避免手填误差）
+    today = datetime.now().strftime("%Y-%m-%d")
+    detail = await engine.account_detail()
+    db.save_paper_equity(
+        today, detail["total_asset"], detail["cash"], detail["market_value"]
+    )
+    return with_disclaimer({
+        "ok": True, "changed": True,
+        "cash_before": stored, "cash_after": correct,
+        "total_asset": detail["total_asset"], "return_pct": detail["return_pct"],
+        "message": f"现金已按成交台账重算并写回（{stored:.2f} → {correct:.2f}）",
+    })
 
 
 # ----------------------------------------------------------------------

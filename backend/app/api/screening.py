@@ -26,7 +26,8 @@ class ScanRequest(BaseModel):
 
     strategies: list[str] = Field(..., min_length=1, description="策略名列表")
     codes: list[str] | None = Field(None, description="限定股票代码，缺省按 scope")
-    #: 扫描范围: all / sh / sz / cyber / star / bjs / top_amount:N
+    #: 扫描范围: all / sh / sz / cyber / star / bjs / top_amount:N（目标板块内成交额前 N）
+    #:            / top_amount_all:N（全市场成交额前 N，显式全市场扫描用）
     scope: str = Field("all", description="扫描范围")
 
 

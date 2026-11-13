@@ -95,7 +95,8 @@ class Settings(BaseSettings):
     # 收盘后自动选股使用的策略列表（缺省为全部已注册策略）
     auto_scan_strategies: list[str] = []
     # 收盘/盘后自动扫描范围（all=全市场约 5500 只，冷缓存下需 15 分钟以上；
-    # top_amount:N=成交额前 N 只，通常 1~2 分钟出结果）
+    # top_amount:N=目标板块内成交额前 N 只，通常 1~2 分钟出结果，贴合交易板块；
+    # top_amount_all:N=全市场成交额前 N 只，用于显式全市场扫描）
     auto_scan_scope: str = "all"
     # 等待一轮扫描完成的最长秒数（全市场扫描必须给足，否则盘后分析会拿不到结果）
     scan_wait_timeout: int = 1800
@@ -269,16 +270,17 @@ class Settings(BaseSettings):
     # 于是回测里选不到的票（尤其北交所小票）被真实买入，回测结论无法解释实盘。
     # 只允许买入当日成交额 TopN 内的股票；0=不限制（回到旧的全市场行为）
     paper_pool_top_n: int = 300
-    # 交易板块白名单（逗号分隔）：只统计/买入选定板块。默认仅创业板（用户买卖集中于创业板，
-    # 2026-11-10 起改默认）；在「系统设置 → 交易执行 → 股票池过滤」多选。留空=不限制
-    # （退回主板+创业板）。引擎买入池与日更做T信号清单都按此过滤。
+    # 【选股 + 交易 统一板块】单一板块白名单，同时驱动「选股扫描范围」与「交易买入池」。
+    # 勾选哪些板块，就只从这些板块选股、也只买这些板块——两者不再各管各的，
+    # 因此不再出现「选股板块含主板但交易未勾选 → 候选被买入侧拒绝」的板块不一致告警。
+    # 默认仅创业板（用户买卖集中于创业板，2026-11-10 起改默认）；在「系统设置」以一组
+    # 板块芯片统一勾选即可。留空=不限制（退回主板+创业板）。引擎买入池、日更做T清单、
+    # 选股扫描范围、非板块持仓清仓都按此过滤。
     # #181 起同时接受中文名（主板/创业板/科创板/北交所）与英文键
-    # （sh_main/sz_main/cyb/star/bse），可直接把 bottom_boards 的值粘过来，
-    # 让「选股板块」与「交易板块」用同一套口径；前缀表统一在 app/board_rules.py。
-    # ⚠️ 若 bottom_boards 含本项未勾选的板块，候选会被买入侧拒绝——
-    # /api/scope/stats 的 board_consistency 会给出提示。
+    # （sh_main/sz_main/cyb/star/bse）；前缀表统一在 app/board_rules.py。
     # 科创板(200股起/1股递增)、北交所(100股起/1股递增)的申报规则与 ±20%/±30% 涨跌停
     # 已由 board_rules 统一支持。
+    # ⚠️ 注意：选股板块已统一跟随本项（见 screener/api 的 board 取数），勿再单独改 bottom_boards。
     twin_t_boards: str = "创业板"
     # 板块交易规则回退开关：True=回到旧的全市场 ±9.5% 涨跌停 / 100 股整手口径，
     # 用于复现 #178 之前的历史回测基线（+8.49% 等）。默认 False = 按各板块真实规则
@@ -310,23 +312,38 @@ class Settings(BaseSettings):
     paper_breakeven_pct: float = 0.10   # 浮盈达此比例后止损上移到成本（保本）
     paper_trail_pct: float = 0.10       # 从持仓期最高价回撤此比例即卖出（移动止损）
     paper_trail_arm: float = 0.0        # 移动止损启用门槛：浮盈达此比例后才跟踪
+    # 短线时间止损（#191）：持仓满 N 个自然日（首个建仓批次的 buy_date 起算，含当日）
+    # 仍未离场则强制卖出，避免「无限期持有」——线上此前只有价格触发才会卖。
+    # 0=关闭（沿用旧行为）；≤5 日短线交易者建议设 5。与回测 engine.py 自然日口径一致。
+    paper_max_hold_days: int = 0
+    # 板块趋势闸门（#191）：开启后，候选所属板块指数处于下降通道（downtrend）时拒绝买入，
+    # 即 Layer1 板块感知趋势真正接入入场闸。默认关闭=零风险（保持既有行为）；
+    # 多板块交易时可开启，让「创业板指/上证主板指…在 MA 下」的票不买。
+    paper_board_trend_gate: bool = False
+    # Layer2 统一宏观风险四档 cap 接入 effective_exposure（#191 / 原 #127）：开启后，
+    # weak/shock/crisis 档把总仓位上限压到 unified_risk_cap_*（只降不升）。默认关闭=零风险，
+    # 保持「此前只有 crisis 二值硬拦、weak/shock 不压仓」的既有行为；开启即把展示层已有的
+    # 四档 cap 真正落到下单路径（与 #126 入场护栏、#191 板块闸门同属「择时降仓」开关组）。
+    paper_unified_risk_cap_enabled: bool = False
     # 机制层止损收紧：shock/crisis 态新建仓用更紧的止损距离（距离 × 此系数），
     # 只限新建仓（已有持仓止损在建仓时定死，不回溯改）。0=关闭（原行为，保守默认）。
     # 风险态下宁可早点砍、少亏；指数数据缺失 → regime=normal → 不收紧，零风险。
     paper_regime_stop_tighten: float = 0.0
     paper_regime_stop_min: float = 0.03   # 收紧后止损距离下限（防止过度收紧成噪声止损）
     # ---- 模拟盘大盘择时买入闸门（弱市暂停自动买入） ----
-    paper_regime_ma: int = 60           # 上证指数 MA 周期，<=0 关闭
+    paper_regime_ma: int = 60           # 弱市判定均线周期（作用于 paper_regime_index 指定的宽基指数），<=0 关闭
+    paper_regime_index: str = "sh000985"  # 弱市判定所用宽基指数：sh000985=中证全指（覆盖全A，比上证更代表系统性风险）；
+                                         #   可改 sh000001=上证指数 / sz399006=创业板指。与 bottom_trend_index 默认全市场口径统一。
     paper_regime_weak_pause: bool = True  # 弱市（指数在 MA 下）暂停自动买入
     #: 弱市**保留仓位比例**（0=全暂停，即上面的开关注释行为；>0 时弱市不暂停买入，
     #: 而是把「总仓位上限」压到该比例继续参与）。回测记录 #59/#60：0.3~0.5 在
     #: 急跌月小亏换反弹时的收益，代价是涨市初期踏空。默认 0 保持既有行为不变。
     paper_weak_exposure: float = 0.0
-    # ---- 入场护栏硬屏蔽（#126 续 / #128：把影子层提示升级为可开关的硬拦截） ----
+    # ---- 入场护栏硬屏蔽（#126 续 / #191：把影子层提示升级为可开关的硬拦截） ----
     # 开启后：上证在 MA20 下方（declining）时，硬屏蔽所有**新开仓买入建议**——
     # 既不在「智能建议 / 买入」列表展示，也不送进自动交易引擎成交；卖出与做T买回不受影响。
     # 与上方 paper_regime_weak_pause（MA60 弱市暂停）并存且独立：本开关更紧（MA20）。
-    # 自 #128 起**默认开启**——诊断表明用户实盘买点主要败在「下降市开新仓」而非个股尖，
+    # 自 #191 起**默认开启**——诊断表明用户实盘买点主要败在「下降市开新仓」而非个股尖，
     # 默认拦截可在不改动选股/评分/下单逻辑的前提下直接修复该痛点。可在设置页随时关闭。
     # 诊断依据：4 年回测 41657 次动量信号，上证 >MA20 时 20 日超额 +0.74%、<MA20 时 −1.22%。
     entry_guard_block_declining_market: bool = True
@@ -388,6 +405,9 @@ class Settings(BaseSettings):
     # 直接证据是 #82：`ml_lgb` 18 段配对中位 +4.55pp（>3.5pp 线）、最差段 −11.44%→−5.07%。
     # 设置页改这一项**立即生效**（就地改 Settings 单例），不需要重启。
     live_ml_scoring: bool = False
+    ml_regime_aware: bool = False        # 趋势市用 ML、震荡市回退 14 因子
+    ml_regime_vol_cap: float = 0.25     # 趋势市判定：近20日年化波动率上限（超过=震荡市）
+    ml_regime_ma_gap: float = 0.0       # 趋势市判定：MA20 须高于 MA60 的最小比例（0=MA20>MA60）
     paper_t_up_sell: float = 0.05          # 开盘涨幅超此先卖锁利
     paper_t_up_buyback: float = 0.03       # 从高点回调超此买回
     # 下跌加仓在单边弱市会放大亏损（回测 E 版验证），默认调到「跌 20% 才加」≈关闭
@@ -432,20 +452,25 @@ class Settings(BaseSettings):
     # 加此闸反而拖累收益（对照 -25.7% → 加闸 -33.7%），故默认关闭（-100）。
     # 因子分仍作为面板"质量参考列"展示；如想实验可在设置页开启（建议 ≤ -50 的软闸，勿设正）。
     bottom_min_factor_score: float = -100.0    # 14因子分软闸下限（100分制；-100=关闭，因子分仅作展示）
-    bottom_trend_filter: bool = True          # 创业板趋势过滤：仅创业板指(见 bottom_trend_index) > 其 MA 的上升通道日才出候选/开仓
+    bottom_trend_filter: bool = True          # 板块/全市场趋势过滤：仅在所选趋势指数处于上升通道（> MA）的交易日才出候选/开仓
     bottom_trend_ma: int = 60                 # 趋势过滤所用均线周期（日）
-    bottom_trend_index: str = ""              # 趋势过滤所用指数：空串=300/301等权合成指数（回测验证更优，+9.94%）；填 sz399006=官方创业板指（支持盘中实时重算，但回测-28.86%较差）
+    bottom_trend_index: str = "sh000985"      # 趋势过滤所用指数（全市场口径）：sh000985=中证全指（覆盖全A，最宽的全市场基准），分析趋势时全市场一起考虑；
+                                              #   填 sz399006=官方创业板指（仅看创业板）；留空=300/301等权合成指数（回测基线兼容，+9.94%）。
     bottom_time_stop_days: int = 0            # 主动离场-时间止损：持仓达此天数仍未启动跟踪止损(即未盈利)则离场(0=关闭；回测显示对均值回归策略有害，默认关)
     bottom_trailing_pct: float = 0.0          # 主动离场-跟踪止损：涨幅达此比例启动跟踪，自峰值回撤此比例即离场(0=关闭；宽幅如0.15近中性，默认关)
-    # 多板块扫描：候选不仅限于创业板，而是按代码前缀分类到各板块，每只票用「自己板块的指数」
-    # 做趋势过滤（板块感知，不混为一谈）。逗号分隔的板块键白名单，取值见 app/analysis/board_index.BOARD_INDEX。
-    # 默认含 创业板/上证主板/深证主板/科创板；北交所(bse)本地缺指数 parquet，默认不扫。
-    bottom_boards: str = "cyb,sh_main,sz_main,star"
+    # 选股扫描板块（已统一跟随 twin_t_boards，勿在此单独改）。保留字段仅为向后兼容：
+    # screener / api 现统一以 twin_t_boards 作为「选股 + 交易」的唯一板块口径，两者始终一致，
+    # 因此 /api/scope/stats 的 board_consistency 始终 ok，不再弹出「板块不一致」告警。
+    bottom_boards: str = "创业板"
     # #181 多板块交易策略适配：策略参数（target_pct 止盈幅度）原先按创业板 ±20% 波动标定，
     # 直接套到主板 ±10%（+25% 止盈几乎打不到）或北交所 ±30%（一个板就穿透）会失真。
     # 开启后止盈目标按板块涨跌停幅度等比缩放（基准=创业板 20%，主板×0.5、北交所×1.5），
     # 创业板/科创板保持原值不变。默认关=零行为变更；建议切换到非创业板板块时开启。
     bottom_scale_exit_by_limit: bool = False
+    # 底部反转候选自动接入交易链（#191）：收盘刷新候选后自动写入 signals + 自选股，
+    # 让底反候选与 scanner 命中走同一套下游（观察/建议）。默认关闭；开启即自动入链，
+    # 但不自动送队列（不主动买卖）。如需进一步自动送交易队列，用 API /bridge 显式发起。
+    bottom_reversal_autobridge: bool = False
 
     # ---------- 统一大盘宏观风险层（Layer2：含外围，驱动仓位上限） ----------
     # 把「国内大盘 + 外围前一/当日」综合成 market risk score → calm/weak/shock/crisis 四档，
@@ -469,6 +494,17 @@ class Settings(BaseSettings):
     unified_risk_cap_weak: float = 0.30       # 弱势：压到 30%（与用户手设的弱市上限一致）
     unified_risk_cap_shock: float = 0.20      # 震荡：进一步压到 20%（比 weak 更严）
     unified_risk_cap_crisis: float = 0.10     # 危机：压到 10%，且全暂停新开仓买入
+
+    # ---------- P1 上下文风险闸（回测/实盘共用 app.risk.context_gates，改动必须两侧同步） ----------
+    # 四项：组合集中度/相关性、事件日历、舆情新闻、板块过热剔除。0 = 关闭该子闸。
+    # 数据一律来自按 as-of 截断的本地快照（context_events / context_news / context_heat），
+    # 策略代码不调实时接口；快照缺失时两侧一致地不触发，避免半边生效。
+    paper_ctx_enabled: bool = True               # 四项总开关；False = 完全回到 P1 之前的行为
+    paper_ctx_max_industry_weight: float = 0.40  # 买入后同一行业只数/组合总只数上限；0=关闭
+    paper_ctx_max_corr: float = 0.85            # 与持仓组合 60 日收益平均 |corr| 上限；0=关闭
+    paper_ctx_hot_exclude_pct: float = 0.20     # 剔除个股/行业热度最热 20%；0=关闭
+    paper_ctx_event_cooldown_days: int = 3      # 事件日及之后 N 天禁买；0=关闭
+    paper_ctx_news_block: float = 0.60          # 加权舆情分 <= -0.60 禁买；0=关闭
 
     # ---------- 前端 ----------
     # 允许跨域访问的前端源（Vite 开发服务器默认端口）

@@ -252,7 +252,7 @@ onUnmounted(() => {
       <span class="flex items-center gap-2">
         <span class="font-semibold">市场状态：{{ regimeMeta().label }}</span>
         <template v-if="entryGuard.regime.as_of">
-          （上证 {{ entryGuard.regime.close?.toFixed(0) }} · MA20 {{ entryGuard.regime.ma20?.toFixed(0) }} · 截至 {{ entryGuard.regime.as_of }}）
+          （{{ entryGuard.regime.index_name || '宽基指数' }} {{ entryGuard.regime.close?.toFixed(0) }} · MA20 {{ entryGuard.regime.ma20?.toFixed(0) }} · 截至 {{ entryGuard.regime.as_of }}）
         </template>
       </span>
       <span class="text-content-faint">下降市中动量信号 20 日超额转负，新开仓建议等待指数站回 MA20 上方</span>
@@ -268,7 +268,7 @@ onUnmounted(() => {
         <span class="text-[12.5px] text-content-faint">{{ entryGuard.signals.length }} 条近期信号</span>
       </div>
       <p class="mb-3 text-[12.5px] leading-relaxed text-content-faint">
-        市场状态滤网：上证站上 MA20 时动量信号 20 日超额 +0.74%，跌破后转 −1.22%，下降市标注「慎开新仓」；
+        市场状态滤网：{{ entryGuard.regime.index_name || '宽基指数' }}站上 MA20 时动量信号 20 日超额 +0.74%，跌破后转 −1.22%，下降市标注「慎开新仓」；
         日内追高护栏：信号日高开 &gt;3% 或盘中冲高 &gt;5% 时提示用限价单在尾盘或回踩均线买入。均为只读提示，不参与交易。
       </p>
       <div class="grid grid-cols-1 gap-2 md:grid-cols-2 xl:grid-cols-3">
@@ -517,7 +517,7 @@ onUnmounted(() => {
                 下降市硬屏蔽：已拦截 {{ buyRawCount }} 条新开仓买入建议
               </p>
               <p class="text-[12.5px]">
-                上证 {{ buyRegime?.close?.toFixed(2) }} &lt; MA20 {{ buyRegime?.ma20?.toFixed(2) }}（{{ buyRegime?.as_of }}），
+                {{ buyRegime?.index_name || '宽基指数' }} {{ buyRegime?.close?.toFixed(2) }} &lt; MA20 {{ buyRegime?.ma20?.toFixed(2) }}（{{ buyRegime?.as_of }}），
                 按「入场护栏硬屏蔽」设置不开新仓；卖出与做T不受影响
               </p>
               <RouterLink

@@ -3,7 +3,7 @@
  * 回测中心：参数表单 → 提交回测 → 净值曲线 + 绩效指标 + 交易明细。
  */
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
-import { Play, ChevronDown, RotateCcw, DatabaseZap, Download, History } from 'lucide-vue-next'
+import { Play, ChevronDown, RotateCcw, DatabaseZap, Download, History, CheckCircle2, AlertTriangle } from 'lucide-vue-next'
 import VChart from 'vue-echarts'
 import { use } from 'echarts/core'
 import { CanvasRenderer } from 'echarts/renderers'
@@ -23,7 +23,9 @@ import {
   listBacktests,
   persistBacktestRules,
   runBacktest,
+  type BacktestAlignmentSummary,
   type BacktestPersistMap,
+  type BacktestProgress,
   type BacktestPersistResult,
   type BacktestResult,
   type BacktestRunSummary,
@@ -46,15 +48,45 @@ const form = reactive<Record<string, any>>({
 const defaults = ref<Record<string, any> | null>(null)
 const defaultsError = ref('')
 const formOpen = ref(true)
+// 回测 ↔ 实盘 对齐状态：后端每次返回默认值时顺带验一次契约，漂移直接在页面顶部可见
+const alignment = ref<BacktestAlignmentSummary | null>(null)
+const alignmentOpen = ref(false)
+// 策略集：默认严格跟随实盘 .env 的 AUTO_SCAN_STRATEGIES（A-Only 只读护栏）。
+// 这里只做只读展示，不做可编辑控件——避免把「14 策略全开」误当成实盘复刻
+// （回测 #44 就是这样跑出 158 笔交易、却解释不了 A-Only 实盘）。
+const strategyOptions = ref<string[]>([])
+const strategyLabel = computed(() => {
+  const s = defaults.value?.strategies
+  if (s === undefined) return '后端未加载对齐版本（重启后生效）'
+  const list = Array.isArray(s) ? (s as string[]) : []
+  return list.length ? list.join('、') : `全部 ${strategyOptions.value.length || 14} 个策略`
+})
+const strategyTip = computed(() =>
+  `默认策略集跟随实盘 .env 的 AUTO_SCAN_STRATEGIES（只读护栏，当前 A-Only）。` +
+  ` 已注册策略：${strategyOptions.value.join('、') || '加载中'}。` +
+  ' 改它需改 .env 后重启，回测默认值会自动同步。'
+)
 // 参数分组改为 tab：一次只显示当前组，纵向空间从「9 组全部铺开」降到一组
 const activeGroup = ref('基础')
 
 const result = ref<BacktestResult | null>(null)
 const loading = ref(false)
 const error = ref('')
-// 长区间回测可能跑十几分钟：显示实时已等待时长，避免「卡住没反馈」的错觉
+// 长区间回测可能跑一小时以上：显示实时已等待时长，避免「卡住没反馈」的错觉。
+// 本地秒表只是兜底；后端有 progress 时一律以服务端真实耗时/阶段为准（刷新页面不丢）。
 const elapsedSec = ref(0)
 let elapsedTimer: number | undefined
+const jobProgress = ref<BacktestProgress | null>(null)
+const shownElapsedSec = computed(() =>
+  jobProgress.value?.elapsed != null ? Math.round(jobProgress.value.elapsed) : elapsedSec.value,
+)
+const progressPct = computed(() =>
+  Math.max(0, Math.min(100, jobProgress.value?.percent ?? 0)),
+)
+const progressCount = computed(() => {
+  const p = jobProgress.value
+  return p && p.total > 0 ? `${p.done} / ${p.total}` : ''
+})
 const notify = useNotifyStore()
 
 // ---- 回测历史（/backtest 列表 + /backtest/{id} 详情）----
@@ -314,6 +346,8 @@ async function doPersist() {
     persistDetailOpen.value = res.skipped.length > 0
     // 落盘后这些值就是新的线上默认值：直接换基线，颜色高亮归零
     defaults.value = res.defaults as Record<string, any>
+    // 落盘改写了实盘配置，重新验一次双向对齐（只刷新徽标，不重填表单）
+    void refreshAlignment()
     confirming.value = false
     notify.push(
       `已落盘 ${Object.keys(res.applied).length} 项到实盘配置（变更 ${res.changed.length} 项，跳过 ${res.skipped.length} 项）`,
@@ -328,20 +362,39 @@ async function doPersist() {
   }
 }
 
+/** 落盘改写实盘配置后重新验对齐（只刷新徽标，不动表单） */
+async function refreshAlignment() {
+  try {
+    alignment.value = (await getBacktestDefaults()).alignment ?? null
+  } catch {
+    // 自检失败不打断落盘流程，保留上一次状态
+  }
+}
+
 /** 载入线上默认值，并把表单填成具体数字 */
 async function loadDefaults() {
   defaultsError.value = ''
   try {
-    const d = await getBacktestDefaults()
+    const payload = await getBacktestDefaults()
+    const d = payload.defaults
     defaults.value = d
+    alignment.value = payload.alignment ?? null
+    strategyOptions.value = payload.strategy_options ?? []
     for (const g of groups) {
       for (const it of g.items) {
         if (form[it.key] !== undefined && it.key !== 'board_prefixes') continue
-        form[it.key] = d[it.key]
-          ?? (it.type === 'bool' ? false : it.type === 'multiselect' ? [] : it.type === 'select' ? '' : 0)
+        const dv = d[it.key]
+        // 数组（板块）要复制一份，避免 toggleBoard 直接改到 defaults 对象、把对照值污染
+        form[it.key] = Array.isArray(dv)
+          ? [...dv]
+          : dv
+            ?? (it.type === 'bool' ? false : it.type === 'multiselect' ? [] : it.type === 'select' ? '' : 0)
       }
     }
-    if (!Array.isArray(form.board_prefixes)) form.board_prefixes = []
+    // 板块默认跟随实盘 twin_t_boards（后端 /defaults 已返回键数组，如 ['cyb']）
+    form.board_prefixes = Array.isArray(d.board_prefixes)
+      ? [...d.board_prefixes] as string[]
+      : Array.isArray(form.board_prefixes) ? [...form.board_prefixes] : []
   } catch (e: unknown) {
     defaultsError.value = e instanceof Error ? e.message : '默认参数加载失败'
   }
@@ -355,7 +408,16 @@ function defOf(key: string): any {
 function isChanged(it: ParamDef): boolean {
   const d = defOf(it.key)
   const v = form[it.key]
-  if (it.type === 'multiselect') return (v as string[]).length > 0
+  if (it.type === 'multiselect') {
+    // 板块默认跟随实盘 twin_t_boards（如 ['cyb']），不能再按「非空即改动」判定，
+    // 否则一进页面默认板块就被标成人工改过。与线上默认数组逐项比较。
+    const cur = (Array.isArray(v) ? v : []) as string[]
+    const def = (Array.isArray(d) ? d : []) as string[]
+    if (cur.length !== def.length) return true
+    const sortedCur = [...cur].sort()
+    const sortedDef = [...def].sort()
+    return sortedCur.some((x, i) => x !== sortedDef[i])
+  }
   if (it.type === 'select') return String(v ?? '') !== String(d ?? '')
   if (it.type === 'bool') return Boolean(v) !== Boolean(d)
   if (v === null || v === undefined || v === '') return false
@@ -391,14 +453,21 @@ function groupChangedCount(g: { items: ParamDef[] }): number {
 /** 展示用的对照值文本（标题 tooltip）：对照的是**线上**当前生效值，不是代码里的默认常量 */
 function defaultHint(it: ParamDef): string {
   const d = defOf(it.key)
-  const base =
-    it.type === 'multiselect'
-      ? '线上：全市场'
-      : it.type === 'select'
-        ? `线上：${optionLabel(it, d)}`
-        : it.type === 'bool'
-          ? `线上：${d ? '开' : '关'}`
-          : `线上：${d}${it.unit ? ' ' + it.unit : ''}`
+  let base: string
+  if (it.type === 'multiselect') {
+    // 板块默认已是实盘 twin_t_boards（如创业板），不能再写死「线上：全市场」。
+    const keys = (Array.isArray(d) ? d : []) as string[]
+    const labels = keys.map((k) => optionLabel(it, k))
+    base = keys.length
+      ? `线上：${labels.join('、')}（跟随实盘「选股+交易板块」）`
+      : '线上：全市场（未限定板块）'
+  } else if (it.type === 'select') {
+    base = `线上：${optionLabel(it, d)}`
+  } else if (it.type === 'bool') {
+    base = `线上：${d ? '开' : '关'}`
+  } else {
+    base = `线上：${d}${it.unit ? ' ' + it.unit : ''}`
+  }
   const target = liveTarget(it.key)
   if (target) return `${base} · 落盘后同步到 ${target}`
   const why = persistMap.value?.skipped[it.key]
@@ -417,11 +486,16 @@ function resetDefaults() {
   for (const g of groups) {
     for (const it of g.items) {
       const d = defaults.value[it.key]
-      form[it.key] = d
-        ?? (it.type === 'bool' ? false : it.type === 'multiselect' ? [] : it.type === 'select' ? '' : 0)
+      form[it.key] = Array.isArray(d)
+        ? [...d]
+        : d
+          ?? (it.type === 'bool' ? false : it.type === 'multiselect' ? [] : it.type === 'select' ? '' : 0)
     }
   }
-  form.board_prefixes = []
+  // 板块恢复为线上默认（跟随 twin_t_boards），不再强制清空成全市场
+  form.board_prefixes = Array.isArray(defaults.value.board_prefixes)
+    ? [...defaults.value.board_prefixes] as string[]
+    : []
   error.value = ''
   persistResult.value = null
 }
@@ -435,7 +509,13 @@ function buildPayload(): Record<string, unknown> {
     for (const it of g.items) {
       const v = form[it.key]
       if (v === null || v === undefined || v === '') continue
-      if (it.type === 'multiselect' && (v as string[]).length === 0) continue
+      if (it.type === 'multiselect') {
+        // 板块默认已跟随实盘 twin_t_boards。与线上默认一致时不提交（沿用线上），
+        // 被人工改动（含清空→全市场）才显式提交，否则后端默认会把创业板补回来。
+        if (!isChanged(it)) continue
+        p[it.key] = Array.isArray(v) ? [...v] : []
+        continue
+      }
       if (it.type === 'number' && ZERO_OFF.has(it.key) && Number(v) === 0) continue
       p[it.key] = v
     }
@@ -447,10 +527,11 @@ async function submit() {
   loading.value = true
   error.value = ''
   elapsedSec.value = 0
+  jobProgress.value = null
   if (elapsedTimer) window.clearInterval(elapsedTimer)
   elapsedTimer = window.setInterval(() => { elapsedSec.value += 1 }, POLL.clockMs)
   try {
-    result.value = await runBacktest(buildPayload() as any)
+    result.value = await runBacktest(buildPayload() as any, (p) => { jobProgress.value = p })
     void loadHistory()  // 新回测已落库，刷新历史列表
   } catch (e: unknown) {
     // 网关 502/503/504、服务重启后 job 404 都要给可操作的中文提示，
@@ -458,6 +539,7 @@ async function submit() {
     error.value = backtestErrorMessage(e)
   } finally {
     loading.value = false
+    jobProgress.value = null
     if (elapsedTimer) {
       window.clearInterval(elapsedTimer)
       elapsedTimer = undefined
@@ -688,6 +770,29 @@ function metricTone(v: number): string {
     <div class="glass-card p-4">
       <div class="flex flex-wrap items-center gap-x-3 gap-y-2">
         <h3 class="text-subheading whitespace-nowrap">回测参数</h3>
+        <!-- 回测 ↔ 实盘 对齐状态：零漂移才代表「打开直接跑」就是实盘那套规则 -->
+        <button
+          v-if="alignment"
+          type="button"
+          class="flex shrink-0 items-center gap-1 rounded-full px-2 py-0.5 text-[12px] font-medium transition-colors"
+          :class="alignment.ok
+            ? 'bg-primary/15 text-primary-light hover:bg-primary/25'
+            : 'bg-up/15 text-up hover:bg-up/25'"
+          :title="alignment.ok ? '回测默认值与实盘配置 1:1 对齐（点击可查看契约项）' : '回测与实盘已脱节，点击展开漂移明细'"
+          @click="alignmentOpen = !alignmentOpen"
+        >
+          <CheckCircle2 v-if="alignment.ok" class="h-3.5 w-3.5" />
+          <AlertTriangle v-else class="h-3.5 w-3.5" />
+          {{ alignment.ok ? `已与实盘对齐 · ${alignment.bound} 项` : `${alignment.drifts.length} 处漂移` }}
+        </button>
+        <!-- 策略集只读：一眼确认「默认跑的是 A-Only」还是 14 策略全开 -->
+        <span
+          class="flex shrink-0 items-center gap-1 rounded-full border border-base-600 bg-base-700/60 px-2 py-0.5 text-[12px] text-content-muted"
+          :title="strategyTip"
+        >
+          策略集：<span class="font-medium text-content">{{ strategyLabel }}</span>
+          <span class="text-primary-light">跟随实盘</span>
+        </span>
         <div class="flex flex-wrap items-center gap-2">
           <label class="flex items-center gap-1 text-[12.5px] text-content-muted">
             开始
@@ -717,6 +822,34 @@ function metricTone(v: number): string {
           <Play class="h-3.5 w-3.5" />
           {{ loading ? '运行中...' : '开始回测' }}
         </button>
+      </div>
+
+      <!-- 对齐契约明细：正常时说明双向回路，漂移时逐条给出修复指引 -->
+      <div
+        v-if="alignment && alignmentOpen"
+        class="mt-3 rounded-lg border px-3 py-2.5 text-[12.5px]"
+        :class="alignment.ok ? 'border-primary/25 bg-primary/[0.06]' : 'border-up/40 bg-up/[0.06]'"
+      >
+        <template v-if="alignment.ok">
+          <div class="font-medium text-primary-light">
+            回测默认值与实盘配置已 1:1 对齐（{{ alignment.bound }} 项逐项验证）。
+          </div>
+          <div class="mt-1 leading-relaxed text-content-muted">
+      改实盘设置 → 本页默认值自动跟随；在回测页点「落盘」→ 实盘配置同步更新并成为新的默认值。
+      股票池的 ST 过滤与实盘 scanner / 买入池共用同一判定；止损线（固定 / 保本 / 移动）两侧共用
+      app.risk.stops 同一份解析、每日无条件生效，不再受大盘强弱门控；P1 四项上下文风险闸
+      （组合集中度/相关性、事件日历、舆情新闻、板块过热剔除）两侧共用 app.risk.context_gates
+      同一份函数，数据一律按 as-of 读本地快照。这三类行为口径都在自检范围内。
+            例外：策略集由 .env 的 AUTO_SCAN_STRATEGIES 只读决定（A-Only 护栏），改它需改 .env 后重启，
+            回测默认值会自动同步，不能从本页落盘改写。以后任何一侧改动都必须同步，页面会在漂移时告警。
+          </div>
+        </template>
+        <template v-else>
+          <div class="mb-1.5 font-medium text-up">回测与实盘已脱节，请修复后再用回测结论判断实盘：</div>
+          <div v-for="(drift, i) in alignment.drifts" :key="i" class="leading-relaxed text-content-muted">
+            <span class="font-num text-up">[{{ drift.kind }}] {{ drift.key }}</span> — {{ drift.detail }}
+          </div>
+        </template>
       </div>
 
       <!-- 说明 + 落盘：默认只影响回测，点按钮才写实盘并成为默认值 -->
@@ -777,10 +910,27 @@ function metricTone(v: number): string {
         {{ defaultsError }}（点「重置」重试）
       </div>
       <div v-if="error" class="mt-2 text-[12.5px] text-up">{{ error }}</div>
-      <div v-if="loading" class="mt-2 text-[12.5px] text-content-muted">
-        回测在后台运行，已等待
-        <span class="font-num text-content">{{ Math.floor(elapsedSec / 60) }} 分 {{ elapsedSec % 60 }} 秒</span>
-        （长区间可达十几分钟，请勿关闭页面）
+      <div v-if="loading" class="mt-2 rounded-lg border border-base-600/50 bg-base-700/20 px-3 py-2">
+        <div class="flex flex-wrap items-center gap-x-2 gap-y-1 text-[12.5px] text-content-muted">
+          <span>回测在后台运行</span>
+          <span class="text-content-faint">·</span>
+          <span>已耗时 <span class="font-num text-content">{{ Math.floor(shownElapsedSec / 60) }} 分 {{ shownElapsedSec % 60 }} 秒</span></span>
+          <template v-if="jobProgress">
+            <span class="text-content-faint">·</span>
+            <span class="font-medium text-primary">{{ jobProgress.phase_label }}</span>
+            <span class="font-num text-content">{{ progressPct.toFixed(1) }}%</span>
+            <span v-if="progressCount" class="font-num text-content-faint">({{ progressCount }})</span>
+          </template>
+        </div>
+        <div v-if="jobProgress" class="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-base-600/60">
+          <div class="h-full rounded-full bg-primary transition-all duration-500" :style="{ width: progressPct + '%' }"></div>
+        </div>
+        <div v-if="jobProgress && (jobProgress.note || jobProgress.step)" class="mt-1.5 font-num text-[11.5px] text-content-faint">
+          {{ jobProgress.note }}<span v-if="jobProgress.step"> · {{ jobProgress.step }}</span>
+        </div>
+        <div v-else class="mt-1 text-[11.5px] text-content-faint">
+          全池长区间可达一小时以上，请勿关闭页面（后端会继续跑完并写入历史）
+        </div>
       </div>
 
       <!-- 回测历史：列表接口已就绪，点条目载入该次完整结果 -->

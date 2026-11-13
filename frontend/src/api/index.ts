@@ -425,7 +425,8 @@ export function getSignals(code?: string, limit = 100): Promise<SignalRecord[]> 
 // ==================== 回测 ====================
 
 /**
- * 回测请求：固定走「全策略流水线」（扫描 → 加自选 → 14因子排序 → 评分加权下单），
+ * 回测请求：链路固定为「扫描 → 加自选 → 14因子/ML 排序 → 评分加权下单」，
+ * 其中扫描策略集 `strategies` 默认跟随实盘 auto_scan_strategies（A-Only）；
  * 只有时间段是必填，其余留空即用模拟盘默认配置。
  */
 export interface BacktestRequest {
@@ -435,6 +436,12 @@ export interface BacktestRequest {
   max_positions?: number
   universe_size?: number
   board_prefixes?: string[]
+  /**
+   * 参与扫描的策略名。不传 = 后端以 /defaults 为基底填入实盘 AUTO_SCAN_STRATEGIES
+   * （A-Only）；空数组 = 全部已注册策略。显式传值只影响本次回测，实盘策略集是
+   * .env 只读项，不能从回测页落盘改写。
+   */
+  strategies?: string[]
   watch_cap?: number
   add_per_day?: number
   rebalance_days?: number
@@ -596,6 +603,19 @@ export interface BacktestReview {
   suggestions: BacktestSuggestion[]
 }
 
+/** 后端回测任务进度（纯观测层：阶段、阶段内计数、服务端真实耗时）。 */
+export interface BacktestProgress {
+  job_id: string
+  phase: string
+  phase_label: string
+  done: number
+  total: number
+  percent: number
+  step: string
+  note: string
+  elapsed: number
+}
+
 /** 后端回测任务状态（提交后轮询，避免长请求撞上 30s 超时）。 */
 interface BacktestJob {
   job_id?: string
@@ -603,14 +623,16 @@ interface BacktestJob {
   elapsed?: number
   error?: string
   result?: BacktestResult
+  /** 旧后端没有该字段；前端必须优雅降级为「本地秒表 + 运行中」。 */
+  progress?: BacktestProgress | null
 }
 
 /** 轮询间隔（毫秒）与最长等待（毫秒） */
 const BACKTEST_POLL_MS = 1500
-// 旧的 15 分钟上限偏短：实测「2025-01~2026-10、成交额前 300」约 15.5 分钟才跑完，
-// 刚好越过 900s 被判超时。放宽到 40 分钟覆盖长区间/更大股票池；后端任务不受此前端
-// 上限影响，即使前端放弃也会继续跑完并落库（可按 run_id 查历史）。
-const BACKTEST_TIMEOUT_MS = 40 * 60 * 1000
+// 前端上限必须留足余量：实测「2025-10~2026-10、全池（每日 1373 只）+ ML 排序」
+// 单次要 65 分钟，旧的 40 分钟上限会在跑完之前就抛「回测超时」，白等一场。
+// 放宽到 120 分钟；后端任务不受此上限影响，即使前端放弃也会继续跑完并落库。
+const BACKTEST_TIMEOUT_MS = 120 * 60 * 1000
 
 // 网关层瞬时故障：cpolar 隧道抖动、SAS 服务重启窗口、反代 502/503/504。
 // 这类错误 axios 的 message 是 "Request failed with status code 502"，直接抛给页面
@@ -650,7 +672,10 @@ export function backtestErrorMessage(e: unknown): string {
  * 重复提交会直接复用同一个 job_id）；轮询允许连续 6 次瞬时失败（约 10s 窗口），
  * 覆盖服务重启/隧道抖动，不会因一次 502 就整个回测失败。
  */
-export async function runBacktest(req: BacktestRequest): Promise<BacktestResult> {
+export async function runBacktest(
+  req: BacktestRequest,
+  onProgress?: (p: BacktestProgress | null) => void,
+): Promise<BacktestResult> {
   let data: BacktestJob | undefined
   let lastErr: unknown
   for (let attempt = 0; attempt < 3; attempt += 1) {
@@ -667,6 +692,7 @@ export async function runBacktest(req: BacktestRequest): Promise<BacktestResult>
   if (!data) throw lastErr ?? new Error('回测提交失败')
   // 兼容旧后端：仍返回完整结果时直接使用
   if (!data.job_id) return normalizeBacktestResult(data)
+  onProgress?.(data.progress ?? null)
 
   const deadline = Date.now() + BACKTEST_TIMEOUT_MS
   let transientFailures = 0
@@ -680,6 +706,8 @@ export async function runBacktest(req: BacktestRequest): Promise<BacktestResult>
         params: { refresh: true },
       })
       transientFailures = 0
+      // 旧后端没有 progress 字段 → 传 null，页面自动退回本地秒表
+      onProgress?.(res.data.progress ?? null)
     } catch (e) {
       const status = (e as { response?: { status?: number } } | undefined)?.response?.status
       // 服务重启后内存任务表清空：任务本身也没了，必须让用户重跑，别显示成 404 天书
@@ -698,7 +726,7 @@ export async function runBacktest(req: BacktestRequest): Promise<BacktestResult>
     if (res.data.status === 'done' && res.data.result) return normalizeBacktestResult(res.data.result)
     if (res.data.status === 'error') throw new Error(res.data.error || '回测失败')
   }
-  throw new Error('回测超时（已等待 40 分钟）。任务可能仍在后台运行并会落库，可稍后查询回测记录，或缩小股票池/时间区间后重试')
+  throw new Error('回测超时（已等待 120 分钟）。任务可能仍在后台运行并会落库，可稍后查询回测记录，或缩小时间区间后重试')
 }
 
 /**
@@ -863,6 +891,11 @@ export function getSettingsOverview(refresh = false): Promise<SettingsOverview> 
   return http.get('/settings', { params: refresh ? { refresh: true } : {} }).then((r) => r.data)
 }
 
+/** 选股策略页专用：仅返回选股相关参数（选股板块 / 选股与自选 / 底部反转选股）。 */
+export function getSelectionSettings(): Promise<SettingsOverview> {
+  return http.get('/settings/selection').then((r) => r.data)
+}
+
 /** 修改配置项：立即生效并落库（重启保留）。返回修改后的总览。 */
 export function updateSettings(
   changes: Record<string, string | number | boolean>,
@@ -896,14 +929,44 @@ export function setQueueFilter(payload: {
   return http.post('/paper/queue-filter', payload).then((r) => r.data)
 }
 
+/** 回测 ↔ 实盘 对齐自检的一条漂移记录 */
+export interface BacktestAlignmentDrift {
+  kind: string
+  key: string
+  detail: string
+}
+
 /**
- * 回测参数的线上默认值（具体数字）。
+ * 对齐自检摘要（后端 `/backtest/defaults` 每次都会顺带验一次）。
+ * `ok=false` 时页面顶部会显示漂移明细，代表「打开回测直接跑」已不等于实盘规则。
+ */
+export interface BacktestAlignmentSummary {
+  ok: boolean
+  /** 已登记「改实盘→回测默认跟着变」的参数项数 */
+  bound: number
+  drifts: BacktestAlignmentDrift[]
+}
+
+export interface BacktestDefaultsPayload {
+  defaults: Record<string, number | boolean | string[]>
+  /** 全部已注册策略名（只读展示用），`defaults.strategies` 是实盘实际启用的子集 */
+  strategy_options?: string[]
+  alignment: BacktestAlignmentSummary
+}
+
+/**
+ * 回测参数的线上默认值（具体数字）+ 对齐自检摘要。
  *
  * 后端把 `Settings.paper_*` 与 pipeline 里的常量统一算好返回，前端不再抄一份；
  * 约定「关闭/不限」的数值项返回 0，提交时值为 0 的字段会被略过（等价于 None）。
  */
-export function getBacktestDefaults(): Promise<Record<string, number | boolean | string[]>> {
-  return http.get('/backtest/defaults').then((r) => r.data.defaults)
+export function getBacktestDefaults(): Promise<BacktestDefaultsPayload> {
+  return http.get('/backtest/defaults').then((r) => r.data)
+}
+
+/** 完整对齐自检报告（含契约清单、白名单理由），供排查用 */
+export function getBacktestAlignment(): Promise<Record<string, unknown>> {
+  return http.get('/backtest/alignment').then((r) => r.data)
 }
 
 /**
@@ -1185,6 +1248,7 @@ export interface PaperLiveStatus {
     ma: number
     weak: boolean | null
     paused_count: number
+    index_name?: string
     /** 弱市保留仓位比例：0=全暂停买入；>0 时只把总仓位上限压到该比例 */
     weak_exposure?: number
     day: string
@@ -1722,6 +1786,7 @@ export interface EntryRegime {
   above_ma20: boolean | null
   above_ma60: boolean | null
   as_of: string | null
+  index_name?: string | null
   new_entry_advice: string
 }
 export interface EntryGuard {
@@ -1740,6 +1805,49 @@ export interface EntryGuard {
 }
 export function getEntryGuard(limit = 20): Promise<EntryGuard> {
   return http.get('/ops/entry-guard', { params: { limit } }).then((r) => r.data)
+}
+
+// ---- 六阶段生命周期（#130）：初选 → 入自选 → 进交易队列 → 入场 → 持有 → 离场 ----
+export interface LifecycleEvent {
+  id: number
+  code: string
+  name: string
+  stage: number
+  stage_name: string
+  event: string
+  detail?: string | null
+  created_at: string
+}
+
+export interface LifecycleStage {
+  stage: number
+  stage_name: string
+  cnt: number
+}
+
+export interface LifecycleStagesResp {
+  stages: LifecycleStage[]
+}
+
+export interface LifecycleEventsResp {
+  code: string | null
+  count: number
+  events: LifecycleEvent[]
+}
+
+/** 按阶段聚合事件数（六阶段概览卡） */
+export function getLifecycleStages(): Promise<LifecycleStagesResp> {
+  return http.get('/lifecycle/stages').then((r) => r.data)
+}
+
+/** 查询生命周期事件（按时间倒序；code 省略则全局） */
+export function getLifecycleEvents(
+  code?: string,
+  limit = 200
+): Promise<LifecycleEventsResp> {
+  return http
+    .get('/lifecycle/events', { params: { code: code || undefined, limit } })
+    .then((r) => r.data)
 }
 
 export default http

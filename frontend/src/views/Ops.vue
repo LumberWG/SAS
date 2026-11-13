@@ -223,7 +223,7 @@ onUnmounted(() => {
           }}
         </span>
         <template v-if="entryGuard.regime.as_of">
-          （上证 {{ entryGuard.regime.close?.toFixed(0) }} · MA20 {{ entryGuard.regime.ma20?.toFixed(0) }} · 截至 {{ entryGuard.regime.as_of }}）
+          （{{ entryGuard.regime.index_name || '宽基指数' }} {{ entryGuard.regime.close?.toFixed(0) }} · MA20 {{ entryGuard.regime.ma20?.toFixed(0) }} · 截至 {{ entryGuard.regime.as_of }}）
         </template>
       </span>
       <span class="opacity-80">下降市中动量信号 20 日超额转负，新开仓建议等待指数站回 MA20 上方</span>
@@ -252,7 +252,7 @@ onUnmounted(() => {
         <span class="text-[12.5px] text-content-faint">{{ entryGuard.signals.length }} 条近期信号</span>
       </div>
       <p class="mb-3 text-[12.5px] leading-relaxed text-content-faint">
-        市场状态滤网：上证站上 MA20 时动量信号 20 日超额 +0.74%，跌破后转 −1.22%，下降市标注「慎开新仓」；
+        市场状态滤网：{{ entryGuard.regime.index_name || '宽基指数' }}站上 MA20 时动量信号 20 日超额 +0.74%，跌破后转 −1.22%，下降市标注「慎开新仓」；
         日内追高护栏：信号日高开 &gt;3% 或盘中冲高 &gt;5% 时提示用限价单在尾盘或回踩均线买入。均为只读提示，不参与交易。
       </p>
       <div class="grid grid-cols-1 gap-2 md:grid-cols-2 xl:grid-cols-3">

@@ -39,6 +39,8 @@ PROFILE_TO_PAPER: dict[str, str] = {
     "trail_arm": "paper_trail_arm",
     "stop_atr_mult": "paper_atr_stop_mult",
     "stop_atr_max": "paper_atr_stop_max",
+    # 短线时间止损：线上 PaperEngine 已实现（paper_max_hold_days），可与处置侧对照
+    "max_hold_days": "paper_max_hold_days",
     # 买入切入点是否追高：线上已按记录 #89 关闭，账本用它做回测-实盘对照
     "entry_max_chase": "paper_entry_max_chase",
 }
@@ -57,7 +59,7 @@ UNSUPPORTED_REASONS: dict[str, str] = {
     "min_volume_ratio": "买入前的量能过滤，信号已生成后失效",
     "min_turnover_rate": "买入前的换手过滤，信号已生成后失效",
     "max_open_gain": "买点的高开过滤，实盘由切入点规则接管",
-    "max_hold_days": "时间止损需逐日盯持仓天数，引擎未实现",
+    "max_hold_days": "时间止损（paper_max_hold_days）引擎已实现，可并行复现",
     "regime_fast_ma": "回测四档择时用的快线，线上只有单线弱市判定",
     "regime_tiers": "回测四档仓位系数，线上用 paper_weak_exposure 单档替代",
     "regime_flat_below": "双线之下清仓是回测特有动作",

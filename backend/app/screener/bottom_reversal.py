@@ -16,8 +16,11 @@ import os
 import json
 import glob
 import datetime as dt
+import logging
 
 import pandas as pd
+
+logger = logging.getLogger("sas.bottom_reversal")
 
 from app.config import get_settings
 from app.indicators.technical import add_all_indicators
@@ -42,7 +45,7 @@ def _code_name_map() -> dict:
 
 
 def compute_all(lazy_factors: bool = True) -> list[dict]:
-    """遍历日线缓存（按 bottom_boards 白名单多板块），返回每只股票的指标 dict 列表（已剔除 ST/退）。
+    """遍历日线缓存（按统一板块白名单 twin_t_boards 多板块），返回每只股票的指标 dict 列表（已剔除 ST/退）。
 
     每只票按代码前缀分类到板块（创业板/上证主板/深证主板/科创板/北交所），
     并打上 ``board`` / ``board_index`` / ``board_index_name`` 标签，供后续「板块感知」趋势过滤。
@@ -54,7 +57,10 @@ def compute_all(lazy_factors: bool = True) -> list[dict]:
     """
     s = get_settings()
     kdir = str(s.kline_dir)
-    boards = {b.strip() for b in (s.bottom_boards or "").split(",") if b.strip()}
+    # 选股板块统一跟随「选股 + 交易 统一板块」设置 twin_t_boards（支持中文名/英文键，
+    # 经 parse_trade_boards 归一化成英文板块键，与每只票 classify_board 的结果对齐）。
+    from app.board_rules import parse_trade_boards
+    boards = set(parse_trade_boards(s.twin_t_boards))
     names = _code_name_map()
     rows: list[dict] = []
     for f in glob.glob(os.path.join(kdir, "*.parquet")):
@@ -242,38 +248,59 @@ def write_cache() -> dict:
     kdir = str(s.kline_dir)
     ma = int(s.bottom_trend_ma)
     trend_index = (s.bottom_trend_index or "").strip()
-    boards = [b.strip() for b in (s.bottom_boards or "").split(",") if b.strip()]
+    # 选股/交易统一板块白名单（中文名/英文键皆可，归一化为英文板块键）
+    from app.board_rules import parse_trade_boards
+    boards = list(parse_trade_boards(s.twin_t_boards))
+    as_of0 = ""
 
     rows = compute_all()
+    if rows:
+        as_of0 = rows[0]["date"]
 
-    # ---- 板块感知上升通道集合（每个白名单板块各算一份，Layer1）----
+    # ---- 趋势上升通道集合（Layer1 趋势闸）----
+    # 显式设置了 bottom_trend_index（默认全市场=中证全指 sh000985）→ 用它做「全市场口径」的
+    # 上升通道判定，所有入选板块共用同一集合：选股/交易仍受 twin_t_boards 约束，但分析趋势时
+    # 全市场一起考虑（用户 2026-11 要求）。trend_index 留空 → 退化到旧的多板块感知（各板块
+    # 自己的官方指数 / 创业板等权合成指数）。
     board_uptrend: dict[str, set[str] | None] = {}
     board_trends: list[dict] = []
     if s.bottom_trend_filter:
-        from app.backtest.engine import compute_cyb_uptrend_dates
-        from app.analysis.board_index import board_regime
-        for b in boards:
-            if b == "cyb" and trend_index:
-                # 用户指定官方创业板指（如 sz399006）：用官方指数
-                up = compute_cyb_uptrend_dates(kdir, ma, index_symbol=trend_index)
-            elif b == "cyb":
-                # 默认：300/301 等权合成指数（回测验证更优，+8.49%）
-                up = compute_cyb_uptrend_dates(kdir, ma, index_symbol=None)
-            else:
-                from app.analysis.board_index import board_uptrend_set
-                up = board_uptrend_set(kdir, b, ma)
-            board_uptrend[b] = up
-            rg = board_regime(b, kdir, ma)
-            as_of0 = rows[0]["date"] if rows else ""
+        if trend_index:
+            from app.backtest.engine import compute_index_uptrend_dates
+            from app.analysis.board_index import index_regime
+            up = compute_index_uptrend_dates(trend_index, ma, kdir)
+            for b in boards:
+                board_uptrend[b] = up
+            rg = index_regime(trend_index, kdir, ma)
             board_trends.append({
-                "board": b,
-                "name": rg.get("name") or b,
-                "index": rg.get("index"),
+                "board": "__all__",
+                "name": rg.get("name") or trend_index,
+                "index": trend_index,
                 "available": rg.get("available", False),
                 "state": rg.get("state"),
                 "dev_pct": rg.get("dev_pct"),
                 "uptrend_today": (as_of0 in up) if up is not None else None,
             })
+        else:
+            from app.backtest.engine import compute_cyb_uptrend_dates
+            from app.analysis.board_index import board_uptrend_set, board_regime
+            for b in boards:
+                if b == "cyb":
+                    # 300/301 等权合成指数（回测验证更优，+8.49%）
+                    up = compute_cyb_uptrend_dates(kdir, ma, index_symbol=None)
+                else:
+                    up = board_uptrend_set(kdir, b, ma)
+                board_uptrend[b] = up
+                rg = board_regime(b, kdir, ma)
+                board_trends.append({
+                    "board": b,
+                    "name": rg.get("name") or b,
+                    "index": rg.get("index"),
+                    "available": rg.get("available", False),
+                    "state": rg.get("state"),
+                    "dev_pct": rg.get("dev_pct"),
+                    "uptrend_today": (as_of0 in up) if up is not None else None,
+                })
     else:
         board_uptrend = None  # 趋势过滤关闭：不阻断任何板块
 
@@ -314,7 +341,7 @@ def write_cache() -> dict:
         "trend_filter": bool(s.bottom_trend_filter),
         "trend_ma": int(s.bottom_trend_ma),
         "trend_index": trend_index,
-        "bottom_boards": s.bottom_boards,
+        "bottom_boards": s.twin_t_boards,  # 已统一跟随 twin_t_boards（选股+交易共用）
         "board_trends": board_trends,
         "time_stop_days": int(s.bottom_time_stop_days),
         "trailing_pct": float(s.bottom_trailing_pct),
@@ -340,3 +367,76 @@ def read_cache(force_refresh: bool = False, max_age_hours: int = 24) -> dict:
         except Exception:
             pass
     return write_cache()
+
+
+def bridge_to_trade(top_n: int = 10, watch: bool = True, queue: bool = False) -> dict:
+    """把底部反转（多板块）候选接入交易链（#191）：写入 signals + 自选股，并可送交易队列。
+
+    此前底部反转候选只写 ``bottom_reversal_cache.json``（仅面板读取），与交易流水线完全脱节；
+    本函数让它与 scanner 命中走同一套下游：
+      - signals：``strategy="bottom_reversal_board"``，候选出现在「信号与自选」页；
+      - watchlist：``source="auto"``、``note="底部反转(多板块)"``，下一轮 ``analyze_watchlist`` 即可覆盖；
+      - queue：构造 buy 建议送 ``live_trader`` 队列（受 ``paper_live_enabled`` / ``auto_trade_enabled`` 约束）。
+    默认不送队列（``queue=False``）：不主动买卖，只让候选进入观察/建议链路，避免意外成交。
+    """
+    s = get_settings()
+    data = read_cache()
+    cands = data.get("candidates") or []
+    today = dt.datetime.now().strftime("%Y-%m-%d")
+    top = sorted(
+        cands, key=lambda c: float(c.get("factor_score") or 0), reverse=True
+    )[: max(int(top_n), 0)]
+
+    sig_added = 0
+    if top:
+        from app.data.cache import db
+        hits = [{
+            "code": str(c.get("code") or ""),
+            "name": str(c.get("name") or c.get("code") or ""),
+            "strategy": "bottom_reversal_board",
+            "price": float(c.get("last") or 0),
+            "reason": "底部反转(多板块)候选",
+            "score": float(c.get("factor_score") or 0),
+            "rank": 0,
+            "extra": {},
+        } for c in top]
+        db.save_signals(hits, scan_date=today)
+        sig_added = len(hits)
+        # 六阶段生命周期：初选命中（#191，底部反转候选）
+        for h in hits:
+            db.insert_lifecycle_event(
+                h["code"], h["name"], 1, "初选", "signal_in",
+                detail="底部反转(多板块)",
+            )
+
+    watched = 0
+    if watch and top:
+        from app.data.cache import db
+        items = [(str(c.get("code") or ""), str(c.get("name") or c.get("code") or ""))
+                 for c in top]
+        watched = db.add_watch_many(items, source="auto", note="底部反转(多板块)")
+        for c in top:
+            db.insert_lifecycle_event(
+                str(c.get("code") or ""), str(c.get("name") or c.get("code") or ""),
+                2, "入自选", "watch_in", detail="底部反转(多板块)",
+            )
+
+    queued = 0
+    if queue and top:
+        try:
+            from app.paper.live import live_trader
+            from app.analysis.recommender import Recommendation
+            recs = [Recommendation(
+                code=str(c.get("code") or ""),
+                name=str(c.get("name") or c.get("code") or ""),
+                action="buy",
+                score=float(c.get("factor_score") or 0),
+                reason="底部反转(多板块)候选",
+                price=float(c.get("last") or 0),
+                stop_loss=None, target_price=None,
+            ) for c in top]
+            queued = live_trader.submit(recs, source="底部反转")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("底部反转候选送队列失败：%s", exc)
+
+    return {"signals": sig_added, "watched": watched, "queued": queued, "total": len(cands)}

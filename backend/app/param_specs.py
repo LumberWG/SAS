@@ -71,8 +71,7 @@ RUNTIME_KEYS: frozenset[str] = frozenset({
     "bottom_trend_index",
     "bottom_time_stop_days",
     "bottom_trailing_pct",
-    # 多板块扫描白名单：决定扫描哪些板块、每只票用各自板块指数做趋势过滤
-    "bottom_boards",
+    # 注：板块白名单已统一为 twin_t_boards（选股+交易共用），bottom_boards 不再单独可调
     # 统一大盘宏观风险层（含外围）阈值：驱动总仓位上限
     "unified_risk_ma",
     "unified_risk_include_overseas",
@@ -137,30 +136,6 @@ _LAYOUT: tuple[tuple[str, str, tuple[tuple[str, str, tuple[str, ...]], ...]], ..
         ),
     ),
     (
-        "选股与自选",
-        "评分判级、收盘选股、自选与影子策略",
-        (
-            ("评分阈值", "决定 buy / sell 判级的分数线", ("factor_buy_threshold", "factor_sell_threshold")),
-            # 打分引擎：决定「排序与仓位定价」用 14 因子分还是 ML 截面分位。
-            # 之前没收录，页面会把它甩进「其他」组里孤零零一项。
-            ("打分引擎", "排序用 14 因子绝对分还是 ML 截面分位（线上默认 14 因子）", ("live_ml_scoring",)),
-            (
-                "自选与关注",
-                "收盘后自动加自选与明日关注的数量",
-                ("auto_watch_enabled", "auto_watch_top_n", "focus_top_n"),
-            ),
-            ("盘后选股", "收盘扫描的股票池范围", ("auto_scan_scope",)),
-
-
-
-
-
-
-
-            ("盘中分析", "盘中分析的触发间隔", ("intraday_analysis_interval",)),
-        ),
-    ),
-    (
         "账户与费率",
         "模拟盘本金、持仓上限与交易成本",
         (
@@ -209,8 +184,8 @@ _LAYOUT: tuple[tuple[str, str, tuple[tuple[str, str, tuple[str, ...]], ...]], ..
             ),
             (
                 "股票池过滤",
-                "先剔掉不该买的票，再看信号；交易板块可与选股板块填同一套值",
-                ("paper_exclude_large_cap", "paper_large_cap_yi", "twin_t_boards",
+                "先剔掉不该买的票，再看信号；交易板块跟随「选股策略」页里的选股板块白名单",
+                ("paper_exclude_large_cap", "paper_large_cap_yi",
                  "paper_liquidate_offboard", "board_rules_legacy_limit"),
             ),
         ),
@@ -267,6 +242,7 @@ _LAYOUT: tuple[tuple[str, str, tuple[tuple[str, str, tuple[str, ...]], ...]], ..
                     "paper_breakeven_pct",
                     "paper_trail_pct",
                     "paper_trail_arm",
+                    "paper_max_hold_days",
                 ),
             ),
 
@@ -291,12 +267,17 @@ _LAYOUT: tuple[tuple[str, str, tuple[tuple[str, str, tuple[str, ...]], ...]], ..
             ("做T 保护", "涨停卖半与做T 熔断", ("paper_t_limit_sell_half", "paper_t_crash_guard")),
             (
                 "大盘择时",
-                "指数在均线下方时收缩买入；机制检测灵敏度也可调",
+                "指数在均线下方时收缩买入；统一宏观风险（含外围）四档压仓也可调",
                 ("paper_regime_ma", "paper_regime_weak_pause", "paper_weak_exposure",
                  "entry_guard_block_declining_market", "entry_guard_gap_threshold",
-                 "entry_guard_spike_threshold", "paper_regime_vol_win", "paper_regime_vol_base",
+                 "entry_guard_spike_threshold", "paper_board_trend_gate",
+                 "paper_unified_risk_cap_enabled",
+                 "paper_regime_vol_win", "paper_regime_vol_base",
                  "paper_regime_dd_win", "paper_regime_crisis_vol", "paper_regime_crisis_dd",
-                 "paper_regime_shock_vol", "paper_regime_shock_dd"),
+                 "paper_regime_shock_vol", "paper_regime_shock_dd",
+                 "unified_risk_ma", "unified_risk_include_overseas",
+                 "unified_risk_thr_weak", "unified_risk_thr_shock", "unified_risk_thr_crisis",
+                 "unified_risk_cap_weak", "unified_risk_cap_shock", "unified_risk_cap_crisis"),
             ),
         ),
     ),
@@ -310,44 +291,6 @@ _LAYOUT: tuple[tuple[str, str, tuple[tuple[str, str, tuple[str, ...]], ...]], ..
                 "LLM 接入",
                 "任意 OpenAI 兼容接口，未配置时自动降级为纯技术面",
                 ("llm_enabled", "llm_base_url", "llm_api_key", "llm_model", "llm_timeout"),
-            ),
-        ),
-    ),
-    (
-        "创业板底部反转",
-        "实盘选股面板与回测同口径：低位 + 回撤 + 活跃成交 + 趋势过滤",
-        (
-            (
-                "选股口径",
-                "低位启动、相对20日高点跌够、成交活跃、成交不能太低",
-                ("bottom_start_pos_max", "bottom_dd20_min", "bottom_turnover_min",
-                 "bottom_min_avg_amount", "bottom_min_factor_score"),
-            ),
-            (
-                "趋势过滤",
-                "板块感知：每只票用「自己板块的指数」判上升通道（创业板票看创业板指、上证票看上证指数，不混为一谈）；盘中按实时指数动态重算",
-                ("bottom_trend_filter", "bottom_trend_ma", "bottom_trend_index"),
-            ),
-            (
-                "多板块扫描",
-                "候选不再限于创业板：按代码前缀分到各板块（创业板/上证主板/深证主板/科创板），每个板块用各自指数做趋势过滤；切换板块后请同步「交易执行 → 股票池过滤」的交易板块",
-                ("bottom_boards", "bottom_scale_exit_by_limit"),
-            ),
-            (
-                "统一大盘宏观风险（含外围）",
-                "把国内大盘 + 外围（美股前一日 / 亚太当日）综合成风险分，映射到 calm/weak/shock/crisis 四档，驱动总仓位上限",
-                ("unified_risk_ma", "unified_risk_include_overseas",
-                 "unified_risk_thr_weak", "unified_risk_thr_shock", "unified_risk_thr_crisis"),
-            ),
-            (
-                "四档仓位上限",
-                "本层专属上限，随风险单调递减（默认 30%/20%/10%），与机制层 paper_regime_cap_* 相互独立；仅危机档全暂停新开仓，卖出与止盈止损照常",
-                ("unified_risk_cap_weak", "unified_risk_cap_shock", "unified_risk_cap_crisis"),
-            ),
-            (
-                "主动离场",
-                "时间止损+跟踪止损：震荡不死扛、盈利锁利润（短线必备）",
-                ("bottom_time_stop_days", "bottom_trailing_pct"),
             ),
         ),
     ),
@@ -384,6 +327,11 @@ _LAYOUT: tuple[tuple[str, str, tuple[tuple[str, str, tuple[str, ...]], ...]], ..
                  "paper_regime_stop_tighten", "paper_regime_stop_min"),
             ),
             (
+                "已废弃（统一到 twin_t_boards）",
+                "bottom_boards 已并入「选股+交易板块」(twin_t_boards)，保留字段仅为向后兼容；页面不再展示，仅 API 可写以同步",
+                ("bottom_boards",),
+            ),
+            (
                 "网络",
                 "请求超时（当前未被任何代码读取，仅保留以防后续启用）",
                 ("request_timeout",),
@@ -395,6 +343,28 @@ _LAYOUT: tuple[tuple[str, str, tuple[tuple[str, str, tuple[str, ...]], ...]], ..
 #: 分组展示顺序（只列**可编辑**的组；只读的部署项与硬编码常量单独返回，
 #: 不混进参数列表——页面上能改的才叫"系统设置"，改不了的塞进去只会误导）
 GROUP_ORDER: tuple[str, ...] = tuple(g[0] for g in _LAYOUT)
+
+#: 从「系统设置」页**完全移除**、但仍可经 `update_settings` / 选股策略面板编辑的键。
+#:
+#: 语义：这些参数是「选股策略」的一部分（选股板块、评分阈值、盘后自选、底部反转选股口径），
+#: 用户要求只在「选股策略」(全市场选股) 页里改，不在「系统设置」里重复出现。它们仍是
+#: 合法可编辑项（`update_settings` 照常写 `app_state` 覆盖层 + 就地改单例），只是不在
+#: 系统设置总览里渲染——否则会落进 `_FALLBACK_GROUP_RULES` 的兜底「其他」分组，
+#: 造成"明明移走了还在"的假象。选股策略页专用总览见 :func:`selection_settings_overview`。
+SETTINGS_SYSTEM_HIDDEN: frozenset[str] = frozenset({
+    # 选股 + 交易统一板块（原在「交易执行 → 股票池过滤」）
+    "twin_t_boards",
+    # 选股与自选组
+    "factor_buy_threshold", "factor_sell_threshold", "live_ml_scoring",
+    "auto_watch_enabled", "auto_watch_top_n", "focus_top_n",
+    "auto_scan_scope", "intraday_analysis_interval",
+    # 创业板底部反转选股口径（不含 unified_risk_* 风险压仓项，后者仍留在系统设置）
+    "bottom_start_pos_max", "bottom_dd20_min", "bottom_turnover_min",
+    "bottom_min_avg_amount", "bottom_min_factor_score",
+    "bottom_trend_filter", "bottom_trend_ma", "bottom_trend_index",
+    "bottom_scale_exit_by_limit", "bottom_reversal_autobridge",
+    "bottom_time_stop_days", "bottom_trailing_pct",
+})
 
 #: 页面隐藏分组：这些分组里的参数**仍保留在 `Settings` 字段与业务代码读取中**
 #: （回测 / 影子策略 / 引擎风控仍在用），只是不在设置页展示——避免把基本不需要
@@ -692,9 +662,10 @@ _SHORT_LABELS: dict[str, str] = {
     "paper_pool_top_n": "成交额池 TopN",
     "paper_exclude_large_cap": "大盘股过滤",
     "paper_large_cap_yi": "大盘股阈值",
-    "twin_t_boards": "交易板块",
+    "twin_t_boards": "选股+交易板块",
     "board_rules_legacy_limit": "板块规则回退",
     "bottom_scale_exit_by_limit": "止盈按板块缩放",
+    "bottom_reversal_autobridge": "底反自动入链",
     # ---- 止损 / 止盈 ----
     "paper_stop_loss": "固定止损",
     "paper_take_profit": "固定止盈",
@@ -704,12 +675,15 @@ _SHORT_LABELS: dict[str, str] = {
     "paper_breakeven_pct": "保本触发",
     "paper_trail_pct": "移动止损回撤",
     "paper_trail_arm": "移动止损启用",
+    "paper_max_hold_days": "短线时间止损(日)",
     "paper_regime_stop_tighten": "机制层止损收紧",
     "paper_regime_stop_min": "收紧后下限",
     # ---- 大盘择时 ----
     "paper_regime_ma": "择时均线",
     "paper_regime_weak_pause": "弱市暂停买入",
     "entry_guard_block_declining_market": "入场护栏硬屏蔽",
+    "paper_board_trend_gate": "板块趋势闸门",
+    "paper_unified_risk_cap_enabled": "统一风险四档压仓",
     "paper_weak_exposure": "弱市保留仓位",
     "paper_dynamic_exposure": "动态机制降暴露",
     "paper_regime_cap_calm": "平稳仓上限",
@@ -828,10 +802,10 @@ _DESC_OVERRIDES: dict[str, str] = {
     "paper_backlog_max": "候补队列最多存多少只高分票（有名额时按评分优先买入）",
     "paper_large_cap_yi": "总市值超过该值（亿元）视为大盘股，默认不进买入队列",
     "twin_t_boards": (
-        "勾选允许买入/统计的板块。可填中文名（主板/创业板/科创板/北交所）或与 bottom_boards 同款的"
-        "英文键（sh_main/sz_main/cyb/star/bse），两套可填同一串值；留空=退回主板+创业板。"
-        "引擎买入池、日更做T清单、非板块持仓清仓都按此过滤。⚠️ 若比「多板块扫描」bottom_boards "
-        "少勾了板块，那些板块的候选会被买入侧拒绝——面板会显示一致性警告"
+        "【选股 + 交易 统一板块】单一板块白名单，同时驱动「选股扫描范围」与「交易买入池」。"
+        "可勾中文名（主板/创业板/科创板/北交所）或英文键（sh_main/sz_main/cyb/star/bse），"
+        "留空=退回主板+创业板。引擎买入池、日更做T清单、选股扫描范围、非板块持仓清仓都按此过滤。"
+        "选股与交易共用同一设置，两者不再各管各的，因此不再出现「板块不一致」告警。"
     ),
     "board_rules_legacy_limit": (
         "板块交易规则回退开关：默认关=按各板块真实规则（主板±10%、创业板/科创板±20%、"
@@ -1173,6 +1147,142 @@ def apply_persisted_overrides() -> int:
     return applied
 
 
+def _item_for(key: str, texts: dict, env_keys: set) -> dict | None:
+    """构造单个参数在设置页渲染所需的元数据 dict。
+
+    系统设置页（`settings_overview`）与选股策略面板（`selection_settings_overview`）
+    共用同一套字段读取逻辑：当前生效值 → 来源判定（app_state > env > default）
+    → 控件类型 → 短名/说明/可选项。任何一处改了字段处理，两边一起生效。
+    """
+    field = Settings.model_fields.get(key)
+    if field is None:
+        return None
+    s = get_settings()
+    default = field.default
+    value = getattr(s, key, default)
+    source = "default"
+    # 覆盖层的键名有两套：RUNTIME_KEYS 沿用既有无前缀键（engine 直接读它们），
+    # 其余走 `cfg:` 前缀，避免与业务自定义状态键撞名
+    state_key = key if key in RUNTIME_KEYS else OVERRIDE_PREFIX + key
+    from app.data.cache import db
+
+    try:
+        raw = db.get_state(state_key)
+    except Exception:  # noqa: BLE001
+        raw = None
+    if raw is not None and raw != "":
+        try:
+            value = _coerce_value(key, raw, default)
+            source = "app_state"
+        except ValueError:
+            logger.warning("配置项 %s 的覆盖值非法: %r", key, raw)
+    if source == "default" and key.upper() in env_keys:
+        source = "env"
+    runtime = key in RUNTIME_KEYS
+    kind = kind_of(key, default)
+    item = {
+        "key": key,
+        # 短名进卡片，整句说明进 tooltip（前端 `tipOf`）
+        "label": _short_label(key, texts.get(key, "")),
+        "desc": texts.get(key) or _DESC_OVERRIDES.get(key, ""),
+        # 密钥/机器人地址只回显掩码；前端原样回传掩码时 `update_settings` 视为未改动
+        "value": mask_secret(value) if key in SECRET_KEYS else _jsonable(value),
+        "type": "bool" if isinstance(default, bool)
+        else "int" if isinstance(default, int)
+        else "float" if isinstance(default, float)
+        else "str",
+        "source": source,
+        # 能落到这里的都可编辑：写 app_state 覆盖层 + 就地生效，重启由启动流程重放
+        "restart_required": False,
+        "writable": True,
+        "kind": kind,
+        "runtime": runtime,
+        "note": _NOTE_OVERRIDES.get(key, ""),
+    }
+    if key in SECRET_KEYS:
+        # 前端据此渲染「已设置（掩码）」提示与 password 输入框
+        item["secret"] = True
+    if key in _DEPENDS_ON:
+        # 条件可见：父开关（或空的文本父项）不满足时，前端把这一行藏起来
+        item["depends_on"] = _DEPENDS_ON[key]
+    if key in MULTISELECT_KEYS:
+        # 多选控件的可选项列表（前端据此渲染 chip），顺序同 MULTISELECT_KEYS 声明
+        item["options"] = list(MULTISELECT_KEYS[key])
+    return item
+
+
+def selection_settings_overview() -> dict:
+    """「选股策略」页（全市场选股）专用的参数总览：只返回与**选股**相关的参数，
+    分三块（选股板块 / 选股与自选 / 底部反转选股）。这些参数已从系统设置页隐藏，
+    但仍可经 `update_settings` 正常读写。结构与 `settings_overview` 一致，前端可直接复用渲染。
+
+    注：`unified_risk_*`（统一宏观风险 + 四档压仓）属风控层、非选股口径，仍留在系统设置
+    （「风控与止损 → 大盘择时」），不在此出现。
+    """
+    texts = _comment_texts()
+    env_keys = _env_keys()
+    sections = (
+        (
+            "选股板块",
+            "选股与交易共用的统一板块白名单（一处改，两边生效）",
+            "板块白名单",
+            "可勾选主板/创业板/科创板/北交所；留空退回主板+创业板",
+            ("twin_t_boards",),
+        ),
+        (
+            "选股与自选",
+            "评分判级、盘后自选与扫描范围",
+            "选股与自选",
+            "评分阈值、打分引擎、盘后自选/关注、盘后选股范围、盘中分析间隔",
+            (
+                "factor_buy_threshold", "factor_sell_threshold", "live_ml_scoring",
+                "auto_watch_enabled", "auto_watch_top_n", "focus_top_n",
+                "auto_scan_scope", "intraday_analysis_interval",
+            ),
+        ),
+        (
+            "底部反转选股",
+            "实盘底部反转选股面板（与回测同口径）：低位 + 回撤 + 活跃成交 + 趋势过滤",
+            "底部反转",
+            "选股口径、趋势过滤、多板块缩放、入链、主动离场",
+            (
+                "bottom_start_pos_max", "bottom_dd20_min", "bottom_turnover_min",
+                "bottom_min_avg_amount", "bottom_min_factor_score",
+                "bottom_trend_filter", "bottom_trend_ma", "bottom_trend_index",
+                "bottom_scale_exit_by_limit", "bottom_reversal_autobridge",
+                "bottom_time_stop_days", "bottom_trailing_pct",
+            ),
+        ),
+    )
+    groups: list[dict] = []
+    total = 0
+    runtime_count = 0
+    for gname, gdesc, subname, subdesc, keys in sections:
+        items: list[dict] = []
+        for k in keys:
+            it = _item_for(k, texts, env_keys)
+            if it is None or it["kind"] == "readonly":
+                continue
+            items.append(it)
+            if it["source"] == "app_state":
+                runtime_count += 1
+        if not items:
+            continue
+        total += len(items)
+        groups.append({
+            "name": gname,
+            "desc": gdesc,
+            "items": items,
+            "subgroups": [{"name": subname, "desc": subdesc, "items": items}],
+        })
+    return {
+        "groups": groups,
+        "total": total,
+        "runtime_overrides": runtime_count,
+        "hint": "以下参数属于选股策略：改动即时落库生效（重启保留）；风险压仓类仍在系统设置。",
+    }
+
+
 def settings_overview() -> dict:
     """当前**生效值**总览：分组 → 组内小节 → 全部参数（含来源与生效方式）。
 
@@ -1192,58 +1302,16 @@ def settings_overview() -> dict:
 
     # 分组 → 小节 → 参数
     buckets: dict[str, dict[str, list[dict]]] = {}
-    for key, field in fields.items():
-        default = field.default
-        value = getattr(s, key, default)
-        source = "default"
-        # 覆盖层的键名有两套：RUNTIME_KEYS 沿用既有无前缀键（engine 直接读它们），
-        # 其余走 `cfg:` 前缀，避免与业务自定义状态键撞名
-        state_key = key if key in RUNTIME_KEYS else OVERRIDE_PREFIX + key
-        try:
-            raw = db.get_state(state_key)
-        except Exception:  # noqa: BLE001
-            raw = None
-        if raw is not None and raw != "":
-            try:
-                value = _coerce_value(key, raw, default)
-                source = "app_state"
-            except ValueError:
-                logger.warning("配置项 %s 的覆盖值非法: %r", key, raw)
-        if source == "default" and key.upper() in env_keys:
-            source = "env"
-        runtime = key in RUNTIME_KEYS
-        kind = kind_of(key, default)
-        item = {
-            "key": key,
-            # 短名进卡片，整句说明进 tooltip（前端 `tipOf`）
-            "label": _short_label(key, texts.get(key, "")),
-            "desc": texts.get(key) or _DESC_OVERRIDES.get(key, ""),
-            # 密钥/机器人地址只回显掩码；前端原样回传掩码时 `update_settings` 视为未改动
-            "value": mask_secret(value) if key in SECRET_KEYS else _jsonable(value),
-            "type": "bool" if isinstance(default, bool)
-            else "int" if isinstance(default, int)
-            else "float" if isinstance(default, float)
-            else "str",
-            "source": source,
-            # 能落到这里的都可编辑：写 app_state 覆盖层 + 就地生效，重启由启动流程重放
-            "restart_required": False,
-            "writable": True,
-            "kind": kind,
-            "runtime": runtime,
-            "note": _NOTE_OVERRIDES.get(key, ""),
-        }
-        if key in SECRET_KEYS:
-            # 前端据此渲染「已设置（掩码）」提示与 password 输入框
-            item["secret"] = True
-        if key in _DEPENDS_ON:
-            # 条件可见：父开关（或空的文本父项）不满足时，前端把这一行藏起来
-            item["depends_on"] = _DEPENDS_ON[key]
-        if key in MULTISELECT_KEYS:
-            # 多选控件的可选项列表（前端据此渲染 chip），顺序同 MULTISELECT_KEYS 声明
-            item["options"] = list(MULTISELECT_KEYS[key])
+    for key in fields:
+        # 选股策略相关参数已从系统设置页隐藏（仍可在选股策略面板编辑）
+        if key in SETTINGS_SYSTEM_HIDDEN:
+            continue
+        item = _item_for(key, texts, env_keys)
+        if item is None:
+            continue
         # 只读项（路径/列表类）与硬编码常量直接不进清单：它们改不了
         # （前者要改 .env 重启，后者要改代码），展示了也没用，只会让人以为能调。
-        if kind != "readonly":
+        if item["kind"] != "readonly":
             group, sub = _placement_of(key)
             buckets.setdefault(group, {}).setdefault(sub, []).append(item)
 

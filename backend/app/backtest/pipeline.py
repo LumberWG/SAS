@@ -1,6 +1,9 @@
 """全流水线回测：完整复刻线上「扫描 → 加自选 → 14因子排序 → 评分加权下单」。
 
-不单独挑策略，而是用全部已注册策略同时扫描，与线上模拟盘同一条链路。
+默认策略集严格跟随实盘 ``Settings.auto_scan_strategies``（当前 A-Only：量价共振2560）；
+留空（``[]`` / ``None``）才等于「全部已注册策略」，与线上 ``scheduler.auto_scan`` 的
+``auto_scan_strategies or registry.names()`` 完全同一口径。显式传 ``strategies``
+仅用于回测侧策略子集实验，不影响实盘。
 
 防“上帝视角”（未来函数）的三条硬约束：
   1) 每日股票池只看**当日成交额**（TopN），不使用任何未来成交数据；
@@ -29,22 +32,31 @@ import logging
 import math
 import os
 import random
-from collections import OrderedDict
+from collections import OrderedDict, defaultdict
 from dataclasses import dataclass
 
 import pandas as pd
 
 from app.analysis.factors import BUY_THRESHOLD, SELL_THRESHOLD, compute_factors, thresholds
 from app.analysis.scoring import score_technical
+from app.backtest import progress
 from app.backtest.review import analyze
 from app.config import get_settings
+from app.data.scope import is_st_name
 from app.data.service import get_stock_pool
 from app.data.minute import get_minute_day_bars  # E45：分钟级强势确认（需当日 OHLCV）
 from app.data.minute import get_minute_prices  # E-intraday：真实分钟线（可选，失败降级）
 from app.indicators import add_all_indicators
+from app.risk.stops import resolve_stop_price  # 止损口径与实盘共用，禁止再加大盘门控
+from app.risk.context_gates import (  # P1 四项风险闸：与实盘物理共用同一份决策函数
+    ContextGateConfig, audit_buy_candidates,
+)
+from app.risk.context_store import ContextStore
 from app.screener.scanner import rank_hits
 from app.strategies import builtin  # noqa: F401  - 触发内置策略注册
 from app.strategies import registry
+from app.analysis.entry_guard import should_block_buy, board_regime_for_code
+from app.analysis.market_risk import get_unified_market_risk
 from app.board_rules import (
     legacy_limit_enabled, limit_down_ratio, limit_up_ratio,
     lot_rule, round_buy_qty, round_sell_qty,
@@ -70,6 +82,23 @@ def _down_px(code: str, pc: float) -> float:
 def _min_qty(code: str) -> int:
     """该板块最小申报股数（主板/创业板 100、科创板 200、北交所 100）。"""
     return lot_rule(code)[0]
+
+
+def _buy_blocked(code: str, board_trend_gate: bool = False) -> tuple[bool, str]:
+    """#191 同步：复刻实盘「新开仓」护栏，仅拦买入、不拦卖出/做T买回。
+
+    - 危机市硬拦：``should_block_buy()``（内部跟随 ``entry_guard_block_declining_market``，
+      关则直接返 False，零行为变更，不触发任何外部调用）。
+    - 板块趋势闸门：``board_trend_gate`` 为真且个股所属板块处于下降通道（downtrend）时拒买。
+    返回 (blocked, reason)；``reason`` 为空串表示未拦截。
+    """
+    if should_block_buy()[0]:
+        return True, "危机市硬拦(should_block_buy)"
+    if board_trend_gate:
+        _br = board_regime_for_code(code)
+        if _br.get("available") and _br.get("regime") == "downtrend":
+            return True, "板块下降通道(board_trend_gate)"
+    return False, ""
 STOP_LOSS_RATIO = 0.08     # 与线上 engine 一致：成本价 -8% 止损（回测参数缺省回退，实盘以 Settings 为准）
 TAKE_PROFIT_RATIO = 0.20   # 成本价 +20% 止盈（同上）
 
@@ -136,7 +165,8 @@ class PipelineParams:
     breakeven_trigger: float | None = None # 浮盈曾达该比例后，止损上移到成本价（保本止损）
     trail_pct: float | None = None         # 从持仓期最高价回撤该比例即卖出（移动止损）
     trail_arm: float = 0.0                 # 移动止损生效门槛：浮盈曾达该比例后才启用
-    regime_ma: int | None = None           # 大盘择时：仅当上证指数 < MA(N) 时才启用上述防守规则
+    regime_ma: int | None = None           # 大盘择时：仅当 regime_index 指定宽基指数 < MA(N) 时才启用上述防守规则
+    regime_index: str | None = None        # 弱市判定宽基指数代码（如 sh000985=中证全指）；None=跟随实盘 paper_regime_index
     # ---- E10/E11：分段止盈与止损触发方式（None/False=线上当前行为） ----
     partial_tp_at: float | None = None     # 分段止盈触发涨幅（相对成本），首次达到时卖出一部分
     partial_tp_ratio: float = 0.5          # 分段止盈卖出比例（按整手取整）
@@ -194,6 +224,13 @@ class PipelineParams:
     #: 满仓轮动开关（None = 沿用 settings.paper_rotation_enabled）。
     #: 轮动是**强制卖出**，也是换手与摩擦的最大来源（记录 #29：月换手约 2.2 个资本）。
     rotation_enabled: bool | None = None
+    # ---- #191：回测对齐实盘入场护栏（None = 沿用线上开关，默认关，零行为变更） ----
+    #: 板块趋势闸门：候选所属板块指数处于下降通道（downtrend）时拒绝买入，
+    #: 对应实盘 ``paper_board_trend_gate``。仅拦新开仓，不影响卖出/做T买回。
+    board_trend_gate: bool | None = None
+    #: Layer2 统一宏观风险四档 cap（weak/shock/crisis 压总仓位，只降不升），
+    #: 对应实盘 ``paper_unified_risk_cap_enabled``。开启后把总仓位上限与四档 cap 取 min。
+    unified_risk_cap_enabled: bool | None = None
     # ---- 做T引擎（参数化主动交易；全部 None = 关闭，沿用被动持有） ----
     #: 启用后，对已有持仓在「次日开盘→收盘」做日内做T / 分级网格（遵循 A 股 T+1：
     #: 做T 只动用**底仓**做「先卖后买」的倒T，下跌加仓为隔夜行为，反弹减仓在之后交易日卖出）。
@@ -294,8 +331,42 @@ class PipelineParams:
     ml_require_ic: float | None = None
     #: ML 模型：None/"lightgbm"（默认，不可用时自动回退 ridge）/"ridge"。路线 A 完整版。
     ml_model: str | None = None
+    # ---- A-minus 延伸：regime-aware 打分路由 ----
+    #: 趋势市用 ML 排序、震荡市回退 14 因子（逐日按指数 MA/波动率判定）。
+    #: 解决「ML 在趋势市有效、在震荡市过拟合」的净负贡献问题。默认 False。
+    ml_regime_aware: bool = False
+    #: 趋势市判定：近 20 日年化波动率上限（超过=视为震荡市，用 14 因子）。默认 0.25。
+    ml_regime_vol_cap: float = 0.25
+    #: 趋势市判定：MA20 须高于 MA60 的最小比例（0=只要 MA20>MA60 即趋势市）。默认 0.0。
+    ml_regime_ma_gap: float = 0.0
+    # ---- A-minus 延伸：IC 门控 ML 叠加（第三条路 v2，研究专用） ----
+    #: 因子为底，仅当「滚动已实现 ML-IC」≥ 阈值时切 ML 打分，否则回退 14 因子。
+    #: 解决 regime-aware 用价格趋势路由却与 ML 有效性不相关的问题。默认 False。
+    ml_ic_gate: bool = False
+    #: 滚动 IC 缓冲的已实现样本对上限（近似滚动窗口）。默认 400。
+    ml_ic_gate_window: int = 400
+    #: 启用 ML 的滚动 IC 阈值（rank-IC）。默认 0.12。
+    ml_ic_gate_thresh: float = 0.12
+    #: 滚动缓冲样本不足此数时保守回退因子（冷启动）。默认 20。
+    ml_ic_gate_min_samples: int = 20
+    #: 段级 OOS-IC 门控：用段前训练得到的 CV-OOS rank-IC（段开始前已知、零未来泄漏）
+    #: 一次性决定整段是否启用 ML，而非每日滚动。与 oracle(IC>阈值) 同口径，更干净稳定。
+    ml_ic_gate_segment: bool = False
     #: 行业内中性化：True 时扣掉行业（或板块）均值再排分位，消除行业暴露。默认 False。
     industry_neutral: bool = False
+    # ---- P1 上下文风险闸：与实盘 Settings.paper_ctx_* 逐项绑定，共用 app.risk.context_gates ----
+    #: 四项总开关；False = 完全回到 P1 之前的行为
+    context_enabled: bool = True
+    #: 买入后同一行业只数 / 组合总只数上限；0 = 关闭该子闸
+    context_max_industry_weight: float = 0.40
+    #: 与持仓组合 60 日收益平均 |相关系数| 上限；0 = 关闭
+    context_max_corr: float = 0.85
+    #: 剔除个股/行业热度最热比例（0.20 = 80% 分位）；0 = 关闭
+    context_hot_exclude_pct: float = 0.20
+    #: 事件日及之后 N 个自然日禁买；0 = 关闭
+    context_event_cooldown_days: int = 3
+    #: 加权舆情分 <= -此值禁买；0 = 关闭
+    context_news_block: float = 0.60
 
 
 def calc_fee(side: str, amount: float) -> float:
@@ -471,9 +542,11 @@ def _load_klines(end_date: str, start_date: str, kline_dir: str) -> dict[str, pd
     return data
 
 
-def _load_index(kline_dir: str) -> pd.DataFrame:
-    """读取上证指数日线（用于大盘择时），缺失时返回空表。"""
-    path = os.path.join(kline_dir, "idx_sh000001.parquet")
+def _load_index(kline_dir: str, index_code: str | None = None) -> pd.DataFrame:
+    """读取弱市判定宽基指数日线（用于大盘择时），缺失时返回空表。"""
+    from app.config import get_settings
+    code = "idx_" + str(index_code or get_settings().paper_regime_index or "sh000985")
+    path = os.path.join(kline_dir, code + ".parquet")
     if not os.path.isfile(path):
         return pd.DataFrame()
     try:
@@ -482,7 +555,36 @@ def _load_index(kline_dir: str) -> pd.DataFrame:
         return pd.DataFrame()
     if df is None or df.empty or "close" not in df:
         return pd.DataFrame()
-    return df.sort_values("date").reset_index(drop=True)
+    df = df.sort_values("date").reset_index(drop=True)
+    try:
+        df = add_all_indicators(df)
+    except Exception:  # noqa: BLE001
+        pass
+    return df
+
+
+def is_trend_market(index_df, date: str, vol_cap: float = 0.25, ma_gap: float = 0.0) -> bool:
+    """判定 ``date`` 当日是否处于「趋势市」（用于 regime-aware 打分路由）。
+
+    条件：宽基指数 MA20 高于 MA60（趋势向上）且近 20 日年化波动率低于 ``vol_cap``。
+    数据不足（<60 根）或 index 缺失时保守返回 False（回退 14 因子）。
+    """
+    if index_df is None or index_df.empty or "date" not in index_df:
+        return False
+    sub = index_df[index_df["date"] <= date]
+    if len(sub) < 60:
+        return False
+    row = sub.iloc[-1]
+    ma20, ma60 = row.get("ma20"), row.get("ma60")
+    if ma20 is None or ma60 is None or pd.isna(ma20) or pd.isna(ma60) or ma60 == 0:
+        return False
+    if float(ma20) <= float(ma60) * (1.0 + ma_gap):
+        return False
+    rets = sub["close"].pct_change().dropna().tail(20)
+    if len(rets) < 10:
+        return False
+    vol = float(rets.std()) * math.sqrt(252)
+    return vol <= vol_cap
 
 
 def _expand_board_prefixes(values) -> tuple[str, ...]:
@@ -508,24 +610,41 @@ def _build_universe_by_date(
     dates: list[str],
     top_n: int,
     board_prefixes: tuple[str, ...] | None = None,
+    names: dict[str, str] | None = None,
 ) -> dict[str, list[str]]:
     """每日股票池：按**当日**成交额取前 N（仅用当日数据，无未来函数）。
 
     ``board_prefixes`` 非空时先按代码前缀排除板块，再排名取 TopN
     （先剔除再排名，池子容量不变；先排名再剔除会让池子缩水）。
     元素既可以是板块键（展开为完整前缀），也可以是单个代码前缀（原样保留）。
+
+    ``names`` 传入股票名称快照时，先按实盘 ``scope.is_st_name`` 口径剔除
+    ST / *ST / 退市票——实盘 scanner 与模拟盘买入池都用 ``is_tradable`` 做了
+    同样过滤，回测以前漏了这一层，把 ST南都(300068) 放进池子造成单笔 -57%
+    （回测 #44）。板块这里不复用 ``is_tradable``：回测板块由 board_prefixes
+    单独控制，重复套实盘白名单会二次过滤、破坏板块参数实验。
+
+    口径说明：名称取的是**当前股票池快照**（与实盘完全同源），不是逐日历史
+    名称回放；被标记的票整段区间都不进池。这是与实盘一致的保守过滤，不是
+    「当日是否戴帽」的精确复现——历史名称数据源不可得，两边统一用同一快照。
     """
     amount_by_date: dict[str, list[tuple[str, float]]] = {d: [] for d in dates}
     wanted = set(dates)
     prefixes = _expand_board_prefixes(board_prefixes) if board_prefixes else None
+    excluded_st = 0
     for code, df in raw.items():
         if prefixes is not None and not code.startswith(prefixes):
+            continue
+        if names is not None and is_st_name(names.get(code, "")):
+            excluded_st += 1
             continue
         sub = df[df["date"].isin(wanted)]
         for row in sub.itertuples(index=False):
             amount = getattr(row, "amount", None)
             if amount is not None and amount == amount and amount > 0:
                 amount_by_date[str(row.date)].append((code, float(amount)))
+    if excluded_st:
+        logger.info("回测股票池按实盘 scope.is_st_name 口径剔除 ST/退市 %d 只", excluded_st)
     return {
         d: [c for c, _ in sorted(rows, key=lambda x: -x[1])[:top_n]]
         for d, rows in amount_by_date.items()
@@ -535,18 +654,31 @@ def _build_universe_by_date(
 def _prepare(params: PipelineParams) -> dict:
     """准备回测数据：K线、指标、每日股票池、名称与策略实例。"""
     settings = get_settings()
+    progress.report("load", note=f"读取 {settings.kline_dir} 下的本地K线")
     raw = _load_klines(params.end_date, params.start_date, str(settings.kline_dir))
     if not raw:
         raise RuntimeError("本地K线缓存为空，无法回测（请先预热K线）")
     logger.info("流水线回测读取K线：%d 只", len(raw))
+    progress.report("load", done=len(raw), total=len(raw), note=f"{len(raw)} 只股票")
 
     dates = sorted({d for df in raw.values() for d in df["date"]})
     dates = [d for d in dates if params.start_date <= d <= params.end_date]
     if len(dates) < 2:
         raise RuntimeError("区间内交易日不足，检查开始/结束日期")
 
+    # 名称快照必须在建池**之前**取：ST 过滤是建池的一部分，与实盘 scanner /
+    # 模拟盘买入池共用 scope.is_st_name。取不到就中止，绝不放行一次「少了一层
+    # 过滤」的回测——那会产出不能代表实盘的结论（回测 #44 的教训）。
+    try:
+        pool = get_stock_pool()
+        names = dict(zip(pool["code"], pool["name"]))
+    except Exception as exc:  # noqa: BLE001 - 名称缺失即口径不一致，不能静默降级
+        raise RuntimeError(
+            "无法读取股票名称快照，回测 ST 过滤将与实盘口径不一致，已中止本次回测"
+        ) from exc
+
     universe = _build_universe_by_date(
-        raw, dates, params.universe_size, params.board_prefixes
+        raw, dates, params.universe_size, params.board_prefixes, names=names
     )
     candidates = sorted({c for codes in universe.values() for c in codes})
     logger.info("流水线回测：%d 个交易日，候选股票 %d 只", len(dates), len(candidates))
@@ -561,16 +693,23 @@ def _prepare(params: PipelineParams) -> dict:
 
     # 只对候选股票计算指标（KDJ 有 Python 循环，全量算太慢）
     klines: dict[str, pd.DataFrame] = {}
-    for code in candidates:
+    _n_cand = len(candidates)
+    progress.report("indicators", done=0, total=_n_cand,
+                    note=f"{len(dates)} 个交易日 / 候选 {_n_cand} 只")
+    for i, code in enumerate(candidates, 1):
         try:
             klines[code] = add_all_indicators(raw[code])
         except Exception:  # noqa: BLE001
             continue
+        if i % 25 == 0 or i == _n_cand:
+            progress.report("indicators", done=i, total=_n_cand, step=code)
 
     # ---- A-minus：段前走前训练 + 预测表（仅替换 14 因子打分） ----
     ml_pred: dict[tuple[str, str], float] = {}
     ml_oos_ic: float = 0.0
-    if params.scoring_mode in ("ml", "ml_blend"):
+    if (params.scoring_mode in ("ml", "ml_blend") or params.ml_regime_aware
+            or params.ml_ic_gate or params.ml_ic_gate_segment):
+        progress.report("ml", note="训练中（长区间可能耗时数分钟）")
         try:
             from app.backtest.ml_scorer import build_ml_predictions, DEFAULT_HORIZON
             horizon = int(params.ml_label_horizon or DEFAULT_HORIZON)
@@ -590,26 +729,39 @@ def _prepare(params: PipelineParams) -> dict:
                 logger.warning("ML 排序层无信号（OOS IC=%.4f），本段回退到 14 因子", ml_oos_ic)
         except Exception:  # noqa: BLE001 - ML 失败不阻断回测，安全回退因子
             logger.warning("ML 排序层构建异常，回退到 14 因子", exc_info=True)
-
-    try:
-        pool = get_stock_pool()
-        names = dict(zip(pool["code"], pool["name"]))
-    except Exception:  # noqa: BLE001
-        names = {}
+        progress.report("ml", done=1, total=1,
+                        note=f"OOS rank-IC={ml_oos_ic:.4f}，预测对={len(ml_pred)}")
+    else:
+        progress.report("ml", done=1, total=1, note="未启用，使用 14 因子")
 
     pos_index = {
         code: {str(d): i for i, d in enumerate(df["date"])}
         for code, df in klines.items()
     }
+    ic_gate = None
+    if params.ml_ic_gate:
+        try:
+            from app.backtest.ic_gate import ICGate
+            ic_gate = ICGate(
+                klines,
+                horizon=int(params.ml_label_horizon or DEFAULT_HORIZON),
+                window=int(params.ml_ic_gate_window or 400),
+                thresh=float(params.ml_ic_gate_thresh if params.ml_ic_gate_thresh is not None else 0.12),
+                min_samples=int(params.ml_ic_gate_min_samples or 20),
+            )
+        except Exception:  # noqa: BLE001 - 门控构建失败则安全回退因子
+            logger.warning("IC 门控构建异常，回退到 14 因子", exc_info=True)
+            ic_gate = None
     return {
         "dates": dates,
         "universe": universe,
         "klines": klines,
         "names": names,
         "pos_index": pos_index,
-        "index": _load_index(str(settings.kline_dir)),
+        "index": _load_index(str(settings.kline_dir), params.regime_index),
         "ml_pred": ml_pred,
         "ml_oos_ic": ml_oos_ic,
+        "ic_gate": ic_gate,
         "strategies": [registry.create(n) for n in registry.names()],
     }
 
@@ -671,8 +823,53 @@ def _rank_score(
     ``half_score`` 用作 ML 分位的买入门槛（percentile），与交易循环阈值体系一致。
     """
     mode = params.scoring_mode
-    if mode in ("ml", "ml_blend") and prepared.get("ml_pred"):
-        p = prepared["ml_pred"].get((code, date))
+    ml_pred = prepared.get("ml_pred") or {}
+    # IC 门控 ML 叠加（第三条路 v2）：因子为底，仅当 ML-IC ≥ 阈值时切 ML
+    gate = prepared.get("ic_gate") if params.ml_ic_gate else None
+    seg_gate = None
+    if params.ml_ic_gate_segment:
+        _thr = float(params.ml_ic_gate_thresh if params.ml_ic_gate_thresh is not None else 0.12)
+        seg_gate = (float(prepared.get("ml_oos_ic", 0.0)) >= _thr)
+    if gate is not None or seg_gate is not None:
+        use_ml = False
+        if gate is not None:
+            if (code, date) in ml_pred:
+                gate.record(code, date, float(ml_pred[(code, date)]))
+            use_ml = gate.decide(date)
+        elif seg_gate:
+            use_ml = True
+        if use_ml and (code, date) in ml_pred:
+            ml_score = float(ml_pred[(code, date)])
+            total = ml_score
+            action = "buy" if total >= half_score else "hold"
+            return total, action
+        # 否则回退 14 因子
+        res = compute_factors(frame, params.factor_weights)
+        return float(res.total), res.action
+    # regime-aware：趋势市用 ML、震荡市回退 14 因子（完全接管有 ML 信号的 (code,date)）
+    if params.ml_regime_aware and (code, date) in ml_pred:
+        idx = prepared.get("index")
+        trend = is_trend_market(idx, date, params.ml_regime_vol_cap, params.ml_regime_ma_gap)
+        if trend:
+            ml_score = float(ml_pred[(code, date)])
+            if mode == "ml_blend":
+                try:
+                    ft = float(compute_factors(frame, params.factor_weights).total)
+                except Exception:  # noqa: BLE001
+                    ft = 0.0
+                fscore = (ft + 100.0) / 2.0  # [-100,100] -> [0,100]
+                blend = float(params.ml_blend if params.ml_blend is not None else 0.5)
+                total = blend * ml_score + (1.0 - blend) * fscore
+            else:
+                total = ml_score
+            action = "buy" if total >= half_score else "hold"
+            return total, action
+        # 非趋势市：回退 14 因子
+        res = compute_factors(frame, params.factor_weights)
+        return float(res.total), res.action
+    # 原逻辑：mode 为 ml/ml_blend 且本段 ML 预测表非空时走 ML
+    if mode in ("ml", "ml_blend") and ml_pred:
+        p = ml_pred.get((code, date))
         if p is not None:
             ml_score = float(p)
             if mode == "ml_blend":
@@ -721,8 +918,12 @@ def _build_signals(prepared: dict, params: PipelineParams) -> dict[str, list[dic
 
     watch: "OrderedDict[str, int]" = OrderedDict()  # code -> 0（FIFO 淘汰）
     signals: dict[str, list[dict]] = {}
+    progress.report("signals", done=0, total=len(dates),
+                    note=f"{len(dates)} 个交易日 × 全策略逐股扫描")
 
-    for date in dates:
+    for i, date in enumerate(dates, 1):
+        # 放在循环体第一行：日内任何 continue/提前收尾都不会漏报
+        progress.report("signals", done=i, total=len(dates), step=date)
         todays = universe.get(date, [])
         hits: list[dict] = []
         for code in todays:
@@ -814,6 +1015,10 @@ def _prepare_cached(params: PipelineParams) -> dict:
     )
     if _PREPARED is not None and _PREPARED_KEY == key:
         logger.info("复用已准备的K线与指标（%s ~ %s，Top%d）", *key[:3])
+        # 命中缓存时 prepare/signals 两段整段跳过：把进度直接推到「扫描完成」，
+        # 避免页面长时间停在 0%，也避免百分比在缓存命中时倒退。
+        _d = len(_PREPARED["dates"])
+        progress.report("signals", done=_d, total=_d, note="复用缓存，跳过准备与逐日扫描")
         return _PREPARED
     prepared = _prepare(params)
     prepared["signals"] = _build_signals(prepared, params)
@@ -832,6 +1037,8 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
     names: dict[str, str] = prepared["names"]
     pos_index: dict[str, dict[str, int]] = prepared["pos_index"]
     signals: dict[str, list[dict]] = _ensure_signals(prepared, params)
+    progress.report("simulate", done=0, total=len(dates),
+                    note="按日撮合、止损止盈、仓位与轮动")
     slippage = max(0.0, float(params.slippage or 0.0))   # E39：单边成交摩擦
     rotation_on = (
         settings.paper_rotation_enabled
@@ -839,7 +1046,14 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
         else bool(params.rotation_enabled)
     )
 
-    # 大盘择时（regime）：用**前一交易日**上证指数收盘 vs MA(N) 判断强弱。
+    # P1 上下文风险闸：只读层与配置都来自共用模块。回测把 prepared 里已加载的日线
+    # 注入以避免重复读 5979 个 parquet；实盘不注入、按 code 懒加载，语义完全相同。
+    # 所有查询按 as_of 截断，事件/舆情/热度一律读本地快照，不调实时接口。
+    ctx_cfg = ContextGateConfig.from_params(params)
+    ctx_store = ContextStore(klines=klines, pos_index=pos_index)
+    ctx_reject_count: dict[str, int] = defaultdict(int)
+
+    # 大盘择时（regime）：用**前一交易日** regime_index 指定宽基指数收盘 vs MA(N) 判断强弱。
     # 当日盘中只能看到前一日收盘，所以统一 shift(1)，不留未来函数。
     # ``regime_ma`` 为 None **或 0** 都表示「不启用大盘择时」：本项目 0 一律当关闭
     # （与 max_hold_days / t_crash_guard 等一致）。此前只判 is not None，0 会被
@@ -855,7 +1069,7 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
             weak = idx_df["close"].shift(1) < ma
             regime = {str(d): bool(w) for d, w in zip(idx_df["date"], weak.fillna(False))}
         else:
-            logger.warning("缺少 idx_sh000001 指数K线，regime_ma 失效并退化为「始终防守」")
+            logger.warning("缺少 regime_index 指数K线，regime_ma 失效并退化为「始终防守」")
 
     # E44 弱转强爬坡：``ramp_frac[date]`` = 当天应当恢复到满仓的比例（0=弱市档位，1=满仓）。
     # 口径：连续**非弱**交易日数 k / D（D=regime_ramp_days），k 从 1 开始计，
@@ -920,7 +1134,7 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
                 else:
                     tiers_state[str(d)] = 0      # 双线之下
         else:
-            logger.warning("缺少 idx_sh000001 指数K线，regime_tiers 失效并按满仓处理")
+            logger.warning("缺少 regime_index 指数K线，regime_tiers 失效并按满仓处理")
 
     initial_capital = float(params.initial_capital or settings.paper_initial_capital)
     max_positions = int(params.max_positions or settings.paper_max_positions)
@@ -955,6 +1169,21 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
         if params.rotation_max_per_day is not None
         else settings.paper_rotation_max_per_day
     )
+
+    # #191 同步：回测对齐实盘入场护栏（默认关，不改现有回测行为）。
+    # 开关沿用线上配置：params 显式传入则优先，否则取 settings.paper_*（默认 False）。
+    board_trend_gate = bool(
+        params.board_trend_gate if params.board_trend_gate is not None
+        else getattr(settings, "paper_board_trend_gate", False)
+    )
+    unified_risk_cap_enabled = bool(
+        params.unified_risk_cap_enabled if params.unified_risk_cap_enabled is not None
+        else getattr(settings, "paper_unified_risk_cap_enabled", False)
+    )
+
+    def _buy_blocked_local(code: str) -> tuple[bool, str]:
+        # #191 同步：实盘护栏决策（模块级 _buy_blocked，便于单测），仅拦新开仓。
+        return _buy_blocked(code, board_trend_gate)
 
     cash = initial_capital
     positions: dict[str, dict] = {}
@@ -1458,6 +1687,9 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
                 if shares < mq:
                     continue
                 amount = fill_px * shares
+                # #191 同步：日内买入与开盘段同口径拒买（危机/板块闸门），只拦新开仓。
+                if _buy_blocked_local(code)[0]:
+                    continue
                 fee = calc_fee("buy", amount)
                 cash -= amount + fee
                 cost = (amount + fee) / shares
@@ -1478,6 +1710,7 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
     rotation_total = 0  # 全区间轮动次数（落 metadata，便于判断「压根没触发」还是「触发但没用」）
 
     for day_idx, date in enumerate(dates):
+        progress.report("simulate", done=day_idx + 1, total=len(dates), step=date)
         rotation_used = 0  # 每日轮动次数上限独立计数
         rebalance = day_idx % rebalance_every == 0  # 交易日序号对齐，避免周末/停牌导致漂移
         # E49 组合级回撤断路器：暂停期内不生成买入委托（止损/止盈/信号卖出照常）
@@ -1523,6 +1756,13 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
                         params.weak_exposure
                         + (exposure - params.weak_exposure) * frac,
                     )
+        # #191 同步：Layer2 统一宏观风险四档 cap（与线上 engine 同口径，只降不升）。
+        # 开启后把 effective 总仓位上限压到 unified_risk_cap_*（weak0.30/shock0.20/crisis0.10），
+        # 与 regime_tiers / weak_exposure / ramp 取 min，影响所有买入预算与做T加仓空间。
+        if unified_risk_cap_enabled:
+            _ur = get_unified_market_risk()
+            if _ur["tier"] in ("weak", "shock", "crisis") and float(_ur.get("cap") or 0) > 0:
+                day_exposure = min(day_exposure, float(_ur["cap"]))
         # 开盘下单只能用开盘价估值：用当日收盘价算总资产/仓位上限等于提前知道收盘
         mv_open = market_value(date, "open")
         total_asset = cash + mv_open
@@ -1532,6 +1772,22 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
         if params.queue_top_m is not None and int(params.queue_top_m) > 0:
             ranked = ranked[: int(params.queue_top_m)]   # ③ 交易队列容量 topM
         pending_buys = []
+        # P1 四项上下文风险闸：与实盘 execute_recommendations 调用同一份
+        # app.risk.context_gates.audit_buy_candidates；只传代码 + as_of + 持仓代码，
+        # 不传任何大盘/机制层状态，避免某一侧偷偷多一层门控（#45 的教训）。
+        # 顺序与实盘一致：队列 topM 之后、评分分档与名额截断之前。
+        if ctx_cfg.enabled and ranked:
+            _ctx_rejected = audit_buy_candidates(
+                [b["code"] for b in ranked],
+                as_of=date,
+                held_codes=list(positions.keys()),
+                cfg=ctx_cfg,
+                store=ctx_store,
+            )
+            if _ctx_rejected:
+                for _why in _ctx_rejected.values():
+                    ctx_reject_count[_why] += 1
+                ranked = [b for b in ranked if b["code"] not in _ctx_rejected]
         # #107：弱市放宽买入门槛时，eligible 也用 bear_half_score，否则原 half_score
         _hs = (params.bear_half_score
                if (params.regime_ma is not None and params.bear_half_score is not None and regime.get(date, True))
@@ -1545,7 +1801,10 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
             if not weights:
                 break
             code = b["code"]
+            # #191 同步：先弹出权重再判护栏——被拒的候选不占分配额度（与线上同口径）。
             weight = weights.pop(code)
+            if _buy_blocked_local(code)[0]:
+                continue
             weight_total = weight + sum(weights.values())
             if len(positions) >= day_max_positions or code in positions:
                 continue
@@ -1704,25 +1963,22 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
             if code not in positions:
                 continue
             cost = p["cost"]
-            stop_px, stop_reason = p["stop"], "止损"
             # E9 的峰值只用**之前交易日**已知的最高价（买入日算已知），
             # 不用当日 high，否则等于用当天最高价决定当天卖点 = 未来函数。
             peak = float(p.get("peak") or 0.0)
-            # 大盘走弱时才防守（regime_ma=None 表示不择时、始终防守）
-            defensive = regime.get(date, True) if params.regime_ma is not None else True
-            if (
-                defensive
-                and params.breakeven_trigger is not None
-                and peak >= cost * (1 + params.breakeven_trigger)
-                and cost > stop_px
-            ):
-                stop_px, stop_reason = cost, "保本止损"
-            if defensive and params.trail_pct is not None and peak >= cost * (1 + params.trail_arm):
-                trail_px = peak * (1 - params.trail_pct)
-                if trail_px > stop_px:
-                    stop_px, stop_reason = trail_px, "移动止损"
+            # 止损口径与实盘共用 app.risk.stops.resolve_stop_price。
+            # 曾经这里有一道「大盘弱于 MA60 才防守」的门控，把固定止损也一并跳过，
+            # 导致 250 天里 134 天完全不止损、45 笔止损全部挤在弱市日；
+            # 实盘 check_stop_loss_target 是每日无条件检查的。
+            # `regime` 现在只用于仓位择时（weak_exposure / tiers / ramp），不再碰止损。
+            stop_px, stop_reason = resolve_stop_price(
+                cost, p["stop"], peak,
+                breakeven_pct=float(params.breakeven_trigger or 0.0),
+                trail_pct=float(params.trail_pct or 0.0),
+                trail_arm=float(params.trail_arm or 0.0),
+            )
             # 收盘确认模式下止损不走盘中止损（留到步骤 3 收盘判定）
-            stop_check = stop_px if (defensive and not params.stop_confirm_close) else None
+            stop_check = None if params.stop_confirm_close else stop_px
             series, real = intraday_series(code, date, open_px, low, high, close_px)
             tp_px = p["target"]
             partial_px = (
@@ -1917,6 +2173,7 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
                     )
 
     # ---------- 收尾 ----------
+    progress.report("analyze", note="汇总净值、绩效与交易明细")
     last = dates[-1]
     equity = [p["equity"] for p in equity_curve]
     final_equity = equity[-1] if equity else initial_capital
@@ -1952,8 +2209,11 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
         "open_positions": len(positions),
     }
 
+    # 历史列表里的「策略名」必须反映这次真正跑了什么。默认跟随实盘
+    # auto_scan_strategies（A-Only 时只有量价共振2560）；显式传空数组才等于全部策略。
+    _ran = tuple(params.strategies or ())
     result = {
-        "strategy": "全策略流水线",
+        "strategy": "、".join(_ran) if _ran else "全策略流水线",
         # 打分层诊断：光看收益看不出「这次到底跑没跑 ML」——缺 lightgbm 或 OOS IC
         # 不过线时会自动回退 14 因子，此时收益与基线一模一样。这里把真实生效状态标出来。
         "ml_diagnostics": {
@@ -1967,6 +2227,18 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
                 params.scoring_mode in ("ml", "ml_blend")
                 and bool(prepared.get("ml_pred"))
             ),
+        },
+        # P1 上下文风险闸诊断：结果里必须能看出四项到底有没有生效、各拦了多少次。
+        # 快照为空时子闸静默不触发（两侧一致），这里也能直接看出来，避免误判为"闸没用"。
+        "context_gates": {
+            "enabled": bool(ctx_cfg.enabled),
+            "max_industry_weight": ctx_cfg.max_industry_weight,
+            "max_corr": ctx_cfg.max_corr,
+            "hot_exclude_pct": ctx_cfg.hot_exclude_pct,
+            "event_cooldown_days": ctx_cfg.event_cooldown_days,
+            "news_block": ctx_cfg.news_block,
+            "rejected": dict(ctx_reject_count),
+            "snapshot": ctx_store.coverage(),
         },
         "start_date": dates[0],
         "end_date": last,
@@ -1985,6 +2257,9 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
             "slippage": params.slippage,
             "rotation_enabled": rotation_on,
             "rotation_max_per_day": rotation_max_per_day,
+            # #191 同步：回测对齐实盘入场护栏的开关实际取值（沿用线上默认关）
+            "board_trend_gate": board_trend_gate,
+            "unified_risk_cap_enabled": unified_risk_cap_enabled,
             "rotation_count": rotation_total,
             "intraday_minutes": params.intraday_minutes,
             "rebalance_days": rebalance_every,
@@ -2060,6 +2335,7 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
     }
     # 亏损归因 + 调参建议（每次回测都产出，便于写复盘记录）
     result["review"] = analyze(result)
+    progress.report("analyze", done=1, total=1, note="归因完成，等待写入回测记录")
     return result
 
 

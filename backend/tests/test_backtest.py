@@ -165,6 +165,23 @@ def test_universe_board_filter_applies_before_top_n():
     assert filtered["d1"] == ["600000", "300001"]
 
 
+def test_universe_excludes_st_names_same_as_live_scope():
+    """回测股票池必须与实盘 scope.is_st_name 同口径剔 ST/退市。
+
+    回归用例：回测 #44 因漏了这层过滤把 ST南都(300068) 放进池子，打出 -57% 单笔。
+    """
+    from app.backtest.pipeline import _build_universe_by_date
+    from app.data.scope import is_st_name
+
+    raw = {
+        "300001": pd.DataFrame({"date": ["d1"], "amount": [10.0]}),
+        "300068": pd.DataFrame({"date": ["d1"], "amount": [99.0]}),
+    }
+    names = {"300001": "测试A", "300068": "ST南都"}
+    assert is_st_name("ST南都")
+    assert _build_universe_by_date(raw, ["d1"], 2, None, names=names)["d1"] == ["300001"]
+
+
 def test_accept_verdict_three_lines():
     """验收三条线：中位差 ≥0、差值>0 占比 ≥60%、最差段容差 5pp；缺一不通过。"""
     from scripts.accept import verdict

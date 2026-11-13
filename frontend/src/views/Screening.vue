@@ -5,7 +5,7 @@
  */
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { AlertCircle, CheckCircle2, Clock, Database, Play, Search, Square, TrendingUp } from 'lucide-vue-next'
+import { AlertCircle, CheckCircle2, Clock, Database, Play, Search, SlidersHorizontal, Square, TrendingUp } from 'lucide-vue-next'
 
 import {
   addWatch,
@@ -24,6 +24,7 @@ import {
 } from '../api'
 import ScanEmptyState from '../components/ScanEmptyState.vue'
 import ScanResultTable from '../components/ScanResultTable.vue'
+import SelectionSettingsPanel from '../components/SelectionSettingsPanel.vue'
 import StrategyEditor from '../components/StrategyEditor.vue'
 import StrategyPanel from '../components/StrategyPanel.vue'
 import { POLL } from '../lib/polling'
@@ -48,6 +49,7 @@ const selected = ref<string[]>([])
 const scope = ref('top_amount:500')
 const task = ref<ScanTask | null>(null)
 const editingStrategy = ref<StrategyInfo | null>(null)
+const selectionOpen = ref(false)
 const loadingStrategies = ref(true)
 const loadError = ref('')
 let poller: number | undefined
@@ -152,8 +154,12 @@ async function loadStrategies() {
     strategies.value = data.strategies
     scopes.value = data.scopes
     todayHits.value = data.today_hits
-    // 默认全选（新增自定义策略自动勾选）
-    selected.value = data.strategies.map((s) => s.name)
+    // 默认勾选用户选定的 A 策略（量价共振2560）；回测显示它是唯一正期望策略，
+    // 创业板涨停后5日 为净负拖累已剔除。若该策略不在已注册列表（异常态），则退回全选。
+    const preferred = ['量价共振2560']
+    const available = data.strategies.map((s) => s.name)
+    const preferredPresent = preferred.filter((n) => available.includes(n))
+    selected.value = preferredPresent.length ? preferredPresent : available
   } catch {
     // 策略加载失败（后端未就绪/网络异常）：保留错误态供用户重试，
     // 避免按钮静默禁用看起来像"点击没反应"
@@ -401,6 +407,12 @@ onMounted(async () => {
       @deleted="onStrategyDeleted"
     />
 
+    <!-- 选股策略设置（模态）：板块 / 选股与自选 / 底部反转选股 -->
+    <SelectionSettingsPanel
+      v-if="selectionOpen"
+      @close="selectionOpen = false"
+    />
+
     <!-- 右侧扫描区：操作栏固定，仅结果表内部滚动。
          w-0 作为收缩基准，避免内部宽表格把整页横向撑开 -->
     <section class="flex w-full min-h-0 min-w-0 flex-1 flex-col gap-4 lg:w-0">
@@ -435,6 +447,17 @@ onMounted(async () => {
           >
             <Play class="h-4 w-4" />
             {{ running ? '扫描中...' : '开始扫描' }}
+          </button>
+
+          <!-- 选股策略设置：板块 / 评分阈值 / 底部反转选股口径（原在系统设置，现收拢到选股页） -->
+          <button
+            class="btn btn-outline px-3 py-2.5 text-[14.5px]"
+            :disabled="running"
+            title="选股板块、评分阈值、盘后自选、底部反转选股口径等选股相关设置"
+            @click="selectionOpen = true"
+          >
+            <SlidersHorizontal class="h-3.5 w-3.5" />
+            选股参数
           </button>
 
           <!-- 当前策略/范围摘要 -->

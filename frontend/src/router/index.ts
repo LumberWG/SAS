@@ -74,6 +74,14 @@ const routes = [
         redirect: (to: RouteLocation) => ({ path: '/paper', query: { ...to.query, tab: 'pool' } }),
       },
       {
+        // 六阶段生命周期（#130）：把「初选 → 入自选 → 进队列 → 入场 → 持有 → 离场」
+        // 这条唯一正常链路做成一个只读可视化页，方便核对每只票走到哪一步、为何停/越级。
+        path: 'lifecycle',
+        name: 'lifecycle',
+        component: () => import('../views/Lifecycle.vue'),
+        meta: { title: '生命周期', icon: 'GitBranch' },
+      },
+      {
         // 运行监控：只读展示调度任务、数据新鲜度、访客访问记录
         path: 'ops',
         name: 'ops',

@@ -11,12 +11,27 @@ from __future__ import annotations
 import hmac
 from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse, JSONResponse
+from pydantic import BaseModel
 
 from app.config import get_settings
 from app.screener import bottom_reversal as br
 
 # ---- 数据接口：挂 /api 前缀，受全局 _token_guard 保护 ----
 api_router = APIRouter(prefix="/screen", tags=["底部反转 · 多板块"])
+
+
+class BridgeBody(BaseModel):
+    """把底部反转候选接入交易链（#191）。默认只入 signals + 自选股（观察/建议链路），
+    不主动买卖；``queue=true`` 时进一步送交易队列（受自动交易开关约束）。"""
+    top_n: int = 10
+    watch: bool = True
+    queue: bool = False
+
+
+@api_router.post("/bottom-reversal/bridge")
+def bridge_to_trade(body: BridgeBody) -> dict:
+    """将底部反转（多板块）候选写入 signals + 自选股，并可送交易队列。"""
+    return br.bridge_to_trade(top_n=body.top_n, watch=body.watch, queue=body.queue)
 
 
 @api_router.get("/bottom-reversal/data")
@@ -32,22 +47,31 @@ def get_candidates(refresh: int = 0):
     盘中翻多即解锁候选（无需等收盘）。
     """
     data = br.read_cache(force_refresh=bool(refresh))
-    # ---- 板块感知盘中实时覆写（#181：主板块跟随 bottom_boards，不再写死 cyb）----
+    # ---- 趋势指数盘中实时覆写 ----
+    # 优先级：缓存里的 trend_index（= 设置项 bottom_trend_index，默认全市场=中证全指 sh000985）
+    # > 未设置时退化到旧的多板块感知（主板块官方指数 / 创业板等权合成指数）。
+    # 用户要求「分析趋势时全市场一起考虑」，故只要显式设了 trend_index，就直接用它做全市场趋势判定。
     if data.get("trend_filter"):
         from app.config import get_settings as _gs
         _s = _gs()
-        boards = [b.strip() for b in (_s.bottom_boards or "cyb").split(",") if b.strip()]
         raw = (data.get("trend_index") or "").strip()
-        if "cyb" in boards:
-            # 含创业板：沿用 300/301 等权合成指数（或 trend_index 指定的官方 399006）
-            sym = raw if raw else None
-            prim, default_name = "cyb", "创业板等权指数"
+        if raw:
+            # 显式设置了趋势指数（全市场口径）
+            sym = raw
+            default_name = "中证全指(全市场)" if raw == "sh000985" else raw
+            prim = None
         else:
-            # 只选其它板块：盘中实时改用该板块自己的官方指数，不能拿创业板合成指数套
-            from app.analysis.board_index import board_index_name, board_index_symbol
+            # 未设置：退化到板块感知（与 twin_t_boards 主板块对齐）
+            from app.board_rules import parse_trade_boards
+            boards = list(parse_trade_boards(_s.twin_t_boards or "创业板"))
             prim = boards[0] if boards else "cyb"
-            sym = board_index_symbol(prim) or None
-            default_name = board_index_name(prim) or prim
+            if prim in ("cyb", "创业板"):
+                sym = None  # 创业板等权合成指数
+                default_name = "创业板等权指数"
+            else:
+                from app.analysis.board_index import board_index_name, board_index_symbol
+                sym = board_index_symbol(prim) or None
+                default_name = board_index_name(prim) or prim
         try:
             from app.backtest.engine import compute_uptrend_live
             live = compute_uptrend_live(
@@ -56,7 +80,7 @@ def get_candidates(refresh: int = 0):
             )
             if live.get("uptrend") is not None:
                 for bt in data.get("board_trends") or []:
-                    if bt.get("board") == prim or (raw and bt.get("index") == raw):
+                    if (raw and bt.get("index") == raw) or (prim and bt.get("board") == prim) or (not raw and not prim):
                         bt["uptrend_today"] = live["uptrend"]
                         bt["state"] = "uptrend" if live["uptrend"] else "downtrend"
                 data["uptrend_today"] = live["uptrend"]
@@ -78,15 +102,13 @@ def get_candidates(refresh: int = 0):
         data["unified_risk"] = get_unified_market_risk()
     except Exception:
         data["unified_risk"] = None
-    # ---- 板块白名单一致性（选股 bottom_boards vs 交易 twin_t_boards）----
+    # ---- 板块白名单一致性（选股 + 交易已统一到 twin_t_boards，两侧用同一份设置）----
     try:
         from app.board_rules import board_scope_consistency
         from app.config import get_settings as _gs2
         _s2 = _gs2()
-        data["board_consistency"] = board_scope_consistency(
-            getattr(_s2, "twin_t_boards", "") or "",
-            getattr(_s2, "bottom_boards", "") or "",
-        )
+        _raw = getattr(_s2, "twin_t_boards", "") or ""
+        data["board_consistency"] = board_scope_consistency(_raw, _raw)
     except Exception:
         data["board_consistency"] = None
     # ---- 下降通道横幅 ----
@@ -259,7 +281,7 @@ async function load(refresh){
     const res=await fetch(url,{headers:{"X-API-Token":TOKEN}});
     if(!res.ok){const e=await res.json().catch(()=>({}));throw new Error(e.detail||res.status);}
     const d=await res.json();
-    // #181：主板块跟随 bottom_boards，趋势指数名优先用后端回传，不再写死「创业板等权指数」
+    // 趋势指数名：优先用后端回传（全市场口径=中证全指 sh000985，或板块指数），不再写死「创业板等权指数」
     const bt0=(d.board_trends||[]).length?d.board_trends[0].name:null;
     const idxName=d.trend_index_name
       || (d.trend_index==="sz399006"?"创业板指399006":(d.trend_index?d.trend_index:null))

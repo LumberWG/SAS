@@ -899,7 +899,7 @@ onUnmounted(() => {
       class="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border border-warn/40 bg-warn/10 px-4 py-3 text-[13px] text-warn"
     >
       <span class="font-medium">
-        大盘弱势：上证指数在 MA{{ live.regime.ma }} 下方
+        大盘弱势：{{ live.regime.index_name || '宽基指数' }}在 MA{{ live.regime.ma }} 下方
       </span>
       <span v-if="(live.regime.weak_exposure ?? 0) > 0" class="text-content-muted">
         总仓位上限已压到

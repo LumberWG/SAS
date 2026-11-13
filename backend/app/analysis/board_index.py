@@ -76,6 +76,36 @@ def board_uptrend_set(kline_dir: str, board: str, ma: int = 60) -> set[str] | No
     return set(s.index[up].astype(str))
 
 
+def index_regime(symbol: str, kline_dir: str | None = None, ma: int = 60) -> dict:
+    """任意官方指数（akshare 代码）的趋势状态，用于「全市场口径」趋势展示。
+
+    与 ``board_regime`` 的区别：``board_regime`` 按板块键（cyb/sh_main…）反查固定参考
+    指数；本函数直接吃指数代码（如 ``sh000985``=中证全指），不要求它挂在某个板块下，
+    因此适合「分析趋势时全市场一起考虑」的场景——趋势过滤指数可以是覆盖全 A 的宽基指数。
+    """
+    if kline_dir is None:
+        from app.config import get_settings
+        kline_dir = str(get_settings().kline_dir)
+    name = symbol
+    if symbol == "sh000985":
+        name = "中证全指(全市场)"
+    s = _read_index_series(kline_dir, symbol)
+    if s is None or len(s) < ma + 1:
+        return {"board": "__all__", "index": symbol, "name": name,
+                "available": False, "state": "unknown"}
+    last = float(s.iloc[-1])
+    m = float(s.rolling(ma).mean().iloc[-1])
+    above = last > m
+    return {
+        "board": "__all__", "index": symbol, "name": name,
+        "available": True, "close": last, "ma": m,
+        "dev_pct": round((last / m - 1) * 100, 2),
+        "above_ma": bool(above),
+        "state": "uptrend" if above else "downtrend",
+        "as_of": str(s.index[-1].date()),
+    }
+
+
 def board_regime(board: str, kline_dir: str | None = None, ma: int = 60) -> dict:
     """该板块当前趋势状态。无数据返回 available=False。"""
     sym = board_index_symbol(board)
@@ -103,5 +133,5 @@ def board_regime(board: str, kline_dir: str | None = None, ma: int = 60) -> dict
 
 __all__ = [
     "BOARD_INDEX", "classify_board", "board_index_symbol", "board_index_name",
-    "board_uptrend_set", "board_regime",
+    "board_uptrend_set", "board_regime", "index_regime",
 ]

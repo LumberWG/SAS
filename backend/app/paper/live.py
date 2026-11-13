@@ -246,6 +246,12 @@ class LiveTrader:
             for run in self._sim.values():
                 run.pending[code] = replace(signal)
             added += 1
+            # 六阶段生命周期：进交易队列（#191）
+            from app.data.cache import db as _db
+            _db.insert_lifecycle_event(
+                code, signal.name, 3, "进交易队列",
+                f"{action}:{source}", detail=str(getattr(rec, "reason", "") or source),
+            )
 
         buys = []
         for rec in recommendations:

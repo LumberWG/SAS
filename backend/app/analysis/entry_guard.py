@@ -38,7 +38,23 @@ GAP_THRESHOLD = 0.03
 #: 实际取值优先用 ``Settings.entry_guard_spike_threshold``（系统设置可改）。
 SPIKE_THRESHOLD = 0.05
 
-_IDX_CODE = "idx_sh000001"
+#: 弱市判定所用宽基指数文件名（idx_ 前缀），由 ``settings.paper_regime_index`` 指定。
+#: 默认 sh000985=中证全指（覆盖全A，比上证更能代表系统性风险）；可改 sh000001=上证 / sz399006=创业板指。
+_INDEX_NAME_MAP = {
+    "sh000985": "中证全指", "sh000001": "上证指数", "sz399006": "创业板指",
+    "sz399001": "深证成指", "sh000300": "沪深300",
+}
+
+
+def _regime_index_file() -> str:
+    from app.config import get_settings
+    return "idx_" + str(get_settings().paper_regime_index or "sh000985")
+
+
+def _regime_index_name() -> str:
+    from app.config import get_settings
+    code = str(get_settings().paper_regime_index or "sh000985")
+    return _INDEX_NAME_MAP.get(code, code)
 
 
 def _read_parquet(path: Path) -> pd.DataFrame | None:
@@ -72,7 +88,7 @@ def market_regime() -> dict:
     ur = get_unified_market_risk()
     s = get_settings()
     legacy = {}
-    df = _read_parquet(s.kline_dir / f"{_IDX_CODE}.parquet")
+    df = _read_parquet(s.kline_dir / _regime_index_file())
     if df is not None and len(df) >= 60:
         df = df.sort_values("date")
         close = float(df["close"].iloc[-1])
@@ -82,6 +98,7 @@ def market_regime() -> dict:
             "close": close, "ma20": ma20, "ma60": ma60,
             "above_ma20": bool(close > ma20), "above_ma60": bool(close > ma60),
             "as_of": str(df["date"].iloc[-1].date()),
+            "index_name": _regime_index_name(),
         }
     return {
         "state": ur["state"],

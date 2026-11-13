@@ -26,6 +26,32 @@ def _now() -> str:
     return datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 
+# 卖出原因结构化编码（#191）：从人类可读 reason 文本推断稳定编码，便于复盘/统计。
+# 仅在未显式传入 exit_reason 时作为兜底；买入侧不推断（保持 NULL）。
+_EXIT_REASON_RULES: list[tuple[str, str]] = [
+    ("时间止损", "TIME_STOP"),
+    ("止损触发", "STOP_LOSS"),
+    ("止盈触发", "TAKE_PROFIT"),
+    ("轮动", "ROTATION"),
+    ("清非交易板块", "OFFBOARD"),
+    ("收盘减仓", "EOD_TRIM"),
+    ("涨停卖半", "T_SELL"),
+    ("做T卖出", "T_SELL"),
+    ("反弹减仓", "T_SELL"),
+    ("手动下单", "MANUAL"),
+    ("卖出信号", "SIGNAL"),
+]
+
+
+def _infer_exit_reason(reason: str | None) -> str | None:
+    if not reason:
+        return None
+    for kw, code in _EXIT_REASON_RULES:
+        if kw in reason:
+            return code
+    return "OTHER"
+
+
 # ----------------------------------------------------------------------
 # 账本作用域（线上模拟盘 / 并行模拟账本）
 # ----------------------------------------------------------------------
@@ -292,8 +318,9 @@ CREATE TABLE IF NOT EXISTS paper_trades (
     shares     INTEGER NOT NULL,     -- 成交股数
     amount     REAL NOT NULL,        -- 成交金额（不含费用）
     fee        REAL NOT NULL,        -- 费用合计（佣金+印花税+过户费）
-    reason     TEXT,                 -- 交易原因
+    reason     TEXT,                 -- 交易原因（人类可读文本）
     trade_date TEXT NOT NULL,        -- 信号/交易日期
+    exit_reason TEXT,                -- 卖出原因结构化编码（#191）：STOP_LOSS / TAKE_PROFIT / TIME_STOP / SIGNAL / ROTATION / EOD_TRIM / OFFBOARD / MANUAL / T_SELL ...
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_paper_trades_date ON paper_trades(trade_date);
@@ -374,6 +401,7 @@ CREATE TABLE IF NOT EXISTS sim_trades (
     fee        REAL NOT NULL,
     reason     TEXT,
     trade_date TEXT NOT NULL,
+    exit_reason TEXT,                -- 与 paper_trades 同构：结构化卖出原因编码
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_sim_trades_acct ON sim_trades(account_id, trade_date);
@@ -454,6 +482,77 @@ CREATE TABLE IF NOT EXISTS app_state (
     value      TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+-- 六阶段生命周期事件（#191）：全局事件表，贯穿 初选→自选→队列→入场→持有→离场，
+-- 用 code + created_at 串联任意一只票的完整旅程，支持复盘「哪个信号导致哪笔成交」。
+CREATE TABLE IF NOT EXISTS lifecycle_events (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    code       TEXT NOT NULL,            -- 股票代码（跨阶段追踪主体）
+    name       TEXT,
+    stage      INTEGER NOT NULL,         -- 阶段序号：1 初选 / 2 入自选 / 3 进队列 / 4 入场 / 5 持有 / 6 离场
+    stage_name TEXT NOT NULL,            -- 阶段中文名
+    event      TEXT NOT NULL,            -- 事件类型：scan_hit / signal_in / watch_in / queued / filled / hold / exited ...
+    detail     TEXT,                     -- JSON 或自由文本
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_lifecycle_code ON lifecycle_events(code);
+CREATE INDEX IF NOT EXISTS idx_lifecycle_stage ON lifecycle_events(stage);
+-- P1 上下文风险闸：按 as-of 读取的本地快照（策略代码绝不直接调实时接口）
+-- 事件日历：*_date <= as_of 才可查，禁止未来函数；采集器写入，策略只读。
+CREATE TABLE IF NOT EXISTS context_events (
+    code        TEXT NOT NULL,
+    event_date  TEXT NOT NULL,
+    kind        TEXT NOT NULL,
+    severity    REAL NOT NULL DEFAULT 1.0,
+    title       TEXT,
+    source      TEXT,
+    collected_at TEXT,
+    PRIMARY KEY (code, event_date, kind)
+);
+CREATE INDEX IF NOT EXISTS idx_ctx_events_code_date ON context_events(code, event_date);
+CREATE INDEX IF NOT EXISTS idx_ctx_events_date ON context_events(event_date);
+-- 舆情新闻：sentiment ∈ [-1, 1]，负=利空；heat 为权重。
+CREATE TABLE IF NOT EXISTS context_news (
+    code        TEXT NOT NULL,
+    news_date   TEXT NOT NULL,
+    sentiment   REAL NOT NULL,
+    heat        REAL NOT NULL DEFAULT 1.0,
+    title       TEXT NOT NULL DEFAULT '',
+    source      TEXT,
+    collected_at TEXT,
+    PRIMARY KEY (code, news_date, title)
+);
+CREATE INDEX IF NOT EXISTS idx_ctx_news_code_date ON context_news(code, news_date);
+-- 板块/个股热度分位：由本地日线按交易日预计算，只用当日及之前 close。
+-- 两侧共读这张表，保证「最热 N%」阈值不随各自候选池大小变化。
+CREATE TABLE IF NOT EXISTS context_heat (
+    trade_date      TEXT PRIMARY KEY,
+    stock_cut       REAL,
+    industry_cut    REAL,
+    hot_industries  TEXT NOT NULL DEFAULT '[]',
+    sample_count    INTEGER NOT NULL DEFAULT 0,
+    built_at        TEXT
+);
+-- 影子研究专用：凌晨生成的「隔夜市场环境」日频快照（2026-11-13 用户确认先做影子研究）。
+-- ⚠ 决策边界：禁止任何选股/买入/仓位/止损链路读取本表。若将来要接入，
+--    必须回测↔实盘 1:1 同步（BINDINGS + 行为探针）并重建前向验证基线。
+-- 口径：trade_date = A 股交易日；us_session_date 严格 < trade_date
+--    （美股 D 日收盘发生在北京时间 D+1 凌晨，早于 A 股 T 日 09:30，零未来函数）。
+-- policy_score 为 NULL 表示「历史不可得/无数据」，不是中性 0 分。
+CREATE TABLE IF NOT EXISTS market_env (
+    trade_date       TEXT PRIMARY KEY,
+    us_session_date  TEXT,
+    spx_ret          REAL,
+    ndx_ret          REAL,
+    dji_ret          REAL,
+    us_risk_score    REAL,
+    policy_count     INTEGER NOT NULL DEFAULT 0,
+    policy_score     REAL,
+    env_score        REAL,
+    env_label        TEXT,
+    source           TEXT,
+    built_at         TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_market_env_date ON market_env(trade_date);
 """
 
 
@@ -505,6 +604,7 @@ class Database:
             self._migrate_lots_provenance(conn)
             self._migrate_pending_scan(conn)
             self._migrate_backtest_extra(conn)
+            self._migrate_paper_trades_exit_reason(conn)
             self._dedupe_signals(conn)
 
     @staticmethod
@@ -650,6 +750,20 @@ class Database:
             conn.execute("ALTER TABLE signals ADD COLUMN rank INTEGER DEFAULT 0")
 
     @staticmethod
+    def _migrate_paper_trades_exit_reason(conn: sqlite3.Connection) -> None:
+        """老库给 paper_trades / sim_trades 补 exit_reason 列（#191 结构化卖出原因编码）。
+
+        **两张 trades 表都要补**：`ledger_scope` 会把并行账本的 `insert_paper_trade`
+        路由到 `sim_trades`，只补主表会让并行账本每笔成交都抛
+        `no column named exit_reason`（同 #115 provenance 的坑）。
+        """
+        for table in ("paper_trades", "sim_trades"):
+            cols = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})")}
+            # 表不存在时 PRAGMA 返回空（未启用并行账本的老库），跳过即可
+            if cols and "exit_reason" not in cols:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN exit_reason TEXT")
+
+    @staticmethod
     def _migrate_recommendation_rank(conn: sqlite3.Connection) -> None:
         """老库补 rank / detail 列（第 2 次排序的名次与因子分项）。"""
         cols = {
@@ -688,6 +802,124 @@ class Database:
                 " updated_at=excluded.updated_at",
                 (key, str(value), _now()),
             )
+
+    # ---------------- P1 上下文快照（只由采集脚本写，策略侧只读） ----------------
+
+    def upsert_context_events(self, rows: list[tuple]) -> int:
+        """批量写事件日历。rows = (code, event_date, kind, severity, title, source)。"""
+        if not rows:
+            return 0
+        payload = [
+            (str(c), str(d)[:10], str(k), float(sev), str(title or ""), str(src or ""), _now())
+            for c, d, k, sev, title, src in rows
+        ]
+        with self._lock, self._connect() as conn:
+            conn.executemany(
+                "INSERT INTO context_events(code,event_date,kind,severity,title,source,collected_at) "
+                "VALUES(?,?,?,?,?,?,?) ON CONFLICT(code,event_date,kind) DO UPDATE SET "
+                "severity=excluded.severity, title=excluded.title, "
+                "source=excluded.source, collected_at=excluded.collected_at",
+                payload,
+            )
+        return len(payload)
+
+    def upsert_context_news(self, rows: list[tuple]) -> int:
+        """批量写舆情新闻。rows = (code, news_date, sentiment, heat, title, source)。"""
+        if not rows:
+            return 0
+        payload = [
+            (str(c), str(d)[:10], float(s), float(h), str(t or ""), str(src or ""), _now())
+            for c, d, s, h, t, src in rows
+        ]
+        with self._lock, self._connect() as conn:
+            conn.executemany(
+                "INSERT INTO context_news(code,news_date,sentiment,heat,title,source,collected_at) "
+                "VALUES(?,?,?,?,?,?,?) ON CONFLICT(code,news_date,title) DO UPDATE SET "
+                "sentiment=excluded.sentiment, heat=excluded.heat, "
+                "source=excluded.source, collected_at=excluded.collected_at",
+                payload,
+            )
+        return len(payload)
+
+    def normalize_context_event_kinds(self) -> int:
+        """删掉「全市场公告被误归 earnings」的行（采集规则收紧后的历史清洗）。
+
+        这些是调研/说明会等普通公告；同票同日往往已有 ``other`` 行，直接 UPDATE
+        会撞主键唯一约束。真实业绩预告由 ``yjyg_em`` 单独落库，不受影响。
+        """
+        with self._lock, self._connect() as conn:
+            cur = conn.execute(
+                "DELETE FROM context_events "
+                "WHERE source='notice_report' AND kind='earnings'"
+            )
+            return cur.rowcount
+
+    def upsert_context_heat(self, rows: list[tuple]) -> int:
+        """批量写每日热度分位。rows = (trade_date, stock_cut, industry_cut, hot_industries_json, n)。"""
+        if not rows:
+            return 0
+        payload = [
+            (str(d)[:10], sc, ic, str(hi or "[]"), int(n), _now())
+            for d, sc, ic, hi, n in rows
+        ]
+        with self._lock, self._connect() as conn:
+            conn.executemany(
+                "INSERT INTO context_heat(trade_date,stock_cut,industry_cut,hot_industries,"
+                "sample_count,built_at) VALUES(?,?,?,?,?,?) ON CONFLICT(trade_date) DO UPDATE SET "
+                "stock_cut=excluded.stock_cut, industry_cut=excluded.industry_cut, "
+                "hot_industries=excluded.hot_industries, sample_count=excluded.sample_count, "
+                "built_at=excluded.built_at",
+                payload,
+            )
+        return len(payload)
+
+    # ---------------- 隔夜市场环境快照（影子研究专用，不进决策） ----------------
+
+    def upsert_market_env(self, rows: list[dict]) -> int:
+        """批量写 market_env（按 trade_date 幂等）。policy_score=None 表示历史不可得。"""
+        if not rows:
+            return 0
+        payload = [
+            (str(r["trade_date"])[:10],
+             r.get("us_session_date"), r.get("spx_ret"), r.get("ndx_ret"),
+             r.get("dji_ret"), r.get("us_risk_score"),
+             int(r.get("policy_count") or 0), r.get("policy_score"),
+             r.get("env_score"), r.get("env_label"),
+             str(r.get("source") or "unknown"), _now())
+            for r in rows
+        ]
+        with self._lock, self._connect() as conn:
+            conn.executemany(
+                "INSERT INTO market_env(trade_date,us_session_date,spx_ret,ndx_ret,dji_ret,"
+                "us_risk_score,policy_count,policy_score,env_score,env_label,source,built_at) "
+                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(trade_date) DO UPDATE SET "
+                "us_session_date=excluded.us_session_date, spx_ret=excluded.spx_ret, "
+                "ndx_ret=excluded.ndx_ret, dji_ret=excluded.dji_ret, "
+                "us_risk_score=excluded.us_risk_score, policy_count=excluded.policy_count, "
+                "policy_score=excluded.policy_score, env_score=excluded.env_score, "
+                "env_label=excluded.env_label, source=excluded.source, built_at=excluded.built_at",
+                payload,
+            )
+        return len(payload)
+
+    def market_env_rows(self, start: str, end: str) -> list[dict]:
+        """按 trade_date 区间读快照（只读；影子研究评估用）。"""
+        with self._lock, self._connect() as conn:
+            rows = conn.execute(
+                "SELECT * FROM market_env WHERE trade_date BETWEEN ? AND ? ORDER BY trade_date",
+                (str(start)[:10], str(end)[:10]),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def context_trade_dates(self, start: str, end: str) -> list[str]:
+        """读两侧共用的 A 股交易日列表（context_heat 的预计算日期）。"""
+        with self._lock, self._connect() as conn:
+            rows = conn.execute(
+                "SELECT trade_date FROM context_heat WHERE trade_date BETWEEN ? AND ? "
+                "ORDER BY trade_date",
+                (str(start)[:10], str(end)[:10]),
+            ).fetchall()
+        return [str(r[0])[:10] for r in rows]
 
     # ---------------- 自选股 ----------------
 
@@ -872,7 +1104,13 @@ class Database:
         return dict(row) if row else None
 
     def init_paper_account(self, initial_capital: float) -> dict[str, Any]:
-        """初始化模拟账户（幂等：已存在则直接返回）。"""
+        """初始化模拟账户（幂等：已存在则直接返回，绝不覆盖已有现金余额）。
+
+        关键修复：早期实现用裸 INSERT，若在「账户已存在但本调用瞬间没查到」的竞态
+        （如 09:30 服务重启、`ensure_account` 与写入并发）下执行，会把现金重置成
+        初始资金、丢失历史成交的现金效应，导致总资产虚增。改为 ``ON CONFLICT DO NOTHING``
+        后，任何重复初始化都不会改动已有的 ``cash`` / ``initial_capital``。
+        """
         existing = self.get_paper_account()
         if existing:
             return existing
@@ -883,10 +1121,13 @@ class Database:
         with self._lock, self._connect() as conn:
             conn.execute(
                 "INSERT INTO paper_account(id, initial_capital, cash, created_at)"
-                " VALUES(1,?,?,?)",
+                " VALUES(1,?,?,?)"
+                " ON CONFLICT(id) DO NOTHING",
                 (initial_capital, initial_capital, _now()),
             )
-        return {"initial_capital": initial_capital, "cash": initial_capital}
+        return self.get_paper_account() or {
+            "initial_capital": initial_capital, "cash": initial_capital
+        }
 
     def update_paper_cash(self, cash: float) -> None:
         led = _scope()
@@ -896,6 +1137,65 @@ class Database:
                 f"{led.where('' if led.sim else 'id=1')}",
                 (cash, *led.args()),
             )
+
+    def audit_paper_cash(self, repair: bool = True) -> dict[str, Any]:
+        """以成交台账为唯一真相源核对（并可原子修正）模拟账户现金。
+
+        背景：2026-11-12 两次出现 ``paper_account.cash`` 被写成初始资金 10 万，
+        持仓市值被当成白赚，页面显示 **+37.67%** 的假收益，而同一时刻按台账
+        重算与净值快照都是 **−1.27%**。根因不是策略，而是账户查询完全信任
+        ``cash`` 字段、没有任何一致性校验；上次只修数据没修信任链，故复发。
+
+        这里把「读账户 → 按台账重放 → 必要时写回」放进**同一把锁 + 同一连接**，
+        避免与撮合的 ``update_paper_cash`` 交错。两条护栏：
+
+        * 台账为空时**绝不**把现金重放成初始资金（防止修复逻辑自己制造污染：
+          ``cash = initial`` 在无成交时会把 10 万写回去，正是最可疑的写入路径）；
+        * 只在偏差 > 0.01 元时才写，正常撮合不产生额外写入。
+
+        账本作用域（影子账户）同样适用：所有表名 / WHERE 都经 ``led`` 折算。
+        """
+        led = _scope()
+        where = led.where("" if led.sim else "id=1")
+        with self._lock, self._connect() as conn:
+            row = conn.execute(
+                f"SELECT * FROM {led.t('paper_account')}{where}", led.args(),
+            ).fetchone()
+            if row is None:
+                return {"ok": False, "reason": "account_missing", "cash": 0.0,
+                        "repaired": False, "trades": 0}
+            stored = float(row["cash"])
+            initial = float(row["initial_capital"])
+            trades = conn.execute(
+                f"SELECT side, amount, fee FROM {led.t('paper_trades')}{led.where()}"
+                " ORDER BY id",
+                led.args(),
+            ).fetchall()
+            if not trades:
+                # 新账户或台账读取异常：保持原值，绝不擅自重置成 initial
+                return {"ok": True, "cash": stored, "stored": stored,
+                        "replayed": None, "repaired": False, "trades": 0,
+                        "note": "no_trades_skip"}
+            cash = initial
+            for t in trades:
+                amt = float(t["amount"]); fee = float(t["fee"])
+                cash += -(amt + fee) if t["side"] == "buy" else (amt - fee)
+            replayed = round(cash, 2)
+            repaired = False
+            if repair and abs(replayed - stored) > 0.01:
+                conn.execute(
+                    f"UPDATE {led.t('paper_account')} SET cash=?{where}",
+                    (replayed, *led.args()),
+                )
+                repaired = True
+            return {
+                "ok": True,
+                "cash": replayed if repaired else stored,
+                "stored": stored,
+                "replayed": replayed,
+                "repaired": repaired,
+                "trades": len(trades),
+            }
 
     def list_paper_positions(self) -> list[dict[str, Any]]:
         led = _scope()
@@ -1247,19 +1547,71 @@ class Database:
     def insert_paper_trade(
         self, code: str, name: str, side: str, price: float, shares: int,
         amount: float, fee: float, reason: str, trade_date: str,
+        exit_reason: str | None = None,
     ) -> None:
         led = _scope()
         cols = (
             "code, name, side, price, shares, amount, fee, reason,"
-            " trade_date, created_at"
+            " trade_date, exit_reason, created_at"
         )
         with self._lock, self._connect() as conn:
+            if exit_reason is None and side == "sell":
+                exit_reason = _infer_exit_reason(reason)
             conn.execute(
                 f"INSERT INTO {led.t('paper_trades')}({led.cols(cols)})"
-                f" VALUES({led.vals(10)})",
+                f" VALUES({led.vals(11)})",
                 led.args(code, name, side, price, shares, amount, fee, reason,
-                         trade_date, _now()),
+                         trade_date, exit_reason, _now()),
             )
+        # 六阶段生命周期：所有卖出即「离场」（#191），由唯一写入点统一发射，
+        # 覆盖止损/止盈/时间止损/信号/轮动/收盘减仓/清非交易板块/手动/做T 全部路径。
+        # **必须在上面的 with 块之外发射**：insert_lifecycle_event 自己会
+        # ``with self._lock``，而 Database._lock 是不可重入的 threading.Lock；
+        # 放在锁内会在第一笔卖出成交时永久阻塞，导致整个服务自此无法再卖出。
+        # 2026-11-12「卖出出口巡检」在隔离副本上复现并修复。
+        if side == "sell":
+            self.insert_lifecycle_event(
+                code, name, 6, "离场",
+                exit_reason or _infer_exit_reason(reason) or "OTHER",
+                detail=reason,
+            )
+
+    # ---- 六阶段生命周期事件（#191）：全局表，不属于 paper/sim 账本，直接写 lifecycle_events ----
+    def insert_lifecycle_event(
+        self, code: str, name: str, stage: int, stage_name: str,
+        event: str, detail: str | None = None,
+    ) -> None:
+        with self._lock, self._connect() as conn:
+            conn.execute(
+                "INSERT INTO lifecycle_events(code, name, stage, stage_name, event, detail, created_at)"
+                " VALUES(?,?,?,?,?,?,?)",
+                (str(code or ""), name, int(stage), stage_name, event, detail, _now()),
+            )
+
+    def list_lifecycle_events(
+        self, code: str | None = None, limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        with self._lock, self._connect() as conn:
+            if code:
+                rows = conn.execute(
+                    "SELECT * FROM lifecycle_events WHERE code=? ORDER BY id DESC LIMIT ?",
+                    (str(code), int(limit)),
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT * FROM lifecycle_events ORDER BY id DESC LIMIT ?",
+                    (int(limit),),
+                ).fetchall()
+        return [dict(r) for r in rows]
+
+    def count_lifecycle_events_by_stage(self) -> list[dict[str, Any]]:
+        """按阶段聚合事件数，供前端六阶段概览卡使用。"""
+        with self._lock, self._connect() as conn:
+            rows = conn.execute(
+                "SELECT stage, stage_name, COUNT(*) AS cnt FROM lifecycle_events"
+                " GROUP BY stage, stage_name ORDER BY stage"
+            ).fetchall()
+        return [dict(r) for r in rows]
 
     def list_paper_trades(
         self, limit: int = 100, code: str | None = None

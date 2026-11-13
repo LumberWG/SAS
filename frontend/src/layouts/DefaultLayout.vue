@@ -12,7 +12,10 @@ import { useRoute, useRouter } from 'vue-router'
 import {
   Activity,
   ChevronRight,
+  ChevronsLeft,
+  ChevronsRight,
   FlaskConical,
+  GitBranch,
   LayoutDashboard,
   Menu,
   Radar,
@@ -60,6 +63,36 @@ const scopeWarning = computed(() => {
 })
 // 手机（经 cpolar 公网访问）没有 224px 的横向空间：侧栏默认收起，点汉堡展开
 const sidebarOpen = ref(false)
+// 桌面端侧栏可收缩为图标栏：状态持久化到 localStorage，刷新后保持
+const collapsed = ref(localStorage.getItem('sas-sidebar-collapsed') === '1')
+watch(collapsed, (v) => {
+  try {
+    localStorage.setItem('sas-sidebar-collapsed', v ? '1' : '0')
+  } catch {
+    /* localStorage 不可用时静默，仅本次会话内生效 */
+  }
+})
+function toggleCollapsed() {
+  collapsed.value = !collapsed.value
+}
+// 收起态下图标栏没有文字，hover 时在图标右侧弹出菜单名提示。
+// 用 Teleport 渲染到 body，避免被侧栏 overflow-y-auto 裁掉；仅在桌面(lg)且已收起时显示。
+const navTip = ref<{ show: boolean; text: string; x: number; y: number }>({
+  show: false,
+  text: '',
+  x: 0,
+  y: 0,
+})
+function showNavTip(e: MouseEvent, title: string) {
+  if (!collapsed.value) return
+  if (!window.matchMedia('(min-width: 1024px)').matches) return
+  const el = e.currentTarget as HTMLElement
+  const r = el.getBoundingClientRect()
+  navTip.value = { show: true, text: title, x: r.right + 10, y: r.top + r.height / 2 }
+}
+function hideNavTip() {
+  navTip.value = { ...navTip.value, show: false }
+}
 // 手机顶栏放不下 4 个状态灯，收进一个可点开的状态面板 —— 信息不能整块藏掉
 const statusPanelOpen = ref(false)
 watch(() => route.path, () => {
@@ -97,6 +130,7 @@ const navGroups = [
     title: '交易执行',
     items: [
       { path: '/paper', title: '模拟交易', icon: Wallet },
+      { path: '/lifecycle', title: '生命周期', icon: GitBranch },
     ],
   },
   {
@@ -291,7 +325,7 @@ const currentGroup = computed(() =>
 </script>
 
 <template>
-  <div class="flex h-full">
+  <div class="flex h-full" :class="{ 'app-collapsed': collapsed }">
     <!-- 路由切换进度条：首次进入需下载动态 chunk 时显示，keep-alive 命中页近乎无感 -->
     <div
       v-if="navProgress.active"
@@ -310,17 +344,17 @@ const currentGroup = computed(() =>
       @click="sidebarOpen = false"
     ></div>
     <aside
-      class="fixed left-0 top-0 z-[90] flex h-full w-56 flex-col border-r border-base-600/60 bg-base-800/90 backdrop-blur-xl transition-transform duration-200 lg:translate-x-0 lg:bg-base-800/70"
-      :class="sidebarOpen ? 'translate-x-0' : '-translate-x-full'"
+      class="fixed left-0 top-0 z-[90] flex h-full w-56 flex-col border-r border-base-600/60 bg-base-800/90 backdrop-blur-xl transition-[transform,width] duration-200 ease-out lg:translate-x-0 lg:bg-base-800/70"
+      :class="[sidebarOpen ? 'translate-x-0' : '-translate-x-full', collapsed ? 'lg:w-16' : 'lg:w-56']"
     >
       <!-- 品牌 -->
-      <div class="flex items-center gap-2.5 border-b border-base-600/60 px-5 py-[15px]">
+      <div class="brand-block flex items-center gap-2.5 border-b border-base-600/60 px-5 py-[15px]">
         <div
           class="flex h-9 w-9 shrink-0 items-center justify-center rounded-[10px] bg-gradient-to-br from-primary to-primary-dark ring-1 ring-inset ring-white/20"
         >
           <Activity class="h-[18px] w-[18px] text-white" :stroke-width="2.2" />
         </div>
-        <div class="min-w-0">
+        <div class="brand-text min-w-0">
           <div class="text-[16px] font-semibold leading-tight tracking-[0.08em] text-content">SAS</div>
           <div class="truncate text-[11.5px] leading-tight text-content-faint">智能投研终端</div>
         </div>
@@ -328,7 +362,7 @@ const currentGroup = computed(() =>
 
       <nav class="flex-1 space-y-6 overflow-y-auto px-3 py-5">
         <div v-for="group in navGroups" :key="group.title" class="space-y-1">
-          <div class="mb-2 flex items-center gap-2 px-2.5">
+          <div class="nav-group-head mb-2 flex items-center gap-2 px-2.5">
             <span class="eyebrow shrink-0">{{ group.title }}</span>
             <span class="h-px flex-1 bg-base-600/60"></span>
             <span class="font-num text-[10.5px] leading-none text-content-faint">{{ String(group.items.length).padStart(2, '0') }}</span>
@@ -337,10 +371,13 @@ const currentGroup = computed(() =>
             v-for="item in group.items"
             :key="item.path"
             :to="item.path"
-            class="group relative flex items-center gap-2.5 rounded-control px-2.5 py-[9px] text-[13.5px] font-medium transition-colors duration-150"
+            class="nav-link group relative flex items-center gap-2.5 rounded-control px-2.5 py-[9px] text-[13.5px] font-medium transition-colors duration-150"
+            :title="item.title"
             @click="sidebarOpen = false"
-            @mouseenter="prefetchRoute(item.path)"
+            @mouseenter="prefetchRoute(item.path); showNavTip($event, item.title)"
+            @mouseleave="hideNavTip"
             @focus="prefetchRoute(item.path)"
+            @blur="hideNavTip"
             :class="
               activePath === item.path
                 ? 'bg-primary/[0.12] text-content'
@@ -356,10 +393,10 @@ const currentGroup = computed(() =>
               class="h-4 w-4 shrink-0 transition-colors"
               :class="activePath === item.path ? 'text-primary-light' : 'text-content-faint group-hover:text-content-muted'"
             />
-            <span class="truncate">{{ item.title }}</span>
+            <span class="nav-label truncate">{{ item.title }}</span>
             <span
               v-if="activePath === item.path"
-              class="ml-auto h-1 w-1 shrink-0 rounded-full bg-primary"
+              class="nav-dot ml-auto h-1 w-1 shrink-0 rounded-full bg-primary"
             ></span>
           </router-link>
         </div>
@@ -367,21 +404,32 @@ const currentGroup = computed(() =>
 
       <!-- 侧栏底部：仅保留运行环境标识（免责声明移到主内容区底部统一呈现，避免多处重复） -->
       <div class="border-t border-base-600/60 px-3 py-3">
+        <!-- 桌面端「收起/展开」开关：收缩为图标栏，状态持久化 -->
+        <button
+          class="hidden w-full items-center gap-2 rounded-control px-2.5 py-2 text-[12.5px] text-content-faint transition-colors hover:bg-base-700/60 hover:text-content lg:flex"
+          :title="collapsed ? '展开侧栏' : '收起侧栏'"
+          :aria-expanded="!collapsed"
+          @click="toggleCollapsed"
+        >
+          <component :is="collapsed ? ChevronsRight : ChevronsLeft" class="h-4 w-4 shrink-0" />
+          <span class="sidebar-foot-text truncate">{{ collapsed ? '展开菜单' : '收起菜单' }}</span>
+        </button>
         <div class="flex items-center justify-between px-1">
-          <span class="inline-flex items-center gap-1.5 text-[10.5px] font-medium tracking-[0.1em] text-content-faint">
+          <span class="sidebar-foot-text inline-flex items-center gap-1.5 text-[10.5px] font-medium tracking-[0.1em] text-content-faint">
             <span class="h-1.5 w-1.5 rounded-full bg-warn/70"></span>
             PAPER MODE
           </span>
-          <span class="font-num text-[10.5px] tracking-wide text-content-faint">SIM</span>
+          <span class="sidebar-foot-text font-num text-[10.5px] tracking-wide text-content-faint">SIM</span>
         </div>
       </div>
     </aside>
 
-    <!-- 主内容区（为固定侧栏留出宽度） -->
-    <div class="flex h-full flex-1 flex-col lg:ml-56">
+    <!-- 主内容区（为固定侧栏留出宽度；收缩时宽度同步收窄） -->
+    <div class="flex h-full flex-1 flex-col" :class="collapsed ? 'lg:ml-16' : 'lg:ml-56'">
       <!-- 顶栏（固定） -->
       <header
-        class="fixed left-0 right-0 top-0 z-30 flex h-14 items-center justify-between gap-2 border-b border-base-600/60 bg-base-900/85 px-3 backdrop-blur-xl sm:px-5 lg:left-56"
+        class="fixed left-0 right-0 top-0 z-30 flex h-14 items-center justify-between gap-2 border-b border-base-600/60 bg-base-900/85 px-3 backdrop-blur-xl transition-[left] duration-200 sm:px-5"
+        :class="collapsed ? 'lg:left-16' : 'lg:left-56'"
       >
         <div class="flex min-w-0 items-center gap-2 sm:gap-3">
           <button
@@ -527,4 +575,41 @@ const currentGroup = computed(() =>
       </footer>
     </div>
   </div>
+
+  <!-- 收起态图标栏的菜单名提示：悬浮图标时出现在右侧，Teleport 到 body 避免被侧栏裁切 -->
+  <Teleport to="body">
+    <div
+      v-if="navTip.show"
+      class="pointer-events-none fixed z-[120] -translate-y-1/2 whitespace-nowrap rounded-md border border-base-600/70 bg-base-900/95 px-2.5 py-1.5 text-[12.5px] font-medium text-content shadow-pop backdrop-blur-sm"
+      :style="{ left: navTip.x + 'px', top: navTip.y + 'px' }"
+    >
+      {{ navTip.text }}
+    </div>
+  </Teleport>
 </template>
+
+<style scoped>
+/* 桌面端收起：侧栏塌缩为 64px 图标栏，文字/分组标题/激活圆点让位给图标。
+   用 .app-collapsed 祖先类 + lg: 断面包住，确保只影响桌面端，移动端抽屉不受影响。 */
+.app-collapsed .nav-group-head {
+  @apply lg:hidden;
+}
+.app-collapsed .nav-label {
+  @apply lg:hidden;
+}
+.app-collapsed .nav-dot {
+  @apply lg:hidden;
+}
+.app-collapsed .brand-text {
+  @apply lg:hidden;
+}
+.app-collapsed .brand-block {
+  @apply lg:justify-center lg:px-0;
+}
+.app-collapsed .nav-link {
+  @apply lg:justify-center lg:px-0;
+}
+.app-collapsed .sidebar-foot-text {
+  @apply lg:hidden;
+}
+</style>

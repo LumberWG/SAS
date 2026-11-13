@@ -50,6 +50,18 @@ def _allowed_board_prefixes() -> tuple[str, ...]:
 _ST_RE = re.compile(r"\*?ST|退", re.IGNORECASE)
 
 
+def is_st_name(name) -> bool:
+    """名称是否带 ST / *ST / 退市标记——**实盘与回测共用的唯一口径**。
+
+    扫描器 ``scanner``、模拟盘买入池 ``paper/engine`` 走 :func:`is_tradable`，
+    回测股票池 ``backtest/pipeline`` 直接调本函数（回测板块另由 board_prefixes
+    控制，不能再套 is_tradable 的板块白名单，否则会二次过滤）。以前三处各写
+    一份判断，回测漏了这一层，结果把 ST南都(300068) 放进池子、单笔 -57%
+    （回测 #44）。此后任何一侧要改 ST 判定，只改本函数。
+    """
+    return bool(_ST_RE.search(str(name or "")))
+
+
 def is_cyb(code: str) -> bool:
     """是否创业板（20% 涨跌幅，项目偏好）。"""
     return str(code).startswith(("300", "301"))
@@ -90,7 +102,7 @@ def is_tradable(code: str, name: str = "") -> tuple[bool, str]:
     # 改这一处即可同时约束扫描器、实盘买入池与统计口径，避免各处分散硬编码。
     if not c.startswith(_allowed_board_prefixes()):
         return False, "board_excluded"
-    if _ST_RE.search(str(name or "")):
+    if is_st_name(name):
         return False, "st"
     return True, "ok"
 
@@ -150,10 +162,10 @@ def get_universe_stats() -> dict:
     # 一致性检查依赖当前设置，不能放进 lru_cache 的统计结果里
     try:
         s = get_settings()
-        out["board_consistency"] = board_scope_consistency(
-            getattr(s, "twin_t_boards", "") or "",
-            getattr(s, "bottom_boards", "") or "",
-        )
+        # 选股 + 交易已统一到 twin_t_boards（单一板块白名单）：两侧用同一份设置，
+        # 因此始终一致，「板块不一致」告警不再出现。bottom_boards 仅作向后兼容字段。
+        raw = getattr(s, "twin_t_boards", "") or ""
+        out["board_consistency"] = board_scope_consistency(raw, raw)
     except Exception:
         pass
     return out

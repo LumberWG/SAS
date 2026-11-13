@@ -283,10 +283,15 @@ class Scanner:
                 pool = pd.DataFrame(
                     {"code": wanted, "name": [names.get(c, c) for c in wanted]}
                 )
-            elif scope.startswith("top_amount:"):
-                # 成交额前 N（流动性优先，冷缓存下最快出结果的范围）
+            elif scope.startswith("top_amount_all:"):
+                # 全市场成交额前 N（不限定板块，显式全市场扫描用）
                 n = int(scope.split(":", 1)[1] or 500)
-                pool = await loop.run_in_executor(self._io, self._top_amount_pool, pool, n)
+                pool = await loop.run_in_executor(self._io, self._top_amount_pool, pool, n, False)
+            elif scope.startswith("top_amount:"):
+                # 成交额前 N（板块感知：先在「交易板块」白名单内取，贴合目标板块，
+                # 避免全市场大票挤掉小盘目标——如创业板目标下取的是创业板成交额前 N）
+                n = int(scope.split(":", 1)[1] or 500)
+                pool = await loop.run_in_executor(self._io, self._top_amount_pool, pool, n, True)
             else:
                 pool = filter_pool_by_scope(pool, scope)
             # 范围过滤（项目原则：只分析沪深主板+创业板，剔除 ST 与巨无霸）。
@@ -349,6 +354,13 @@ class Scanner:
             # 信号持久化
             scan_date = datetime.now().strftime("%Y-%m-%d")
             db.save_signals(task.hits, scan_date=scan_date)
+            # 六阶段生命周期：初选命中（#191）
+            for h in task.hits:
+                db.insert_lifecycle_event(
+                    str(h.get("code") or ""), str(h.get("name") or h.get("code") or ""),
+                    1, "初选", "signal_in",
+                    detail=f"{h.get('strategy','')} 技术面分 {h.get('extra', {}).get('score')}",
+                )
             # 整轮结果落盘：后端重启后 latest_scan 仍能恢复列表
             await loop.run_in_executor(self._io, self._persist_task, task)
             # 命中自动进入「程序自选」（按评分取前 N，配置为 0 时关闭）
@@ -500,6 +512,10 @@ class Scanner:
         keep_codes = {c for c, _, _ in keep}
         added = db.add_watch_many(keep, source="auto", note="自动加入(扫描命中/保活)")
         pruned = db.prune_watch_auto(keep_codes)
+        # 六阶段生命周期：入自选（#191，本轮新加入的候选）
+        for c, n, _sc in keep:
+            db.insert_lifecycle_event(c, n, 2, "入自选", "watch_in",
+                                      detail="自动加入(扫描命中/保活)")
         logger.info(
             "程序自选: 候选 %d + 现有 %d，统一评分保留 %d（上限 %d），新增 %d，淘汰 %d",
             limit, len(existing), len(keep), cap, added, pruned,
@@ -535,13 +551,36 @@ class Scanner:
             return {}
 
     @staticmethod
-    def _top_amount_pool(pool: pd.DataFrame, n: int) -> pd.DataFrame:
-        """按实时成交额取前 N 只股票（快照失败时退化为全量前 N 行）。"""
+    def _top_amount_pool(pool: pd.DataFrame, n: int, board_aware: bool = True) -> pd.DataFrame:
+        """按实时成交额取前 N 只股票。
+
+        board_aware=True（默认，对应 ``top_amount:N``）：先按「交易板块」白名单
+        （twin_t_boards，经 _allowed_board_prefixes 解析为代码前缀）过滤快照，
+        再在板块内取成交额前 N。这样选股池贴合目标板块——例如创业板目标下取的是
+        「创业板成交额前 N」，而非「全市场前 N 后再被板块过滤筛剩零星几只」，
+        小盘中盘目标不会被全市场大票挤出。
+
+        board_aware=False（对应 ``top_amount_all:N``）：全市场取前 N，用于显式全市场扫描。
+
+        快照失败时退化为股票池前 N 行。
+        """
         from app.data.snapshot_store import snapshot_store
 
         try:
             snapshot = snapshot_store.get_snapshot()
-            top = snapshot.nlargest(n, "amount")
+            if board_aware:
+                from app.data.scope import _allowed_board_prefixes
+
+                prefixes = _allowed_board_prefixes()
+                if prefixes:
+                    snap = snapshot[
+                        snapshot["code"].astype(str).str.startswith(tuple(prefixes))
+                    ]
+                else:
+                    snap = snapshot
+            else:
+                snap = snapshot
+            top = snap.nlargest(n, "amount")
             codes = set(top["code"])
             return pool[pool["code"].isin(codes)]
         except Exception as exc:  # noqa: BLE001 - 快照不可用时降级
@@ -629,8 +668,12 @@ _kline_stat_cache: tuple[float, int] | None = None
 # 扫描范围定义（选股中心「扫描范围」下拉）
 # ----------------------------------------------------------------------
 SCAN_SCOPES: dict[str, dict] = {
-    "top_amount:500": {"label": "成交额前 500（推荐）", "filter": None},
-    "top_amount:1000": {"label": "成交额前 1000", "filter": None},
+    # 成交额 TopN 已改为「目标板块内」取（twin_t_boards），贴合选股/交易板块，
+    # 不再用全市场大票挤掉小盘目标；需要真正的全市场扫描时用 top_amount_all:*
+    "top_amount:500": {"label": "目标板块成交额前 500（推荐）", "filter": None},
+    "top_amount:1000": {"label": "目标板块成交额前 1000", "filter": None},
+    "top_amount_all:500": {"label": "全市场成交额前 500", "filter": None},
+    "top_amount_all:1000": {"label": "全市场成交额前 1000", "filter": None},
     "sh": {"label": "沪市主板", "filter": lambda p: p["code"].str.startswith("60")},
     "sz": {"label": "深市主板", "filter": lambda p: p["code"].str.startswith(("00", "001"))},
     "cyber": {"label": "创业板", "filter": lambda p: p["code"].str.startswith(("30", "301"))},
