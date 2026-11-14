@@ -1,7 +1,7 @@
 """用本地 free-stockdb 库抓全市场 5 分钟 K 线，写入独立目录（不覆盖 Baostock 数据）。
 
 数据源：D:\\Backup\\SAS\\fsdb\\stockdb（本地 leveldb，127.0.0.1:7899）
-输出：  E:\\Study\\SAS\\data\\minute5_fsdb\\<code>.parquet
+输出：  D:\\Backup\\SAS\\data\\minute5_fsdb\\<code>.parquet
        列：date(str 'YYYY-MM-DD HH:MM:SS'), open, high, low, close, volume, amount
 
 特点：断点续传（已有且行数达标则跳过）、可随时 Ctrl+C、无网络封禁风险。
@@ -47,6 +47,8 @@ try:
 except Exception as _e:  # noqa: BLE001
     print(f"[WARN] 聚合补丁未生效（个别停牌股可能取不到）: {type(_e).__name__}: {_e}")
 
+# 与 app.config.SHORT_TERM_RESEARCH_START 同源：短线定位下近两年分钟线足够，
+# 不需要更久远的历史；本脚本不 import app，改起点时两处一起改。
 START = "20250101"
 
 

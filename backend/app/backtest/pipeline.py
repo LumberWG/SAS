@@ -41,7 +41,7 @@ from app.analysis.factors import BUY_THRESHOLD, SELL_THRESHOLD, compute_factors,
 from app.analysis.scoring import score_technical
 from app.backtest import progress
 from app.backtest.review import analyze
-from app.config import get_settings
+from app.config import SHORT_TERM_HOLD_TRADING_DAYS, get_settings
 from app.data.scope import is_st_name
 from app.data.service import get_stock_pool
 from app.data.minute import get_minute_day_bars  # E45：分钟级强势确认（需当日 OHLCV）
@@ -146,7 +146,7 @@ class PipelineParams:
     add_per_day: int = 50                  # 每日扫描后加自选上限
     stop_loss: float = STOP_LOSS_RATIO
     take_profit: float = TAKE_PROFIT_RATIO
-    max_hold_days: int = 0                 # 时间止损，0=不限制
+    max_hold_days: int = SHORT_TERM_HOLD_TRADING_DAYS  # 短线定位：两周=10 交易日；0=不限制
     #: 调仓周期（交易日）：1=每日（线上行为），5≈周频。只在**调仓日收盘后**生成买入委托、
     #: 次日开盘成交。卖出（止损/止盈/信号/择时清仓）不受限制——风控不能因为没到调仓日而延迟。
     #: 目的：记录 #29 显示月换手约 2.2 个资本、摩擦是主要漏损，降频是最直接的减法。

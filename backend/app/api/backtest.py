@@ -28,6 +28,19 @@ from app.data.cache import db
 from app.param_specs import update_settings
 
 logger = logging.getLogger("sas.api.backtest")
+
+
+def _calendar_to_trading_days(days: int) -> int:
+    """线上 ``paper_max_hold_days``（自然日）折算成回测 ``max_hold_days``（交易日）。
+
+    A 股一周 5 个交易日 / 7 个自然日，故 14 自然日（两周）≈ 10 交易日。
+    0 必须保持 0（关闭时间止损），小值至少保留 1，避免 round 成 0 反而变成「不限制」。
+    """
+    if days <= 0:
+        return 0
+    return max(1, round(days * 5 / 7))
+
+
 router = APIRouter(prefix="/backtest", tags=["回测"])
 
 #: 这些参数在 :func:`_defaults_payload` 里用 **0** 表示「不启用」，而 ``PipelineParams``
@@ -302,7 +315,11 @@ def _defaults_payload() -> dict:
         # 止损 / 止盈（实盘这三项已挪进 Settings，落盘后默认值同步变化）
         "stop_loss": float(s.paper_stop_loss),
         "take_profit": float(s.paper_take_profit),
-        "max_hold_days": 0,
+        # 短线持有上限：跟随实盘 paper_max_hold_days（自然日）按 5/7 折算成交易日，
+        # 不再写死 0；用户把实盘设回 0 时回测也自动关闭时间止损。
+        "max_hold_days": _calendar_to_trading_days(
+            int(getattr(s, "paper_max_hold_days", 0) or 0)
+        ),
         "stop_atr_mult": float(s.paper_atr_stop_mult),
         # ATR 止损距离下限：实盘 _stop_distance 是 max(paper_stop_loss, min(dist, atr_max))，
         # 下限就是固定止损；回测公式 max(stop_atr_min, min(stop_atr_max, dist)) 结构相同，

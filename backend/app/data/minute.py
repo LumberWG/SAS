@@ -25,6 +25,8 @@ from app.config import get_settings
 # 本地预下载分钟线目录：与 kline_dir 同级（<root>/data/）
 # 5 分钟线优先用 free-stockdb 导出的全市场数据 minute5_fsdb（5559 只，
 # 2025-01-02 起），没有该目录时才回退旧的 baostock 缓存 minute5（803 只）。
+# 起点 = config.SHORT_TERM_RESEARCH_START：本系统只做短线（持有 ≤ 两周），
+# 近两年分钟线足够切出大量不重叠短线窗口，不需要更久远的历史。
 # 可用环境变量 SAS_MINUTE5_DIR 强制指定。
 def _data_dir() -> Path:
     try:

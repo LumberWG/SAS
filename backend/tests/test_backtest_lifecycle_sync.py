@@ -70,3 +70,47 @@ def test_buy_blocked_board_unavailable(monkeypatch):
     )
     blocked, _ = pl._buy_blocked("600000", board_trend_gate=True)
     assert not blocked
+
+
+# ---- 2026-11-14 短线定位落到代码后的回归 ----
+def test_short_term_constants_and_defaults():
+    from app.config import (
+        SHORT_TERM_HOLD_CALENDAR_DAYS, SHORT_TERM_HOLD_TRADING_DAYS,
+        SHORT_TERM_RESEARCH_START, Settings,
+    )
+
+    assert (SHORT_TERM_HOLD_CALENDAR_DAYS, SHORT_TERM_HOLD_TRADING_DAYS) == (14, 10)
+    assert SHORT_TERM_RESEARCH_START == "2025-01-02"
+    assert Settings.model_fields["paper_max_hold_days"].default == 14
+    assert PipelineParams.max_hold_days == 10
+
+
+def test_hold_days_unit_conversion():
+    from app.api.backtest import _calendar_to_trading_days
+
+    assert _calendar_to_trading_days(0) == 0   # 0 = 关闭，不能被 round 成「不限制」
+    assert _calendar_to_trading_days(7) == 5
+    assert _calendar_to_trading_days(14) == 10
+    assert _calendar_to_trading_days(21) == 15
+
+
+def test_backtest_defaults_follow_live_hold_limit():
+    from app.api.backtest import _calendar_to_trading_days, _defaults_payload
+    from app.config import get_settings
+
+    live = int(getattr(get_settings(), "paper_max_hold_days", 0) or 0)
+    assert _defaults_payload()["max_hold_days"] == _calendar_to_trading_days(live)
+
+
+def test_hold_days_registered_in_alignment_contract():
+    from app.api.backtest import _calendar_to_trading_days
+    from app.backtest.alignment import BINDINGS, SKIP_ALLOWED_NO_DIRECT_MAPPING
+    from app.backtest.apply import SKIP_REASONS
+
+    binding = BINDINGS["max_hold_days"]
+    assert binding.setting == "paper_max_hold_days"
+    # 双值探针必须给出不同结果，否则 audit_alignment 会报 not_following_live
+    assert (_calendar_to_trading_days(binding.probe_a)
+            != _calendar_to_trading_days(binding.probe_b))
+    assert "max_hold_days" in SKIP_REASONS
+    assert "max_hold_days" in SKIP_ALLOWED_NO_DIRECT_MAPPING

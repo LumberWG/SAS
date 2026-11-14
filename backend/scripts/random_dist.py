@@ -42,6 +42,8 @@ from app.data.cache import kline_cache  # noqa: E402
 #: 而 K 线从 2022-09 开始，所以 end_date 至少要到 2023-04；span=21 时起点取 2023-03。
 #: （E37 首轮有一段 2023-01-17 起因此整段失败，见 BACKTEST_LOG 记录 #27。）
 MIN_START = "2023-03-01"
+# 短线新实验推荐 --min-start 2025-01-02（config.SHORT_TERM_RESEARCH_START，与本地分钟线库起点一致）；
+# 本默认值是历史结论（#27 / 18 段随机段）的可复现基线，不要改。
 
 
 def _trading_dates() -> list[str]:

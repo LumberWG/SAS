@@ -35,6 +35,11 @@
 - 风控层：静态 MA 弱市闸门（默认路径）→ 动态机制层（calm / weak / shock / crisis，可选）→
   硬性回撤熔断（优先级最高，可选）。三者都只压低总仓位上限，不会放大；详见 §4.10。
   涨跌家数广度（`data/breadth.py`）只做观测，**不参与任何判定**（见 `BACKTEST_LOG` #86）。
+- **研究定位（2026-11-14 用户明确，同日已落实到代码）**：本系统只做短线，单笔持有原则上不超过两周，因此历史数据不必久远；短线验证用本地分钟线（`D:\Backup\SAS\data\minute1_fsdb` / `minute5_fsdb`，1m/5m，约 5500 只，覆盖 2025-01 起）即可，约两年可切出大量不重叠的 ≤2 周窗口，**不得再把「分钟线只覆盖约两年」当作研究限制**，也不再以「需要更久历史 / 更长样本外」为由主张等待或扩数据周期。
+  - **持有上限已默认生效**：`config.py` 定义 `SHORT_TERM_HOLD_CALENDAR_DAYS=14` / `SHORT_TERM_HOLD_TRADING_DAYS=10`；线上 `paper_max_hold_days=14`（自然日、含当日，由 `#191` 的 `check_stop_loss_target()` 触发）、回测 `PipelineParams.max_hold_days=10`（交易日）、`/api/backtest/defaults` 按 `5/7` 换算单向跟随线上并纳入 `BINDINGS` 零漂移探针；设 `0` 即恢复无限期持有（回退开关）。
+  - **单位不同不做反向落盘**：实盘自然日、回测交易日，`apply.py` 的 `SKIP_REASONS` 与 `alignment.py` 的 `SKIP_ALLOWED_NO_DIRECT_MAPPING` 已登记该约束，避免落盘后双向漂移。
+  - **研究起点**：`SHORT_TERM_RESEARCH_START="2025-01-02"` 与分钟线库起点同源，前端回测默认起点、`fetch_minutes_fsdb.START` 均对齐；`random_dist.MIN_START="2023-03-01"` 是历史结论的可复现基线，**保留不改**。
+  - **已知风险**：`#191` / `bottom_time_stop_days` 的回测显示时间止损对均值回归策略有害；本次是「短线定位」口径落地，**不是 alpha 采纳**，尚未跑配对验证，不得据此宣称收益提升。`bottom_time_stop_days=0`、`ml_label_horizon=15` 未改。
 
 ---
 

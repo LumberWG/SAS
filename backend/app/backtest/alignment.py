@@ -121,6 +121,11 @@ BINDINGS: dict[str, Binding] = {
     "entry_open_delay_minutes": Binding("paper_open_cooldown_minutes", 7, 13),
     "scoring_mode": Binding("live_ml_scoring", False, True, note="bool 开关折算成 ml/factors"),
     "industry_neutral": Binding("live_ml_industry_neutral", False, True, note="回测默认与线上 ML 行业中性同源"),
+    # 短线持有上限：线上自然日 → 回测交易日（5/7 换算），探针 7/21 会分别得到 5/15。
+    "max_hold_days": Binding(
+        "paper_max_hold_days", 7, 21,
+        note="两周=14自然日≈10交易日；单位不同只单向跟随，不做落盘",
+    ),
     # ---- P1 上下文风险闸：四项共用一份函数，6 个参数逐项跟随实盘 ----
     # 行为口径另由 audit_context_parity() 验证（参数对齐测不出「少一层逻辑」）。
     "context_enabled": Binding("paper_ctx_enabled", False, True, note="四项总开关"),
@@ -188,6 +193,10 @@ SKIP_ALLOWED_SAME_SOURCE: dict[str, str] = {
 }
 SKIP_ALLOWED_NO_DIRECT_MAPPING: dict[str, str] = {
     "initial_capital": "实盘 paper_initial_capital 只在开户/重置时生效，落盘不会重置已有模拟账户",
+    "max_hold_days": (
+        "实盘按自然日、回测按交易日，落盘反向换算会漂移；默认值只由 "
+        "_defaults_payload 按 5/7 单向跟随（见 SKIP_REASONS）"
+    ),
     "strategies": (
         "实盘 auto_scan_strategies 属 READONLY_KEYS（.env 只读的 A-Only 护栏），"
         "刻意不允许页面一键改成 14 策略全开；改 .env 重启后回测默认值会自动跟随"

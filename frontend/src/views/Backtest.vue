@@ -42,7 +42,8 @@ use([CanvasRenderer, LineChart, GridComponent, TooltipComponent])
  * 与后端 `PipelineParams` 的 `None`（沿用线上配置）语义等价。
  */
 const form = reactive<Record<string, any>>({
-  start_date: '2025-01-01',
+  // 短线定位：研究起点与本地分钟线库起点一致（config.SHORT_TERM_RESEARCH_START），不用更久远的历史
+  start_date: '2025-01-02',
   end_date: '2026-10-20',
 })
 const defaults = ref<Record<string, any> | null>(null)

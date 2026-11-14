@@ -44,6 +44,10 @@ def _disable_pool_gate(monkeypatch):
     # （600004 等），可能被偶发判成触板而让仓位/轮动断言失去意义。
     # 规则本身由本文件末尾 TestBoardLimitUpGuard 单独覆盖（那边会显式打开开关）。
     monkeypatch.setattr(settings, "paper_block_limit_up_buy", False, raising=False)
+    # 2026-11-14 短线定位把 paper_max_hold_days 默认设为 14（两周）；本文件持仓的
+    # buy_date 多为 "2020-01-01" 这类历史假日期，会立即触发「时间止损」而让
+    # 仓位 / 结算 / 止损带内断言失去意义。时间止损本身由 tests/test_lifecycle.py 覆盖。
+    monkeypatch.setattr(settings, "paper_max_hold_days", 0, raising=False)
     # 线上默认 twin_t_boards 自 2026-11-10 起改为「创业板」，但本文件用例用的是
     # 600004/600001 等主板代码（旧「主板+创业板」口径）。显式放宽到两套板块，
     # 否则所有买入/轮动用例都会被 board_excluded 判成 skip。

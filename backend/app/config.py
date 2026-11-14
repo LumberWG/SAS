@@ -20,6 +20,15 @@ BASE_DIR = Path(__file__).resolve().parent.parent.parent
 # 可用环境变量 SAS_DATA_DIR 覆盖（例如临时切回 E:\Study\SAS\data 做对照）。
 DATA_DIR = Path(os.getenv("SAS_DATA_DIR", r"D:\Backup\SAS\data"))
 
+# 短线定位（用户 2026-11-14 明确）：本系统只做短线，单笔持有原则上不超过两周。
+# 线上时间止损按自然日计（含当日），回测按交易日计；两周 = 14 自然日 ≈ 10 交易日。
+# 两个值在此同源定义，避免双端各自写 0/14/10 造成漂移；0 仍表示「关闭」，可随时回退。
+SHORT_TERM_HOLD_CALENDAR_DAYS = 14
+SHORT_TERM_HOLD_TRADING_DAYS = 10
+# 短线研究默认起点：与本地分钟线库起点一致，历史数据不用更久远。
+# random_dist.MIN_START="2023-03-01" 是历史结论的可复现基线，保留不改。
+SHORT_TERM_RESEARCH_START = "2025-01-02"
+
 
 class Settings(BaseSettings):
     """系统配置项。"""
@@ -313,9 +322,13 @@ class Settings(BaseSettings):
     paper_trail_pct: float = 0.10       # 从持仓期最高价回撤此比例即卖出（移动止损）
     paper_trail_arm: float = 0.0        # 移动止损启用门槛：浮盈达此比例后才跟踪
     # 短线时间止损（#191）：持仓满 N 个自然日（首个建仓批次的 buy_date 起算，含当日）
-    # 仍未离场则强制卖出，避免「无限期持有」——线上此前只有价格触发才会卖。
-    # 0=关闭（沿用旧行为）；≤5 日短线交易者建议设 5。与回测 engine.py 自然日口径一致。
-    paper_max_hold_days: int = 0
+    # 仍未离场则强制卖出，避免「无限期持有」。
+    # 默认 SHORT_TERM_HOLD_CALENDAR_DAYS=14 ≈ 两周（用户 2026-11-14 明确的短线定位）；
+    # 0=关闭、恢复无限期持有，是随时可用的回退开关。
+    # 单位注意：本字段自然日，回测 max_hold_days 是交易日，由 _defaults_payload 按 5/7 换算跟随。
+    # 已知风险：#191 / bottom_time_stop_days 的回测显示时间止损对均值回归策略有害；
+    # 本次是「短线定位」口径落地而非 alpha 采纳，需后续配对验证，不要据此宣称提升收益。
+    paper_max_hold_days: int = SHORT_TERM_HOLD_CALENDAR_DAYS
     # 板块趋势闸门（#191）：开启后，候选所属板块指数处于下降通道（downtrend）时拒绝买入，
     # 即 Layer1 板块感知趋势真正接入入场闸。默认关闭=零风险（保持既有行为）；
     # 多板块交易时可开启，让「创业板指/上证主板指…在 MA 下」的票不买。

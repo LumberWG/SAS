@@ -101,7 +101,10 @@ SKIP_REASONS: dict[str, str] = {
     "min_turnover_rate": "实盘选股没有换手率下限过滤",
     "invert_score": "反转选股只在回测里验证，实盘仍按 14 因子正向排序",
     # ---- 卖出侧（回测专属） ----
-    "max_hold_days": "实盘没有时间止损（不按持仓天数强制卖出）",
+    "max_hold_days": (
+        "实盘已实现时间止损（#191 / paper_max_hold_days），但实盘按自然日、回测按交易日，"
+        "落盘会双向漂移；回测默认值由 _defaults_payload 按 5/7 单向换算跟随，不做反向落盘"
+    ),
     "stop_atr_min": "与 stop_loss 同源（实盘下限即 paper_stop_loss），落盘请用 stop_loss，避免重复写同一字段",
     "stop_confirm_close": "实盘逐 tick 撮合，没有「收盘确认」这一档",
     "partial_tp_at": "实盘没有分段止盈",

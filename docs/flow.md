@@ -67,12 +67,14 @@
 ### 0.3 与短线（≤5 日）口径的冲突 —— 最大缺口
 
 - 回测侧有 `max_hold_days` / `time_stop_days` / `partial_tp_at` / `stop_confirm_close` / `trail_pct`；**线上 `PaperEngine` 一条都没有**。
-  事实依据：`paper/ledger.py::UNSUPPORTED_REASONS` 逐项列明「时间止损需逐日盯持仓天数，引擎未实现」「分批止盈 / 收盘确认止损未实现」，`backtest/apply.py` 明确「实盘没有时间止损」。
+  事实依据：`paper/ledger.py::UNSUPPORTED_REASONS` 逐项列明「时间止损需逐日盯持仓天数，引擎未实现」「分批止盈 / 收盘确认止损未实现」，`backtest/apply.py` 当时记为「实盘没有时间止损」（该说明已于 2026-11-14 修正为「单位不同、不做反向落盘」）。
 - 即 `HOLD` 阶段目前是**无限期**：只有价格触发（止损 / 止盈 / 移动止损 / 做T）或收盘减仓才卖，没有「持有满 N 日强制离场」。
   且 `paper_positions.buy_date` 是 lots 的 `MAX(buy_date)`（最近一次买入，非首次建仓），做T后会后移，不能直接当持有天数用。
 - 按 ≤5 日短线解读，六阶段中 **`HOLD → EXIT` 缺一条时间轴出口**；这是定义与实现之间最实质的差距。
 
-- **#191 已补上时间轴出口**：新增设置 `paper_max_hold_days`（默认 **0** = 保持原「无限期」、不改现有交易行为），>0 时持仓满 N 个自然日即触发「时间止损」离场。`check_stop_loss_target()` 在止损 / 止盈之后新增该分支；计时从首个建仓批次 `lots.MIN(buy_date)` 起算（非 `paper_positions.buy_date` 的 `MAX`，避免加仓 / 做T 把计时后移重置），由既有的 T+1 闸门保证今仓次日才真正可卖。
+- **#191 已补上时间轴出口**：新增设置 `paper_max_hold_days`（当时默认 **0** = 保持原「无限期」、不改现有交易行为），>0 时持仓满 N 个自然日即触发「时间止损」离场。`check_stop_loss_target()` 在止损 / 止盈之后新增该分支；计时从首个建仓批次 `lots.MIN(buy_date)` 起算（非 `paper_positions.buy_date` 的 `MAX`，避免加仓 / 做T 把计时后移重置），由既有的 T+1 闸门保证今仓次日才真正可卖。
+
+- **2026-11-14 短线定位已落到默认参数**（本段之前描述的是 #191 当时状态）：`config.py` 定义 `SHORT_TERM_HOLD_CALENDAR_DAYS=14` / `SHORT_TERM_HOLD_TRADING_DAYS=10`；线上 `paper_max_hold_days` 默认 **14 自然日**、回测 `PipelineParams.max_hold_days` 默认 **10 交易日**、`/api/backtest/defaults` 按 `5/7` 单向换算跟随线上并纳入 `BINDINGS` 零漂移探针；设 `0` 仍可恢复无限期持有。实盘自然日 / 回测交易日单位不同，故 `apply.py` 不做反向落盘（`SKIP_REASONS` + `SKIP_ALLOWED_NO_DIRECT_MAPPING` 已登记）。研究起点 `SHORT_TERM_RESEARCH_START="2025-01-02"` 与本地分钟线库同源，前端回测默认起点与 `fetch_minutes_fsdb.START` 已对齐；`random_dist.MIN_START="2023-03-01"` 是历史结论的可复现基线，保留不改。**注意**：`#191` / `bottom_time_stop_days` 的回测显示时间止损对均值回归策略有害，本次是短线定位的口径落地、不是 alpha 采纳，尚未跑配对验证。
 
 ### 0.4 其余已确认断裂（按影响排序）
 
@@ -90,7 +92,7 @@
 > - 板块趋势闸门：`PipelineParams.board_trend_gate`（默认 None=沿用 `settings.paper_board_trend_gate`），新开仓前 `board_regime_for_code(code)` 为 `downtrend` 则拒买（主再平衡 + 日内买入两处）。
 > - 危机硬拦：复刻 `should_block_buy()`（内部跟随 `entry_guard_block_declining_market`，关则零行为变更），仅拦新开仓。
 > - 统一四档 cap：开关 `unified_risk_cap_enabled`（默认 None=沿用 `settings.paper_unified_risk_cap_enabled`），开启时把 `day_exposure` 与 `get_unified_market_risk()` 的 cap 取 min（只降不升），自动覆盖所有买入预算与做T加仓空间。
-> 抽离模块级 `_buy_blocked(code, board_trend_gate)` 供单测；`should_block_buy`/`board_regime_for_code`/`get_unified_market_risk` 接入回测命名空间；结果 `params` 回显两开关实际取值（详见 `WORKLOG.md` #191）。**仍分叉项**：时间止损回测有独立 `max_hold_days`（与实盘 `_time_stop_hit` 概念一致、代码两份）；做T买回/网格加仓不拦（与实盘「只拦新开仓、做T买回不受影响」同口径）。完整回测对齐需在正常环境用真实行情数据复核。
+> 抽离模块级 `_buy_blocked(code, board_trend_gate)` 供单测；`should_block_buy`/`board_regime_for_code`/`get_unified_market_risk` 接入回测命名空间；结果 `params` 回显两开关实际取值（详见 `WORKLOG.md` #191）。**仍分叉项**：时间止损回测有独立 `max_hold_days`（与实盘 `_time_stop_hit` 概念一致、代码两份；2026-11-14 起默认值由 `_calendar_to_trading_days()` 按 5/7 从实盘 `paper_max_hold_days` 单向换算跟随，并纳入 `BINDINGS` 零漂移探针，但执行逻辑仍是两份）；做T买回/网格加仓不拦（与实盘「只拦新开仓、做T买回不受影响」同口径）。完整回测对齐需在正常环境用真实行情数据复核。
 
 ### 0.5 落地清单（#191 已全部补齐，默认零风险）
 
