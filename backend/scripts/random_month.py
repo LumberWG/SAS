@@ -12,10 +12,10 @@
 
 用法（backend 目录）::
 
-    # 随机抽 3 个月，打印明细
-    .venv\\Scripts\\python.exe scripts\\random_month.py --draws 3 --seed 42
-    # 换参数口径（默认线上 default）
-    .venv\\Scripts\\python.exe scripts\\random_month.py --draws 1 --profile default --universe 300
+    # 短线口径（默认）：随机起点不早于 SHORT_TERM_RESEARCH_START=2025-01-02
+    .venv\\Scripts\\python.exe scripts\\random_month.py --draws 1 --seed 20261114
+    # 与「关闭时间止损」配对（同 seed 同窗口，只差 max_hold_days）
+    .venv\\Scripts\\python.exe scripts\\random_month.py --draws 1 --seed 20261114 --max-hold-days 0
 """
 from __future__ import annotations
 
@@ -28,6 +28,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.backtest.pipeline import PipelineParams, _run_sync  # noqa: E402
 from app.backtest.profiles import PROFILES  # noqa: E402
+from app.config import SHORT_TERM_RESEARCH_START  # noqa: E402
 from app.data.cache import kline_cache  # noqa: E402
 
 
@@ -38,11 +39,11 @@ def _trading_dates() -> list[str]:
     return [str(d)[:10] for d in idx["date"]]
 
 
-def _pick(dates: list[str], span: int, rng: random.Random) -> tuple[str, str]:
-    """随机取一段：起点需留足指标预热（60 根 ≈ 2023-01 之后）与完整跨度。"""
+def _pick(dates: list[str], span: int, rng: random.Random, min_start: str) -> tuple[str, str]:
+    """随机取一段：起点需留足指标预热与完整跨度，且不早于短线研究起点。"""
     candidates = [
         i for i in range(len(dates) - span)
-        if dates[i] >= "2023-01-01" and dates[i + span] <= dates[-1]
+        if dates[i] >= min_start and dates[i + span] <= dates[-1]
     ]
     if not candidates:
         raise SystemExit("可用区间不足，无法抽取一个月")
@@ -106,6 +107,14 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=None, help="随机种子（便于复现）")
     parser.add_argument("--capital", type=float, default=100000.0, help="初始资金")
     parser.add_argument(
+        "--min-start", default=SHORT_TERM_RESEARCH_START,
+        help=f"随机起点下限（默认 {SHORT_TERM_RESEARCH_START}；短线定位下不用更久远的历史）",
+    )
+    parser.add_argument(
+        "--max-hold-days", type=int, default=None,
+        help="覆盖持有上限（交易日）；缺省用 PipelineParams 新默认 10，0=关闭时间止损",
+    )
+    parser.add_argument(
         "--quiet", action="store_true",
         help="只打汇总（多段抽样时用，避免逐日明细刷屏）",
     )
@@ -117,15 +126,18 @@ def main() -> None:
     rng = random.Random(seed)
     dates = _trading_dates()
     print(f"随机种子 {seed}（复现请加 --seed {seed}）| 方案 {args.profile}"
-          f" | 池 Top{args.universe} | 本金 {args.capital:,.0f}")
+          f" | 池 Top{args.universe} | 本金 {args.capital:,.0f} | 起点 >= {args.min_start}")
 
     returns = []
     for draw in range(1, args.draws + 1):
-        start, end = _pick(dates, args.span, rng)
+        start, end = _pick(dates, args.span, rng, args.min_start)
+        extra = dict(PROFILES[args.profile])
+        if args.max_hold_days is not None:
+            extra["max_hold_days"] = args.max_hold_days
         params = PipelineParams(
             start_date=start, end_date=end,
             universe_size=args.universe, initial_capital=args.capital,
-            **PROFILES[args.profile],
+            **extra,
         )
         result = _run_sync(params)
         if args.quiet:

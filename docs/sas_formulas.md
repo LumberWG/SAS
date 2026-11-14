@@ -40,6 +40,10 @@
   - **单位不同不做反向落盘**：实盘自然日、回测交易日，`apply.py` 的 `SKIP_REASONS` 与 `alignment.py` 的 `SKIP_ALLOWED_NO_DIRECT_MAPPING` 已登记该约束，避免落盘后双向漂移。
   - **研究起点**：`SHORT_TERM_RESEARCH_START="2025-01-02"` 与分钟线库起点同源，前端回测默认起点、`fetch_minutes_fsdb.START` 均对齐；`random_dist.MIN_START="2023-03-01"` 是历史结论的可复现基线，**保留不改**。
   - **已知风险**：`#191` / `bottom_time_stop_days` 的回测显示时间止损对均值回归策略有害；本次是「短线定位」口径落地，**不是 alpha 采纳**，尚未跑配对验证，不得据此宣称收益提升。`bottom_time_stop_days=0`、`ml_label_horizon=15` 未改。
+  - **研究脚本口径 ≠ 线上公式（2026-11-14，`BACKTEST_LOG` #150 / #151）**：`backend/scripts/low_position_probe.py` 是独立研究脚本，四条硬门槛为 `close<=hh30*0.90`（`hh30=high.rolling(30).max().shift(1)`）、`close<=ma20*0.95`（无 CYQ 数据，MA20 代理持仓成本）、`turnover_rate.rolling(3).mean()>=5%`、`(high3-low3)/low3<0.03`，池为 T-1 日成交额 Top300、T+1 开盘成交、出场复刻 `random_month.py`。#150 四条件 0 信号（不采纳）；#151 用户明确去掉条件 4 后复跑（`--drop-amp3`，默认关闭，默认路径仍逐字复现 #150），仍**不采纳**（未减少平仓次数、无 alpha 证据）。该脚本只读日线、零生产写入，**不参与线上选股 / 评分 / 下单，不构成任何线上公式口径变更**，详见 `BACKTEST_LOG`。
+  - **事后归因工具（#151 第 3 轮）**：`backend/scripts/trade_path_attribution.py` 只读 #151 的成交产物、日线与上证指数，统计买入后 / 卖出后 N 日路径、剔 beta 的 `excess_if_held` 与「持有到窗口末」反事实。**含未来数据，仅用于事后诊断**，不是信号、不参与任何线上判定，也不改变上述公式口径。
+  - **回撤门槛可调但默认不变（#152）**：`low_position_probe.py` 的 `--dd-pct` 可调条件 1 的 30 日回撤门槛，默认 10% 即 `close<=hh30*0.90`；#152 试过 15%（`hh30*0.85`）并被**结论性否决**（更深低位反而更集中买在下跌中继），研究与线上默认值均维持 10%，该参数**不进线上公式**。
+  - **另一套实验条件（#153，同样不进线上）**：`backend/scripts/red_three_probe.py` 独立于上面四条，复用同一撮合 / 出场框架，只换选股条件 —— `ll30/hh30-1<=-0.15`（区间形态，不约束当前价）、近 3 日三连阳且 `0<gain3<=5%`、`turn3>=5%`、`ma20>ma20.shift(1)>ma20.shift(2)`。#153 实测被**结论性否决**（趋势确认后买入路径反而是四轮里最差，红三兵多为下跌中继反抽）。该脚本零生产写入，**不参与线上选股 / 评分 / 下单，不构成线上公式口径变更**。
 
 ---
 
