@@ -84,7 +84,7 @@ npm run dev                                        # → http://localhost:5173
 
 ## 系统设置
 
-`/settings` 页把散在四处的配置拉成一张表：`.env`/`config.py`（107 项）、`app_state` 运行时覆盖、页面上各业务开关、以及少量硬编码常量（可交易板块前缀、回测默认止损止盈、整手股数）。
+`/settings` 页把散在四处的配置拉成一张表：`.env`/`config.py`（189 个 Settings 字段）、`app_state` 运行时覆盖、页面上各业务开关、以及少量硬编码常量（可交易板块前缀、回测默认止损止盈、整手股数）。
 
 > ⚠️ **配置生效铁律（改任何参数前先读这一条）**：本系统**不是「改 `.env` + 重启」就万事大吉**。
 > 运行时存在一层 **`app_state` 持久覆盖层**（存于数据库）：凡经「设置页 / `POST /api/settings`」调过的参数会写入
@@ -94,7 +94,7 @@ npm run dev                                        # → http://localhost:5173
 > - **改完必做**：`GET /api/settings` 回读该键的 `value` 与 `source` 确认生效。设置页保存后会自动带 `refresh=true` 再查一次，逐项核对值与 `source=app_state`，给出「回读确认通过 / 未确认（列出期望值与实际值）」；密钥类参数值为掩码，不参与逐项比对
 > - **只读项**（`db_path` / `kline_dir` / `cors_origins` / `app_name` / `debug` 等）只能改 `.env` 后重启，页面/接口不接收其改动。
 
-页面上**只列可编辑的 97 项**。以下 10 项都**完全不显示**（`READONLY_KEYS`）：`api_token`（访问令牌，回显等于把钥匙挂在门上）、`db_path`、`kline_dir`、`cors_origins`、`data_no_proxy_domains`、`auto_scan_strategies` 与 `app_name`（只在启动时用于 `FastAPI(title=)`，改它连前端标题都不变）、`debug`（全仓库无人读取的历史字段）、`disclaimer`（接口 JSON 统一注入的文案常量，不是配置）、`notify_email`（`EmailNotifier` 目前只打日志并返回 False，开了反而多记一条渠道失败），以及剩余硬编码常量（`LOT_SIZE`、板块前缀、回测默认止盈止损）。理由一致：改不了或改了没效果，展示了只会让人以为能调。
+页面上**只列可编辑的 106 项**。以下 11 项都**完全不显示**（`READONLY_KEYS`）：`api_token`（访问令牌，回显等于把钥匙挂在门上）、`db_path`、`kline_dir`、`cors_origins`、`data_no_proxy_domains`、`auto_scan_strategies` 与 `app_name`（只在启动时用于 `FastAPI(title=)`，改它连前端标题都不变）、`debug`（全仓库无人读取的历史字段）、`disclaimer`（接口 JSON 统一注入的文案常量，不是配置）、`notify_email`（`EmailNotifier` 目前只打日志并返回 False，开了反而多记一条渠道失败）、`unified_risk_domestic`（国内大盘成分列表，UI 不可编辑），以及剩余硬编码常量（`LOT_SIZE`、板块前缀、回测默认止盈止损）。理由一致：改不了或改了没效果，展示了只会让人以为能调。
 
 > 评分阈值（`factor_buy_threshold` / `factor_sell_threshold`）与四项费率（`trade_fee_*`）均为可配置项：前者决定 buy/sell 判级，后者由回测与实盘共用。整手股数（`LOT_SIZE=100`）固定，不可配置
 
@@ -104,7 +104,7 @@ npm run dev                                        # → http://localhost:5173
   `llm_enabled` 关着时，接口地址/密钥/模型/超时都不显示）。关系在 `param_specs._DEPENDS_ON` 里声明，
   父项为开关则「开=显示」、为文本则「非空=显示」，支持套娃；前端按**草稿值**实时显隐
   （打开做T 开关的那一下，下面参数立刻出现，不用等保存），分组标题会标「随开关隐藏 N」
-- **两级布局（均衡分组）**：左侧竖排导航 8 个分组——连接与扫描 20 / 选股与自选 30 / 账户与费率 14 / 交易执行 42 / 仓位与轮动 16 / 风控与止损 22 / 做T 与择时 34 / 调度与 LLM 16（合计 97），每项标该组总数与已覆盖数。之所以不做平铺 tab：按 `paper_` 前缀天然会变成「一组 50 项、另一组 1 项」。布局由 `param_specs._LAYOUT` 按业务语义声明（分组 → 组内小节 → 键），新增字段没收录时按前缀兜底进对应组的「其他」小节
+- **两级布局（均衡分组）**：左侧竖排导航 8 个分组——连接与扫描 9 / 账户与费率 7 / 交易执行 22 / 仓位与轮动 11 / 风控与止损 13 / 做T 与择时 33 / 调度与 LLM 8 / 其他 3（合计 106），每项标该组总数与已覆盖数。选股策略相关参数已从系统设置页隐藏，仍在「选股策略」页编辑。之所以不做平铺 tab：按 `paper_` 前缀天然会变成「一组 50 项、另一组 1 项」。布局由 `param_specs._LAYOUT` 按业务语义声明（分组 → 组内小节 → 键），新增字段没收录时按前缀兜底进对应组的「其他」小节
 - **组内小节**：每个分组再切成 2~5 个语义小节（如「风控与止损」= 买点切入 / 固定止损止盈 / ATR 与移动保护），小节标题右侧带一句说明；搜索时跨全部分组按小节分段展示命中结果
 - **可编辑**：开关项点一下、数字项直接输，改完点顶栏的「保存 (N)」（改动后页面底部也会浮出「有 N 项未保存 · 保存并生效 / 放弃」条，往下翻几屏也能保存）；每行是「固定列宽（104px）右对齐的短标签 + 紧挨着的控件 + 靠右的来源胶囊」，标签与输入框之间不再撑出一大段空白；完整 key / 说明 / 当前值都在行 tooltip 里，**来源**（`运行时` = app_state 覆盖 > `.env` > `默认`）以胶囊标记，改动行高亮，可单行撤销、整组「本组还原」或全局「还原」为 `.env` 值
 - **短标签 + tooltip**：卡片里只放标准短名（`固定止损`、`买单队列上限`、`ATR 止损倍数`，见 `param_specs._SHORT_LABELS`，最长 10 字），`config.py` 里那整句注释作为 `desc` 放进行悬停提示，连同完整 key、当前值、待保存值一起显示；有跨页补充说明的行在标签右侧带一个黄色提示点
@@ -126,15 +126,15 @@ npm run dev                                        # → http://localhost:5173
 
 参数面板按 8 个分组（基础 / 选股买入 / 五段式（队列与切入点）/ 止损止盈 / 移动保本 / 大盘择时 / 仓位评分轮动 / 做T引擎）折叠展示，每个参数一张卡片（标签一行、输入框占满一行），不再把标签和 60px 输入框挤在同一行。
 
-**打分层**：「选股/买入」组顶部可切 `14因子` / `ML分位` / `ML+因子融合`，默认跟随实盘开关 `live_ml_scoring`，避免「回测跑 ML、实盘走 14 因子」的口径漂移。同组可调 `ML模型`（LightGBM，缺依赖自动回退 Ridge）、`ML标签前瞻`、`融合权重`、`ML行业中性化`。结果里的 `ml_diagnostics.effective` 必须看：`false` 表示 OOS rank-IC ≤ 0、整段回退 14 因子，此时结果与纯因子基线相同；短区间截面太少几乎必然回退，验证 ML 请用 ≥ 半年区间。落盘时只有「打分层」能同步到实盘 `live_ml_scoring`，模型/前瞻/融合比例/中性化都是回测专属。**股票池默认 300**（跟随线上 `paper_pool_top_n`），改成 500 跑出来的不是同一实验口径
+**打分层**：「选股/买入」组顶部可切 `14因子` / `ML分位` / `ML+因子融合`，默认跟随实盘开关 `live_ml_scoring`，避免「回测跑 ML、实盘走 14 因子」的口径漂移。同组可调 `ML模型`（LightGBM，缺依赖自动回退 Ridge）、`ML标签前瞻`、`融合权重`、`ML行业中性化`。结果里的 `ml_diagnostics.effective` 必须看：`false` 表示 OOS rank-IC ≤ 0、或 IC 门控全回退，实际用 14 因子，此时结果与纯因子基线相同；同对象还给出 `ic_gate.use_pct` 等门控遥测。短区间截面太少几乎必然回退，验证 ML 请用 ≥ 半年区间。落盘时 `scoring_mode` 同步 `live_ml_scoring`，`industry_neutral` 同步 `live_ml_industry_neutral`；模型/前瞻/融合比例仍是回测专属。**股票池默认 300**（跟随线上 `paper_pool_top_n`），改成 500 跑出来的不是同一实验口径
 
 **入场时点与口径对照**：「五段式」组的 `入场时点(分钟)`（`entry_open_delay_minutes`）控制回测买入价：`0` = 次日开盘价，`>0` = 开盘后 N 分钟那根 5m bar 的收盘价；`GET /api/backtest/defaults` 默认取实盘 `paper_open_cooldown_minutes`，落盘映射也指回该字段。结果区常驻「口径对照」：本次入场价 / 实盘冷静期 / 本次池 `TopN` 与线上池，并附可展开的已知偏差清单（实盘全时段可买、开盘价成交偏乐观、回测无候补队列与盘内错峰与收盘减仓、分钟数据起始日、盘中新信号不可回测）与判读门槛（见 `CONTRIBUTING.md`）
 
-**线上 ML 生效状态**：`app/analysis/live_ml.py` 记录本进程每轮判定（`ok` / `no_signal` / `build_error` / `insufficient`），`GET /api/ops/ml-status` 只读暴露；顶栏常驻「ML: 生效 / 待运行 / 14因子 / 关」状态灯，`/ops` 页给出数据日、覆盖只数、OOS rank-IC、最近判定时间。**开关打开 ≠ 生效**；「待运行」表示重启后还没跑过一轮分析（状态在进程内存，重启即清空）。影子账户 `default` vs `default_ml` 的前向超额配对也在 `/ops` 页，`SHADOW_PROFILES` 未配置该配对时页面会提示；快照带 `ml_diagnostics`，运维页区分「ML 生效 / 已回退 / 历史快照无判定字段」，避免两方案快照相同就被误读成「ML 无超额」
+**线上 ML 生效状态**：`app/analysis/live_ml.py` 记录本进程每轮判定（`ok` / `no_signal` / `build_error` / `insufficient`），`GET /api/ops/ml-status` 只读暴露；顶栏常驻「ML: 生效 / 待运行 / 14因子 / 关」状态灯，`/ops` 页给出数据日、覆盖只数、OOS rank-IC、最近判定时间。**开关打开 ≠ 生效**；「待运行」表示重启后还没跑过一轮分析（状态在进程内存，重启即清空）。影子账户 `default` vs `default_ml` 的前向超额配对也在 `/ops` 页，`SHADOW_PROFILES` 未配置该配对时页面会提示；快照带 `ml_diagnostics`，运维页区分「ML 生效 / 已回退 / 历史快照无判定字段」，避免两方案快照相同就被误读成「ML 无超额」。线上 ML 以成交额 TopN 快照为截面，与回测 `universe_size` 同源；训练按 `as_of` 显式截断，启用标签 embargo、CV purge gap 与同 seed，`industry_neutral` 跟随 `live_ml_industry_neutral`；状态接口还返回 `strict_lookahead` / `ml_seed` / `ic_gate_enabled` / `pool_signature`
 
 **两套参数必须分清**（面板顶部有常驻说明）：
 - 改参数 + 「开始回测」——只影响**本次回测**，不碰实盘；
-- 「将规则落盘保存到数据库」——把这套规则写进配置库（`app_state` 覆盖层），立即对**选股 + 模拟盘交易**生效，重启保留，并成为新的默认值。只同步实盘有落点的子集（止损/止盈/单票上限/仓位/买入阈值/评分档/择时/买入切入点/入场时点/做T 等，共 32 项），其余（板块组合、调仓周期、分位门槛、反转选股、分段止盈、时间止损、分钟级切入点）逐条列出「未同步」原因。落盘前有确认框展示「会变更哪几项：旧值 → 新值」。接口 `GET /api/backtest/persist-map`、`POST /api/backtest/persist`；映射表见 `app/backtest/apply.py`。
+- 「将规则落盘保存到数据库」——把这套规则写进配置库（`app_state` 覆盖层），立即对**选股 + 模拟盘交易**生效，重启保留，并成为新的默认值。只同步实盘有落点的子集（止损/止盈/单票上限/仓位/买入阈值/评分档/择时/买入切入点/入场时点/做T 等，共 44 项），其余（板块组合、调仓周期、分位门槛、反转选股、分段止盈、时间止损、分钟级切入点）逐条列出「未同步」原因。落盘前有确认框展示「会变更哪几项：旧值 → 新值」。接口 `GET /api/backtest/persist-map`、`POST /api/backtest/persist`；映射表见 `app/backtest/apply.py`。
 
 **回测结果自动落库**：每次回测跑完即写库，不需要任何操作，便于事后分析：
 - `backtest_runs`：`params`（本次全量参数）、`metrics`（收益/基准/回撤/夏普/胜率…）、`equity_curve`（**过程数据**：逐日 `equity / benchmark / cash / positions`）、`positions`（期末持仓）、`review`（亏损归因 + 调参建议）、`job_id`（与 `backend.log` 对齐，日志里的任务 id 能直接定位到这条记录）、`elapsed`

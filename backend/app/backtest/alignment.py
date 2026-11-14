@@ -120,6 +120,7 @@ BINDINGS: dict[str, Binding] = {
     # ---- 入场冷静期 / 打分层 ----
     "entry_open_delay_minutes": Binding("paper_open_cooldown_minutes", 7, 13),
     "scoring_mode": Binding("live_ml_scoring", False, True, note="bool 开关折算成 ml/factors"),
+    "industry_neutral": Binding("live_ml_industry_neutral", False, True, note="回测默认与线上 ML 行业中性同源"),
     # ---- P1 上下文风险闸：四项共用一份函数，6 个参数逐项跟随实盘 ----
     # 行为口径另由 audit_context_parity() 验证（参数对齐测不出「少一层逻辑」）。
     "context_enabled": Binding("paper_ctx_enabled", False, True, note="四项总开关"),
@@ -172,6 +173,8 @@ RESEARCH_ONLY: dict[str, str] = {
     "ml_ic_gate_thresh": "由 ml_ic_gate=False 门控，不生效",
     "ml_ic_gate_min_samples": "由 ml_ic_gate=False 门控，不生效",
     "ml_ic_gate_segment": "IC 门控段级 OOS 模式，默认 False=不启用，实盘走纯因子",
+    "ml_seed": "多 seed 严格验收专用，默认 42；线上固定同一 seed，不进页面",
+    "ml_strict_lookahead": "严格零前视口径参数，默认 True；线上与回测同实现，不进页面",
 }
 
 #: 非参数字段（回测时间段由请求传入，不属于对齐契约）

@@ -1047,7 +1047,7 @@ bench_cum    = Π (1 + bench_ret(t))，从首个净值快照日起算
   **< −1pp** 先查执行价与成交可行性（#67 量化 1.4~2.5pp），不要调策略参数；
   **> +5pp** 视为短期运气（#68 噪声极差 3.44pp）；**< 21 个交易日不下结论**。
 
-### 7.6 打分层（ML 截面排序）与回测中心口径（2026-10-31）
+### 7.6 打分层（ML 截面排序）与回测中心口径（2026-10-31，2026-11-14 修订）
 
 打分是**唯一被替换的环节**，信号阈值、风控、择时、下单窗口全部沿用，便于单变量对比。
 
@@ -1057,14 +1057,19 @@ scoring_mode = factors   14 因子启发式（基线，即 #72 的 default）
              = ml_blend  ML 分位与 14 因子归一分按 ml_blend 加权融合
 ```
 
-- **训练/预测切分**：训练集 = klines 320 根尾部中 `start_date` **之前**的截面，
-  预测集 = 段内日期。段前走前，无未来函数。模型默认 LightGBM（65 特征 Alpha158 风格 +
-  Purged Group 时序 CV 选参），`ml_model=ridge` 为线性降级路径。
+- **训练/预测切分（2026-11-14 起严格零前视）**：设段起始日 `S`、标签前瞻 `H`、特征日 `d`。
+  训练样本必须同时满足 `d < S` 与 `label_date(d+H) < S`；预测样本只用 `d` 当日特征，
+  不要求 `d+H` 的未来标签已经存在。`purged_group_cv` 在训练折末与验证折首之间留出
+  `H` 个交易日 purge gap，避免前向标签跨折重叠。线上 `build_live_ml_predictions` 由调用方
+  显式传 `as_of`，先过滤 `date > as_of`，训练标签同样要求 `< as_of`。模型默认 LightGBM
+  （65 特征 Alpha158 风格 + Purged Group 时序 CV 选参），`ml_model=ridge` 为线性降级路径；
+  `ml_seed` 控制全部 LightGBM 随机源，并纳入 prepared/signals 缓存键。
 - **回退纪律**：`oos_rank_ic <= ml_require_ic`（默认 0）时**整段回退 14 因子**，
   `pred_pairs=0`，不注入噪声。这是设计而非故障。
 - **`ml_diagnostics`**（结果里必看）：`mode / model / label_horizon / industry_neutral /
-  oos_rank_ic / pred_pairs / effective`。**`effective=false` 说明这次跑的是 14 因子**，
-  无论 `scoring_mode` 填的是什么——没有这个字段时二者在结果里完全无法区分。
+  oos_rank_ic / pred_pairs / effective / fallback / ml_seed / strict_lookahead / ic_gate`。
+  **`effective=false` 说明这次跑的是 14 因子**，无论 `scoring_mode` 填的是什么；IC 门控模式
+  还要看 `ic_gate.use_pct`，`use_days=0` 时即便已构建 ML 预测表也判为回退。
 - **区间长度**：短区间（如 12 个交易日）只有 12 个截面，rank-IC 估不出来，几乎必然回退。
   要看 ML 至少半年；随机段评估用 `scripts/random_dist.py`（`#76` 的 18 段 × 21 天）。
 - **影子账户口径（2026-11-07 起）**：`scripts/shadow.py::_snapshot` 把同一份 `ml_diagnostics`
@@ -1074,15 +1079,21 @@ scoring_mode = factors   14 因子启发式（基线，即 #72 的 default）
   `trade_count=0`（无平仓）也会得到相同曲线，不能推出「ML 无超额」；`unknown` 也不是回退
   （`BACKTEST_LOG` #109 / #117）。
 - **默认跟随实盘**：`/backtest/defaults` 的 `scoring_mode` 由 `live_ml_scoring` 决定
-  （开 = `ml`），避免「回测中心跑 ML、实盘还在 14 因子」这种口径漂移；`universe_size`
-  同理跟随 `paper_pool_top_n`（300），不再写死 500——池子不同则候选集、选中票、
-  超额基准全都不同，结论无法互相解释（`#79` §7）。
-- **落盘折算**：`scoring_mode=ml|ml_blend` → `live_ml_scoring=True`；`ml_model` /
-  `ml_label_horizon` / `ml_blend` / `ml_require_ic` / `industry_neutral` / `disable_limit_mask`
-  都是**回测专属**，实盘固定 lightgbm + 行业中性 + IC 回退 + 涨跌停约束，不落盘。
+  （开 = `ml`），`industry_neutral` 由 `live_ml_industry_neutral` 决定；线上 ML 截面取成交额
+  TopN 快照，与 `universe_size` / `paper_pool_top_n` 同源，不再只按自选股排名。池子不同则
+  候选集、选中票、超额基准全都不同，结论无法互相解释（`#79` §7）。
+- **落盘折算**：`scoring_mode=ml|ml_blend` → `live_ml_scoring=True`；
+  `industry_neutral` → `live_ml_industry_neutral`，由 `BINDINGS` 探针与 `BACKTEST_TO_SETTING`
+  双向同步。`ml_model` / `ml_label_horizon` / `ml_blend` / `ml_require_ic` /
+  `disable_limit_mask` 仍是**回测专属**，实盘固定 lightgbm + IC 回退 + 涨跌停约束，不落盘。
 
 **线上状态（2026-11-01 重新打开）**：`live_ml_scoring` 在**覆盖层与 `.env` 两处**都已置 true
 （只改一处不够——「还原为 .env」会把开关改回去，这类「两处口径」问题同 §4.9 的做T 开关）。
+
+> **口径边界（2026-11-14，#147）**：下面 #82 / #88 的 +4.55pp、OOS IC 0.0654 等来自**旧训练口径**
+> （无标签 embargo / CV purge gap，且线上当时只按 152 只自选股做截面）；本文件 §7.6 的严格零前视
+> 与 TopN 截面修订后，旧绝对收益、IC 与超额**不再可直接比较**，也不能再单独当作「ML 有效」证据。
+> 历史结论不改写，严格验收结果见 `BACKTEST_LOG` #147。
 
 重开依据（原关闭理由两条都站不住）：
 
@@ -1098,12 +1109,13 @@ scoring_mode = factors   14 因子启发式（基线，即 #72 的 default）
 仍存在的已知局限（不因打开而消失）：
 
 - `industry_map.csv` 不存在时 `industry_neutral=True` 静默退化为**板块中性**（4 组，主板约 140 只等于未中性化）；
-- 训练/预测池是「当前自选 152 只」，存在 **selection bias**，OOS IC 0.065 偏乐观（与 10-30 的 0.0658 一致）；
+- 训练/预测池已改为「成交额 TopN 快照」，与回测 `universe_size` 同源；但仍使用**当前快照票池**，
+  历史窗口存在幸存者偏差，不能据此宣称无偏 OOS。
 - 买入判定用 `paper_half_score=25` 作 ML 分位门槛，与回测 `_rank_score` **完全同口径**（两边都是 25）。
-  按上表，ML 分位 ≥25 的占比约 75%，所以「152 只里 113 只判 buy」是设计使然而非量纲错配——
+  按上表，TopN 截面内 ML 分位 ≥25 的占比约 75%，所以「多数候选判 buy」是分位量纲使然而非量纲错配——
   实际买入数仍由 `max_positions`（10）与总仓位/单票预算约束。
 
-**分布对照（勿再误判成「量纲错配」）**：同日、同批 152 只实测——
+**分布对照（旧口径 152 只自选股实测，勿再误判成「量纲错配」）**：同日、同批 152 只实测——
 
 | 打分 | min | p25 | p50 | p75 | max | ≥25 | ≥40 |
 | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -1114,6 +1126,57 @@ scoring_mode = factors   14 因子启发式（基线，即 #72 的 default）
 **不需要为 ML 单独调整**。口径注意：14 因子必须作用在 `add_all_indicators()` 之后的 frame 上；
 直接喂 `get_kline_cached()` 的原始 df，会让 `bias6`/`atr` 等预计算列缺失、多数因子退化为 0，
 `total` 被压进 ±20——2026-10-31 曾据此误判「线上买不进任何票」，属口径错误而非策略缺陷。
+
+### 7.7 IC 门控严格验收与 market_env 三臂口径（2026-11-14）
+
+#### 7.7.1 IC 门控严格验收（#147，不采纳）
+
+前置验收协议：
+
+\[
+\text{train}: d < S,\quad label\_date(d+H) < S;\qquad
+\text{CV}: tr\_g = udates[:bounds[f]-H]
+\]
+
+线上推理同样要求 `as_of` 显式传入、K 线先截断到 `date <= as_of`、训练标签 `< as_of`；
+`build_ml_predictions` 与 `build_live_ml_predictions` 必须共用 seed、`strict_lookahead`、
+行业中性、TopN 截面与 OOS-IC 回退纪律。`audit_alignment()` 与双端 parity 自检必须先通过；
+线上 IC 门控未接线时 `full_backtest_eligible=false`，不得进入完整交易配对回测。
+
+正式产物 `D:/Backup/SAS/data/logs/ic_gate_strict_2026-11.json`：6 个 2024 年全新 21 交易日窗口
+× 3 seed × Top80 固定票池，18 次训练 0 错误；`oos_rank_ic_mean=0.001811`，
+`posthoc_daily_ic_mean=-0.024673`，bootstrap CI `[-0.031955, -0.016091]`，
+段级门控启用率 `0%`，三 seed 的 posthoc IC 中位数全为负。前置 `alignment_ok=true`、
+parity `ok=true`、源码零前视检查全过，但 `live_ic_gate_not_wired`，故**不采纳**。
+看板里的「事后 oracle≈+2.0pp」是事后切片，不是可交易证据；旧 #74/#76/#82 的 ML 绝对收益
+也不得再与严格零前视结果直接比较。
+
+#### 7.7.2 market_env 择时三臂（#148，不采纳机制）
+
+四臂共用同一 `prepared` 与 `_simulate`，只替换 `prepared["signals"]`：
+
+\[
+signals_T^{env} = \begin{cases}signals_T & env\_label_T=\text{risk\_on},\ us\_session\_date<T\\ \emptyset & \text{otherwise}\end{cases}
+\]
+
+\[
+signals_T^{ma60} = \begin{cases}signals_T & close_{T-1}>MA60_{T-1}\\ \emptyset & \text{otherwise}\end{cases}
+\]
+
+非放行日只拦新开仓，不强制清仓；配对差值取相对等权基准超额：
+
+\[
+excess = total\_return - benchmark\_return,\quad diff = excess_{arm} - excess_{current}
+\]
+
+正式产物 `D:/Backup/SAS/data/logs/market_env_pair_all10.json`：A~J 十窗口 × 双滑点
+`0 / 0.003` × 四臂 = 80 行，Top300、`entry_open_delay_minutes=5`、`scoring_mode=factors`。
+验收要求两种趋势定义在双滑点下同时满足「配对超额中位 > 3.5pp、正占比 > 50%、bootstrap CI 不含 0」。
+实测 `env_risk_on-current` 全窗口 `-2.44pp / -0.77pp`（正占比 40%），
+`ma60_uptrend-current` 全窗口 `+2.25pp / +2.39pp`（正占比 70%，CI 下沿 0.41 / 0.88，但未达 3.5pp）；
+holdout G~J 的 `ma60` CI 下沿分别为 -0.27 / -0.45，空仓臂在弱市的优势是不参与而非 alpha。
+结论：**不采纳为新的择时机制**，不在同一组窗口继续调阈值。完整条件 / 结果 / 归因 / 建议 /
+人工判断 / 本轮变更 / 下轮计划见 `BACKTEST_LOG` #147 / #148。
 
 ## 8. 自动交易五段式（目标架构）与现状差距
 

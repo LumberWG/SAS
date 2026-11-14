@@ -80,6 +80,8 @@ BACKTEST_TO_SETTING: dict[str, str] = {
     "context_hot_exclude_pct": "paper_ctx_hot_exclude_pct",
     "context_event_cooldown_days": "paper_ctx_event_cooldown_days",
     "context_news_block": "paper_ctx_news_block",
+    # ML 行业中性化：回测页落盘写回实盘，默认值也由同一字段提供（alignment 探针保证同源）
+    "industry_neutral": "live_ml_industry_neutral",
 }
 
 #: 明确不落盘的项 + 原因（前端在落盘结果里逐条展示，别让用户以为「都同步了」）。
@@ -113,11 +115,10 @@ SKIP_REASONS: dict[str, str] = {
     "exec_fill": "实盘开盘窗口本来就按实时价成交，不存在「开盘价 vs VWAP」的度量选择（记录 #67）",
     "exec_fill_minutes": "同 exec_fill：回测度量口径，实盘无对应配置",
     # ---- 打分层（BACKTEST_LOG 记录 #74~#78）----
-    "ml_model": "实盘 live_ml 固定走 lightgbm + 行业中性（与 default_ml 同口径）；换模型只在回测里比较",
+    "ml_model": "实盘 live_ml 固定走 lightgbm；换模型只在回测里比较",
     "ml_label_horizon": "实盘标签前瞻固定 15 个交易日（与策略中位持仓对齐）",
     "ml_blend": "实盘只用纯 ML 分位排序，没有「与 14 因子加权融合」这一档",
     "ml_require_ic": "实盘 OOS IC≤0 时自动回退 14 因子，门槛不可调",
-    "industry_neutral": "实盘固定做行业中性（live_ml 内写死），回测中心无法关闭",
     "disable_limit_mask": "仅用于量化涨跌停 mask 的贡献（记录 #73），线上永远开启约束",
 }
 

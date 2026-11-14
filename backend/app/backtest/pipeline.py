@@ -354,6 +354,10 @@ class PipelineParams:
     ml_ic_gate_segment: bool = False
     #: 行业内中性化：True 时扣掉行业（或板块）均值再排分位，消除行业暴露。默认 False。
     industry_neutral: bool = False
+    #: 研究专用：LightGBM 随机种子；多 seed 严格验收时纳入 prepared/signals 缓存键。
+    ml_seed: int = 42
+    #: 研究专用：严格零前视（训练标签 embargo + CV purge gap）；默认开启。
+    ml_strict_lookahead: bool = True
     # ---- P1 上下文风险闸：与实盘 Settings.paper_ctx_* 逐项绑定，共用 app.risk.context_gates ----
     #: 四项总开关；False = 完全回到 P1 之前的行为
     context_enabled: bool = True
@@ -714,14 +718,16 @@ def _prepare(params: PipelineParams) -> dict:
             from app.backtest.ml_scorer import build_ml_predictions, DEFAULT_HORIZON
             horizon = int(params.ml_label_horizon or DEFAULT_HORIZON)
             require_ic = float(params.ml_require_ic if params.ml_require_ic is not None else 0.0)
-            # 训练要用「段起始日之前」的历史——这些历史已随 klines 的 320 根尾部载入，
-            # 但 prepared["dates"] 被过滤到 [start,end]，故这里取 klines 全量日期并集，
-            # 训练集=其中 < start 的部分，预测集=段内日期。
+            # 训练要用「段起始日之前」的历史——这些历史已随 klines 的 320 根尾部载入。
+            # 严格零前视下，训练集特征日 < start，且 H 日标签日也必须 < start；
+            # 预测集只用当日特征，不要求段末已有未来标签（与线上 as_of 推理同口径）。
             ml_all_dates = sorted({d for df in klines.values() for d in df["date"]})
             ml_pred, ml_oos_ic = build_ml_predictions(
                 klines, ml_all_dates, params.start_date, horizon=horizon, require_ic=require_ic,
                 model=params.ml_model or "lightgbm",
                 industry_neutral=bool(params.industry_neutral),
+                seed=int(params.ml_seed or 42),
+                strict_lookahead=bool(params.ml_strict_lookahead),
             )
             if ml_pred:
                 logger.info("ML 排序层已构建：OOS rank-IC=%.4f，预测对=%d", ml_oos_ic, len(ml_pred))
@@ -790,11 +796,63 @@ def _top_pct(items: list[dict], pct: float) -> list[dict]:
     return items[: max(1, math.ceil(len(items) * ratio))]
 
 
+def _prepared_key(params: PipelineParams) -> tuple:
+    """影响 prepared（K线/指标/ML 预测/ICGate）的参数指纹。"""
+    return (
+        params.start_date, params.end_date, params.universe_size,
+        tuple(params.board_prefixes or ()),
+        params.scoring_mode or "factors",
+        int(params.ml_label_horizon or 0),
+        float(params.ml_blend if params.ml_blend is not None else -1.0),
+        params.ml_model or "lightgbm",
+        bool(params.industry_neutral),
+        int(params.ml_seed or 42),
+        bool(params.ml_strict_lookahead),
+        bool(params.ml_ic_gate),
+        bool(params.ml_ic_gate_segment),
+        int(params.ml_ic_gate_window or 400),
+        float(params.ml_ic_gate_thresh if params.ml_ic_gate_thresh is not None else 0.12),
+        int(params.ml_ic_gate_min_samples or 20),
+    )
+
+
+def _ml_effective(params: PipelineParams, prepared: dict) -> bool:
+    """ML 预测表已构建且本轮实际参与打分；门控全回退时返回 False。"""
+    if not bool(prepared.get("ml_pred")):
+        return False
+    if params.scoring_mode in ("ml", "ml_blend") or bool(params.ml_regime_aware):
+        return True
+    if params.ml_ic_gate_segment:
+        thr = float(params.ml_ic_gate_thresh if params.ml_ic_gate_thresh is not None else 0.12)
+        return float(prepared.get("ml_oos_ic") or 0.0) >= thr
+    if params.ml_ic_gate:
+        from app.backtest.ic_gate import ICGate
+
+        return int(ICGate.TELEMETRY.get("use_days") or 0) > 0
+    return False
+
+
+def _gate_telemetry() -> dict:
+    """IC 门控逐日遥测快照（研究脚本负责每段 / 每臂前 reset）。"""
+    from app.backtest.ic_gate import ICGate
+
+    tel = dict(ICGate.TELEMETRY)
+    total = int(tel.get("total_days") or 0)
+    n = int(tel.get("ic_n") or 0)
+    use = int(tel.get("use_days") or 0)
+    return {
+        "use_days": use,
+        "total_days": total,
+        "use_pct": round(100.0 * use / total, 1) if total else 0.0,
+        "avg_ic": round(float(tel.get("ic_sum") or 0.0) / n, 4) if n else 0.0,
+    }
+
+
 def _signals_key(params: PipelineParams) -> tuple:
     """影响「选股结果」的参数指纹：变了就必须重算 signals。
 
     仓位/止损/阈值这类只影响交易循环的参数不在指纹里，所以普通参数搜索仍然是
-    「准备一次、多组复用」；只有动到选股模型（因子权重、策略集）才会重算。
+    「准备一次、多组复用」；只有动到选股模型（因子权重、策略集、ML seed / 门控）才会重算。
     """
     return (tuple(params.strategies or ()),
             tuple(sorted((params.factor_weights or {}).items())),
@@ -803,7 +861,14 @@ def _signals_key(params: PipelineParams) -> tuple:
             int(params.ml_label_horizon or 0),
             float(params.ml_blend if params.ml_blend is not None else -1.0),
             params.ml_model or "lightgbm",
-            bool(params.industry_neutral))
+            bool(params.industry_neutral),
+            int(params.ml_seed or 42),
+            bool(params.ml_strict_lookahead),
+            bool(params.ml_ic_gate),
+            bool(params.ml_ic_gate_segment),
+            int(params.ml_ic_gate_window or 400),
+            float(params.ml_ic_gate_thresh if params.ml_ic_gate_thresh is not None else 0.12),
+            int(params.ml_ic_gate_min_samples or 20))
 
 
 def _rank_score(
@@ -1002,17 +1067,9 @@ def _build_signals(prepared: dict, params: PipelineParams) -> dict[str, list[dic
 def _prepare_cached(params: PipelineParams) -> dict:
     """同一区间/股票池只准备一次（回归测试/参数搜索要跑多组参数）。"""
     global _PREPARED, _PREPARED_KEY
-    key = (
-        params.start_date, params.end_date, params.universe_size,
-        tuple(params.board_prefixes or ()),
-        # A-minus：ml_pred 依赖评分模式，必须纳入缓存键，否则 ML 方案会复用
-        # 首个（default）方案的 prepared 而静默回退到 14 因子。模型/中性化同理。
-        params.scoring_mode or "factors",
-        int(params.ml_label_horizon or 0),
-        float(params.ml_blend if params.ml_blend is not None else -1.0),
-        params.ml_model or "lightgbm",
-        bool(params.industry_neutral),
-    )
+    # A-minus 起 ml_pred 依赖评分模式/模型/中性化；2026-11-14 起还依赖 seed、
+    # 严格零前视与 IC 门控参数。任何一项变化都必须重建 prepared，否则会静默复用旧信号。
+    key = _prepared_key(params)
     if _PREPARED is not None and _PREPARED_KEY == key:
         logger.info("复用已准备的K线与指标（%s ~ %s，Top%d）", *key[:3])
         # 命中缓存时 prepare/signals 两段整段跳过：把进度直接推到「扫描完成」，
@@ -2212,10 +2269,17 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
     # 历史列表里的「策略名」必须反映这次真正跑了什么。默认跟随实盘
     # auto_scan_strategies（A-Only 时只有量价共振2560）；显式传空数组才等于全部策略。
     _ran = tuple(params.strategies or ())
+    _gate = _gate_telemetry()
+    _thr = float(params.ml_ic_gate_thresh if params.ml_ic_gate_thresh is not None else 0.12)
+    _segment_use = bool(
+        params.ml_ic_gate_segment
+        and float(prepared.get("ml_oos_ic") or 0.0) >= _thr
+    )
+    _effective = _ml_effective(params, prepared)
     result = {
         "strategy": "、".join(_ran) if _ran else "全策略流水线",
-        # 打分层诊断：光看收益看不出「这次到底跑没跑 ML」——缺 lightgbm 或 OOS IC
-        # 不过线时会自动回退 14 因子，此时收益与基线一模一样。这里把真实生效状态标出来。
+        # 打分层诊断：光看收益看不出「这次到底跑没跑 ML」——缺 lightgbm、OOS IC
+        # 不过线或 IC 门控全回退时都会用 14 因子。这里把真实生效状态与门控遥测标出来。
         "ml_diagnostics": {
             "mode": params.scoring_mode or "factors",
             "model": params.ml_model or "lightgbm",
@@ -2223,10 +2287,19 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
             "industry_neutral": bool(params.industry_neutral),
             "oos_rank_ic": round(float(prepared.get("ml_oos_ic") or 0.0), 4),
             "pred_pairs": len(prepared.get("ml_pred") or {}),
-            "effective": (
-                params.scoring_mode in ("ml", "ml_blend")
-                and bool(prepared.get("ml_pred"))
-            ),
+            "effective": _effective,
+            "fallback": not _effective,
+            "ml_seed": int(params.ml_seed or 42),
+            "strict_lookahead": bool(params.ml_strict_lookahead),
+            "ic_gate": {
+                "rolling": bool(params.ml_ic_gate),
+                "segment": bool(params.ml_ic_gate_segment),
+                "thresh": _thr,
+                "window": int(params.ml_ic_gate_window or 400),
+                "min_samples": int(params.ml_ic_gate_min_samples or 20),
+                "segment_use": _segment_use,
+                **_gate,
+            },
         },
         # P1 上下文风险闸诊断：结果里必须能看出四项到底有没有生效、各拦了多少次。
         # 快照为空时子闸静默不触发（两侧一致），这里也能直接看出来，避免误判为"闸没用"。
@@ -2299,6 +2372,13 @@ def _simulate(prepared: dict, params: PipelineParams) -> dict:
             "ml_blend": params.ml_blend,
             "ml_require_ic": params.ml_require_ic,
             "industry_neutral": bool(params.industry_neutral),
+            "ml_seed": int(params.ml_seed or 42),
+            "ml_strict_lookahead": bool(params.ml_strict_lookahead),
+            "ml_ic_gate": bool(params.ml_ic_gate),
+            "ml_ic_gate_window": int(params.ml_ic_gate_window or 400),
+            "ml_ic_gate_thresh": float(params.ml_ic_gate_thresh if params.ml_ic_gate_thresh is not None else 0.12),
+            "ml_ic_gate_min_samples": int(params.ml_ic_gate_min_samples or 20),
+            "ml_ic_gate_segment": bool(params.ml_ic_gate_segment),
             "disable_limit_mask": bool(params.disable_limit_mask),
             # 做T（None/0/False = 关闭）：结果里必须能看到，否则无法判断某次回测到底开没开做T
             "t_active": bool(params.t_active),

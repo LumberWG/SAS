@@ -188,23 +188,51 @@ class Recommender:
         )
 
         # 线上 ML 打分（default_ml 实时版）：整批只构建一次，逐只查表。
-        # 仅在 settings.live_ml_scoring 时启用；失败/无信号则回退 14 因子（不影响本轮）。
+        # 截面池必须取与回测 universe_size 同源的 TopN 快照，不能只拿自选股排名，
+        # 否则「自选股内分位」与「TopN 内分位」不是同一个 score（#79 口径漂移）。
         ml_scores: dict[str, float] = {}
         if self.settings.live_ml_scoring:
+            watch_codes = [str(r["code"]) for r in watchlist]
             try:
                 from app.analysis.live_ml import get_live_ml_scores
+                from app.data.snapshot_store import snapshot_store
 
-                codes = [str(r["code"]) for r in watchlist]
+                snap = await asyncio.to_thread(snapshot_store.get_snapshot)
+                top_n = int(getattr(self.settings, "paper_pool_top_n", 0) or 0)
+                universe: list[tuple[str, float]] = []
+                if snap is not None and not snap.empty and {"code", "amount"} <= set(snap.columns):
+                    name_by_code = (
+                        dict(zip(snap["code"].astype(str), snap["name"].astype(str)))
+                        if "name" in snap.columns else {}
+                    )
+                    for row in snap.itertuples(index=False):
+                        code = str(getattr(row, "code", ""))
+                        name = name_by_code.get(code, "")
+                        if not code or not is_tradable(code, name)[0]:
+                            continue
+                        amt = float(getattr(row, "amount", 0) or 0)
+                        if amt != amt or amt <= 0:
+                            continue
+                        universe.append((code, amt))
+                universe.sort(key=lambda x: -x[1])
+                codes = [c for c, _ in (universe[:top_n] if top_n > 0 else universe)]
+                if not codes:
+                    codes = watch_codes
+                logger.info(
+                    "线上 ML 截面池：Top%d 候选 %d 只（自选 %d 只）",
+                    top_n, len(codes), len(watch_codes),
+                )
                 ml_scores = await asyncio.to_thread(get_live_ml_scores, codes)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("线上 ML 打分构建失败，本批回退 14 因子: %s", exc)
                 ml_scores = {}
             # 「这一轮到底跑没跑 ML」必须在日志里留痕：开关为 True 但无信号时
             # 行为与 14 因子基线完全一致，事后从结果分不出来（#79 的教训）。
+            covered = sum(1 for c in watch_codes if c in ml_scores)
             if ml_scores:
                 logger.info(
-                    "线上 ML 打分生效: %d/%d 只拿到截面分位，其余回退 14 因子",
-                    len(ml_scores), len(watchlist),
+                    "线上 ML 打分生效: 截面池 %d 只，自选覆盖 %d/%d",
+                    len(ml_scores), covered, len(watch_codes),
                 )
             else:
                 logger.warning(

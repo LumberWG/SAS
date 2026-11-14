@@ -74,6 +74,11 @@ BOARD_PREFIXES: dict[str, tuple[str, ...]] = {
 }
 
 
+def _date_key(value) -> str:
+    """统一日期字符串（去掉可能的时分秒），用于零前视比较。"""
+    return str(value).split(" ")[0]
+
+
 def board_of(code: str) -> str:
     """按代码前缀判定板块（行业映射缺失时的中性化兜底）。"""
     for board, prefixes in BOARD_PREFIXES.items():
@@ -224,10 +229,15 @@ def _prepare_samples(
     klines: dict[str, pd.DataFrame],
     date_set: set[str],
     horizon: int,
+    *,
+    label_before: str | None = None,
+    need_label: bool = True,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[str]]:
     """在 ``date_set`` 内、用 ``as-of`` 日及之前数据构造 (X, y, groups, codes)。
 
-    y = close[H] / close[0] - 1（H 日 forward return），允许用未来，属标签。
+    y = close[H] / close[0] - 1（H 日 forward return）。训练标签也允许用未来价格，
+    但 ``label_before`` 要求标签日**严格早于**段起始日 / 线上 ``as_of``，避免把待测区间
+    的价格泄漏进训练集。``need_label=False`` 用于预测 / 推理：只要当日特征，不要求 H 日后有标签。
     特征含 NaN（如 ma120 需 ≥120 根）的行直接丢弃。
     """
     Xrows: list[np.ndarray] = []
@@ -242,19 +252,26 @@ def _prepare_samples(
         dts = df["date"].values
         n = len(df)
         for i in range(n):
-            if dts[i] not in date_set:
+            feature_date = _date_key(dts[i])
+            if feature_date not in date_set:
                 continue
-            if i + horizon >= n:
-                continue
+            if need_label:
+                if i + horizon >= n:
+                    continue
+                label_date = _date_key(dts[i + horizon])
+                if label_before is not None and label_date >= label_before:
+                    continue
+                lab = close[i + horizon] / close[i] - 1.0
+                if not np.isfinite(lab):
+                    continue
+            else:
+                lab = float("nan")
             row = feats.iloc[i].to_numpy(dtype=float)
             if not np.all(np.isfinite(row)):
                 continue
-            lab = close[i + horizon] / close[i] - 1.0
-            if not np.isfinite(lab):
-                continue
             Xrows.append(row)
             ys.append(float(lab))
-            groups.append(str(dts[i]))
+            groups.append(feature_date)
             codes.append(code)
     if not Xrows:
         return np.empty((0, 0)), np.empty(0), np.empty(0, dtype=object), []
@@ -306,9 +323,11 @@ def _resolve_model(model: str) -> str:
 
 
 def _lgb_fit(X: np.ndarray, y: np.ndarray, num_leaves: int = 31,
-             learning_rate: float = 0.05, n_estimators: int = 200):
+             learning_rate: float = 0.05, n_estimators: int = 200,
+             seed: int = 42):
     import lightgbm as lgb
     dtrain = lgb.Dataset(X, y)
+    seed = int(seed)
     params = {
         "objective": "regression",
         "metric": "None",
@@ -319,7 +338,10 @@ def _lgb_fit(X: np.ndarray, y: np.ndarray, num_leaves: int = 31,
         "bagging_fraction": 0.8,
         "bagging_freq": 1,
         "verbose": -1,
-        "seed": 42,
+        "seed": seed,
+        "feature_fraction_seed": seed,
+        "bagging_seed": seed,
+        "data_random_seed": seed,
     }
     return lgb.train(params, dtrain, num_boost_round=int(n_estimators))
 
@@ -338,10 +360,15 @@ def purged_group_cv(
     alphas=DEFAULT_ALPHAS,
     model: str = "lightgbm",
     n_splits: int = 5,
+    seed: int = 42,
+    horizon: int = DEFAULT_HORIZON,
+    strict_lookahead: bool = True,
 ):
-    """时间序划分成 n_splits 折；每折训练用更早折、验证用本折（无重叠泄漏）。
+    """时间序划分成 n_splits 折；训练折与验证折之间留出 ``horizon`` 个交易日的 purge gap。
 
-    返回 (best_hparams, mean_oos_ic, per_fold_ics)。模型按 ``model`` 选 LightGBM 或 Ridge。
+    ``strict_lookahead=True`` 时，训练样本最晚特征日必须比验证折首日早至少 ``horizon``
+    个交易日，避免 H 日前向标签跨折重叠造成 OOS IC 乐观偏差。返回
+    (best_hparams, mean_oos_ic, per_fold_ics)；模型按 ``model`` 选 LightGBM 或 Ridge。
     """
     udates = np.array(sorted(set(groups.tolist())))
     if len(udates) < n_splits + 1:
@@ -349,6 +376,7 @@ def purged_group_cv(
     if n_splits < 1:
         return (None, 0.0, [])
     bounds = np.linspace(0, len(udates), n_splits + 1).astype(int)
+    purge_gap = max(0, int(horizon)) if strict_lookahead else 0
 
     if model == "lightgbm":
         hps = [dict(h) for h in LGB_GRID]
@@ -359,7 +387,8 @@ def purged_group_cv(
     for hp in hps:
         ics: list[float] = []
         for f in range(1, n_splits):
-            tr_g = set(udates[: bounds[f]].tolist())
+            tr_end = max(0, int(bounds[f]) - purge_gap)
+            tr_g = set(udates[:tr_end].tolist())
             va_g = set(udates[bounds[f]: bounds[f + 1]].tolist())
             tr = np.array([g in tr_g for g in groups])
             va = np.array([g in va_g for g in groups])
@@ -368,7 +397,7 @@ def purged_group_cv(
             Xtr_s, m, s = _standardize(X[tr])
             Xva_s, _, _ = _standardize(X[va], m, s)
             if model == "lightgbm":
-                mdl = _lgb_fit(Xtr_s, y[tr], **hp)
+                mdl = _lgb_fit(Xtr_s, y[tr], **hp, seed=seed)
                 pred = _lgb_pred(mdl, Xva_s)
             else:
                 w = _ridge_fit(Xtr_s, y[tr], hp["alpha"])
@@ -397,18 +426,22 @@ def build_ml_predictions(
     model: str = "lightgbm",
     industry_neutral: bool = False,
     industry_map_path=None,
+    seed: int = 42,
+    strict_lookahead: bool = True,
 ) -> tuple[dict[tuple[str, str], float], float]:
     """为单个回测段构建 ML 预测表。
 
     Args:
         klines: code -> 已加载的日线（含段前历史，建议 ≥ 320 根）。
         all_dates: 本段全部交易日（升序）。
-        segment_start: 段起始日；训练只用 < 该日的样本。
+        segment_start: 段起始日；训练特征日 < 该日，训练标签日也严格 < 该日。
         horizon: 标签前瞻天数。
         require_ic: OOS rank-IC 低于此值则视为无信号，返回空表（回退因子）。
         model: "lightgbm"（默认，不可用时自动回退 ridge）或 "ridge"。
         industry_neutral: True 时做行业内中性化（扣行业均值再排分位）。
         industry_map_path: 行业映射 csv 路径；None 用默认位置，缺失则板块中性兜底。
+        seed: LightGBM 随机种子，供多 seed 严格验收。
+        strict_lookahead: True 时启用标签 embargo 与 CV purge gap，默认开启。
 
     Returns:
         (ml_pred, oos_ic):
@@ -416,16 +449,24 @@ def build_ml_predictions(
           oos_ic = 走前 CV 的平均 OOS rank-IC（信号强度，供日志）。
     """
     resolved = _resolve_model(model)
-    train_set = {d for d in all_dates if d < segment_start}
-    pred_set = {d for d in all_dates if d >= segment_start}
+    segment_start = _date_key(segment_start)
+    dates = sorted({_date_key(d) for d in all_dates})
+    train_set = {d for d in dates if d < segment_start}
+    pred_set = {d for d in dates if d >= segment_start}
     if not train_set or not pred_set:
         return {}, 0.0
 
-    Xtr, ytr, gtr, _ = _prepare_samples(klines, train_set, horizon)
+    Xtr, ytr, gtr, _ = _prepare_samples(
+        klines, train_set, horizon,
+        label_before=segment_start if strict_lookahead else None,
+    )
     if Xtr.shape[0] < 200:
         return {}, 0.0
 
-    best = purged_group_cv(Xtr, ytr, gtr, alphas=alphas, model=resolved, n_splits=n_splits)
+    best = purged_group_cv(
+        Xtr, ytr, gtr, alphas=alphas, model=resolved, n_splits=n_splits,
+        seed=seed, horizon=horizon, strict_lookahead=strict_lookahead,
+    )
     if best[0] is None:
         return {}, 0.0
     hp, oos_ic, _ = best
@@ -436,14 +477,14 @@ def build_ml_predictions(
     # 终训：用全部训练样本
     Xtr_s, m, s = _standardize(Xtr)
     if resolved == "lightgbm":
-        mdl = _lgb_fit(Xtr_s, ytr, **hp)
+        mdl = _lgb_fit(Xtr_s, ytr, **hp, seed=seed)
         predict = lambda Xs: _lgb_pred(mdl, Xs)  # noqa: E731
     else:
         w = _ridge_fit(Xtr_s, ytr, hp["alpha"])
         predict = lambda Xs: Xs @ w  # noqa: E731
 
-    # 段内预测
-    Xva, yva, gva, codes = _prepare_samples(klines, pred_set, horizon)
+    # 段内预测：只用当日特征，不要求未来标签已存在（与线上 as_of 推理同口径）
+    Xva, _, gva, codes = _prepare_samples(klines, pred_set, horizon, need_label=False)
     if Xva.shape[0] == 0:
         return {}, float(oos_ic)
     Xva_s, _, _ = _standardize(Xva, m, s)
@@ -488,6 +529,7 @@ def _infer_samples(
     """
     Xrows: list[np.ndarray] = []
     codes: list[str] = []
+    as_of = _date_key(as_of)
     for code, df in klines.items():
         if len(df) < horizon + 20:
             continue
@@ -495,13 +537,10 @@ def _infer_samples(
         feats = alpha_features(df)
         arr = feats.to_numpy(dtype=float)
         # 取 <= as_of 的最后一根「特征全有限」的 bar：最新一根常有不完整量价
-        # （当日部分成交 / 零成交量）导致个别特征 NaN，回退到前一交易日即可，
-        # 对 15 日前向模型可忽略（回测预测日均为历史日，不受此影响）。
+        # （当日部分成交 / 零成交量）导致个别特征 NaN，回退到前一交易日即可。
         idx = None
         for j in range(len(df) - 1, -1, -1):
-            sd = str(dts[j])
-            if " " in sd:
-                sd = sd.split(" ")[0]
+            sd = _date_key(dts[j])
             if sd > as_of:
                 continue
             if np.all(np.isfinite(arr[j])):
@@ -525,42 +564,55 @@ def build_live_ml_predictions(
     model: str = "lightgbm",
     industry_neutral: bool = False,
     industry_map_path=None,
+    as_of: str | None = None,
+    seed: int = 42,
+    strict_lookahead: bool = True,
 ) -> tuple[dict[tuple[str, str], float], float]:
-    """线上实时推理版：用全历史训练，预测「最新交易日」(as_of) 的截面分位。
+    """线上实时推理版：用全历史训练，预测 ``as_of`` 当日的截面分位。
 
-    与 :func:`build_ml_predictions` 的唯一差异：预测日不要求有未来收益率标签
-    （今天没有未来标签），预测步改用 :func:`_infer_samples` 免标签取特征。
-    训练步完全一致（仍用历史有标签样本 + Purged Group CV 选参 + OOS IC 回退纪律），
-    因此与回测 ``default_ml`` 同模型、同行业中性、同信号纪律。
+    与 :func:`build_ml_predictions` 共用同一套特征 / 标签 / CV / 中性化 / 随机种子 /
+    零前视纪律；差异只在预测步用 :func:`_infer_samples` 免标签取特征。
+    ``as_of`` 由调用方显式传入，避免「K 线缓存里混进未来 bar」时静默改变预测日。
 
     Args:
         klines: code -> 已加载的日线（建议 ≥ 320 根；训练用 < as_of 的全部历史）。
+        as_of: 预测日；None 时退化为 klines 全局最新交易日。
+        seed: LightGBM 随机种子，与回测严格验收保持一致。
+        strict_lookahead: True 时启用标签 embargo 与 CV purge gap，默认开启。
 
     Returns:
         (ml_pred, oos_ic)：ml_pred[(code, as_of)] = 截面分位(0~100)，越高越看好；
         oos_ic = 走前 CV 的平均 OOS rank-IC。无信号（样本不足 / IC 过低）返回 ({}, 0.0)。
     """
     resolved = _resolve_model(model)
-    # 全局最新交易日作为预测日（每个 code 取 <= as_of 的最新 bar）
-    all_dates: set[str] = set()
-    for df in klines.values():
-        for d in df["date"].values:
-            sd = str(d)
-            if " " in sd:
-                sd = sd.split(" ")[0]
-            all_dates.add(sd)
+    all_dates = {
+        _date_key(d) for df in klines.values() for d in df["date"].values
+    }
     if not all_dates:
         return {}, 0.0
-    as_of = max(all_dates)
-    train_set = {d for d in all_dates if d < as_of}
+    as_of = _date_key(as_of) if as_of else max(all_dates)
+    # 显式截断到 as_of：即使调用方传入的 K 线缓存含未来 bar，也不参与特征/训练/推理。
+    klines = {
+        c: df.loc[df["date"].astype(str).str.split(" ").str[0] <= as_of].copy()
+        for c, df in klines.items()
+    }
+    klines = {c: df for c, df in klines.items() if not df.empty}
+    dates = sorted({d for d in all_dates if d <= as_of})
+    train_set = {d for d in dates if d < as_of}
     if not train_set:
         return {}, 0.0
 
-    Xtr, ytr, gtr, _ = _prepare_samples(klines, train_set, horizon)
+    Xtr, ytr, gtr, _ = _prepare_samples(
+        klines, train_set, horizon,
+        label_before=as_of if strict_lookahead else None,
+    )
     if Xtr.shape[0] < 200:
         return {}, 0.0
 
-    best = purged_group_cv(Xtr, ytr, gtr, alphas=alphas, model=resolved, n_splits=n_splits)
+    best = purged_group_cv(
+        Xtr, ytr, gtr, alphas=alphas, model=resolved, n_splits=n_splits,
+        seed=seed, horizon=horizon, strict_lookahead=strict_lookahead,
+    )
     if best[0] is None:
         return {}, 0.0
     hp, oos_ic, _ = best
@@ -570,7 +622,7 @@ def build_live_ml_predictions(
 
     Xtr_s, m, s = _standardize(Xtr)
     if resolved == "lightgbm":
-        mdl = _lgb_fit(Xtr_s, ytr, **hp)
+        mdl = _lgb_fit(Xtr_s, ytr, **hp, seed=seed)
         predict = lambda Xs: _lgb_pred(mdl, Xs)  # noqa: E731
     else:
         w = _ridge_fit(Xtr_s, ytr, hp["alpha"])

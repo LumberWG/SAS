@@ -355,7 +355,7 @@ SETTINGS_SYSTEM_HIDDEN: frozenset[str] = frozenset({
     # 选股 + 交易统一板块（原在「交易执行 → 股票池过滤」）
     "twin_t_boards",
     # 选股与自选组
-    "factor_buy_threshold", "factor_sell_threshold", "live_ml_scoring",
+    "factor_buy_threshold", "factor_sell_threshold", "live_ml_scoring", "live_ml_industry_neutral",
     "auto_watch_enabled", "auto_watch_top_n", "focus_top_n",
     "auto_scan_scope", "intraday_analysis_interval",
     # 创业板底部反转选股口径（不含 unified_risk_* 风险压仓项，后者仍留在系统设置）
@@ -747,6 +747,7 @@ _SHORT_LABELS: dict[str, str] = {
     "paper_sim_capital": "账本本金",
     "intraday_analysis_interval": "盘中分析间隔",
     "live_ml_scoring": "线上ML打分",
+    "live_ml_industry_neutral": "ML行业中性",
     # ---- 入场护栏提示阈值 ----
     "entry_guard_gap_threshold": "高开提示阈值",
     "entry_guard_spike_threshold": "冲高提示阈值",
@@ -1235,7 +1236,7 @@ def selection_settings_overview() -> dict:
             "选股与自选",
             "评分阈值、打分引擎、盘后自选/关注、盘后选股范围、盘中分析间隔",
             (
-                "factor_buy_threshold", "factor_sell_threshold", "live_ml_scoring",
+                "factor_buy_threshold", "factor_sell_threshold", "live_ml_scoring", "live_ml_industry_neutral",
                 "auto_watch_enabled", "auto_watch_top_n", "focus_top_n",
                 "auto_scan_scope", "intraday_analysis_interval",
             ),

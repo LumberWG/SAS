@@ -362,7 +362,7 @@ def _defaults_payload() -> dict:
         "ml_label_horizon": 15,
         "ml_blend": 0.5,
         "ml_require_ic": 0.0,
-        "industry_neutral": False,
+        "industry_neutral": bool(getattr(s, "live_ml_industry_neutral", True)),
         "disable_limit_mask": False,
         # ---- P1 上下文风险闸：逐项 1:1 跟随实盘 Settings.paper_ctx_* ----
         # 绝不写死：用户改系统设置里任一项（或回测页落盘改回来），回测默认必须同步。

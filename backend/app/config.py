@@ -405,6 +405,9 @@ class Settings(BaseSettings):
     # 直接证据是 #82：`ml_lgb` 18 段配对中位 +4.55pp（>3.5pp 线）、最差段 −11.44%→−5.07%。
     # 设置页改这一项**立即生效**（就地改 Settings 单例），不需要重启。
     live_ml_scoring: bool = False
+    # ML 行业中性化：与回测 industry_neutral 双向绑定，避免两端口径漂移。
+    # 默认 True（沿用此前线上固定 True 的行为）；关闭则按全市场截面排序。
+    live_ml_industry_neutral: bool = True
     ml_regime_aware: bool = False        # 趋势市用 ML、震荡市回退 14 因子
     ml_regime_vol_cap: float = 0.25     # 趋势市判定：近20日年化波动率上限（超过=震荡市）
     ml_regime_ma_gap: float = 0.0       # 趋势市判定：MA20 须高于 MA60 的最小比例（0=MA20>MA60）

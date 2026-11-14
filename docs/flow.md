@@ -143,7 +143,7 @@
 **第 6 步 · 两个副产物。** 按技术面分取前 10 只自动加自选（`scan_auto_watch_limit`）；若开着「扫描命中直接交易」，同样按分取前 10（`paper_scan_autotrade_top_n`）送去生成建议。
 
 **第 7 步 · 14 因子打分。** 每个因子先给 −1 到 +1 的方向分，乘权重（合计 100）后求和得 `total`，落在 ±100。判级：`≥ +15` 判 buy，`≤ −15` 判 sell，其余 hold。
-开了 ML 打分（默认关）时此处被 ML 分位覆盖；但 `effective=false` 表示整段回退，结果与不开一模一样。
+开了 ML 打分（默认关）时此处被 ML 分位覆盖；线上 ML 以成交额 TopN 为截面、`live_ml_industry_neutral` 控制行业中性，训练按 `as_of` 显式截断（标签 embargo + CV purge），与回测共用 seed 与严格零前视。但 `effective=false` 表示整段回退，结果与不开一模一样。
 
 **第 8 步 · 第 2 次排序。** 一轮只取一次价格与情绪，并发分析后按 `score` 降序排名，写 `recommendations` 表。同批次「先删后插」，所以不会重复堆积——这就是去重的实现，没有额外冷却窗口。
 
@@ -409,6 +409,7 @@ stop_price    = 成本价 × (1 − stop_distance)          # 建仓时写死，
 | | `paper_scan_autotrade_overnight` | True | 盘后允许顺延到次日开盘 |
 | 打分 | `factor_buy_threshold` / `factor_sell_threshold` | +15 / −15 | 14 因子 total 判级线 |
 | | `live_ml_scoring` | **False**（config 默认）/ **线上 True**（2026-11-01 起，`#88`） | ML 替换因子分；`effective=false` 时整段回退，结果与基线相同（`#79`） |
+| | `live_ml_industry_neutral` | True | ML 行业中性；与回测 `industry_neutral` 双向绑定 |
 | 建议 | `intraday_analysis_interval` | 1 分钟 | 盘中分析频率 |
 | | `focus_top_n` | 10 | 明日关注数量 |
 | 队列 | `paper_tick_interval` | 5 秒 | 撮合频率 |
@@ -462,7 +463,7 @@ stop_price    = 成本价 × (1 − stop_distance)          # 建仓时写死，
 | # | 名称 | 函数 | 排序键 | 分数来源 / 区间 | 落库 |
 | --- | --- | --- | --- | --- | --- |
 | 1 | `signals.rank` | `rank_hits`（`screener/scanner.py`） | `(技术面 score, price)` 降序；名次按唯一 code 递增（同股多策略并列） | `score_technical`（`analysis/scoring.py`）**±8**：均线 ±2、MACD ±1.5、KDJ ±1.5、量比 ±1、乖离 ±1 | `signals.score / rank` |
-| 2 | 建议 `score` / `rank` | `compute_factors` 算 total；`analyze_watchlist` 排序 | `Recommendation.score` 降序，`rank` 从 1 起 | 14 因子加权 Σ（权重合计 100）→ **±100**；`live_ml_scoring=True` 时换成 ML 分位 0–100 | `recommendations.score / rank / detail` |
+| 2 | 建议 `score` / `rank` | `compute_factors` 算 total；`analyze_watchlist` 排序 | `Recommendation.score` 降序，`rank` 从 1 起 | 14 因子加权 Σ（权重合计 100）→ **±100**；`live_ml_scoring=True` 时换成成交额 TopN 截面的 ML 分位 0–100 | `recommendations.score / rank / detail` |
 | 3 | 交易队列顺序 + 仓位权重 | `LiveTrader.tick` + `PaperEngine.execute_recommendations` | 队列 `(action≠sell, −score)`；引擎内 `score` 降序，再按 `score × 档位系数(1.0/0.5)` 分钱 | 沿用第 2 次的 `score` | `paper_positions.score`、`paper_trades.reason` |
 
 辅助排序（不是「三排序」，但会出现在日志/界面里）：
